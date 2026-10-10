@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "genvyd-clients",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-09-01",
+
+  // Only reachable at clients.genvyd.com, which sits behind Cloudflare Access.
+  // The workers.dev address is switched off so nobody can skip the login.
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "clients.genvyd.com", "custom_domain": true }],
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "genvyd-clients",
+      // Paste the Database ID from Cloudflare > Storage & Databases > D1 here.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "vars": {
+    // Emails that see every client and the admin page. Comma separated.
+    "ADMIN_EMAILS": "behindthecamera7@gmail.com",
+    // Zero Trust team domain, e.g. "genvyd.cloudflareaccess.com".
+    "TEAM_DOMAIN": "",
+    // Application Audience (AUD) tag from the clients.genvyd.com Access app.
+    "POLICY_AUD": "",
+    // Tunnel hostname that serves the Synology folder, e.g. "https://nas-media.genvyd.com".
+    "MEDIA_ORIGIN": "https://nas-media.genvyd.com"
+  }
+
+  // Secrets (set in the Cloudflare dashboard, never in this file):
+  //   MEDIA_CLIENT_ID      Access service token client ID for the NAS hostname
+  //   MEDIA_CLIENT_SECRET  Access service token client secret
+}

@@ -1,0 +1,27 @@
+# Genvyd client portal: Synology side.
+# Container Manager > Project > Create, path /volume1/docker/genvyd-portal,
+# then paste this file. See SETUP.md, step 4.
+#
+# Nothing here opens a port on your router. nginx is only reachable by the
+# cloudflared container, and cloudflared dials out to Cloudflare.
+
+services:
+  files:
+    image: nginx:1.27-alpine
+    container_name: genvyd-files
+    restart: unless-stopped
+    volumes:
+      # Your client share, read only. The portal can never change or delete files.
+      - /volume1/GenvydClients:/srv:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: genvyd-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      # Paste the token from Cloudflare Zero Trust > Networks > Tunnels.
+      - TUNNEL_TOKEN=PASTE_TUNNEL_TOKEN_HERE
+    depends_on:
+      - files
