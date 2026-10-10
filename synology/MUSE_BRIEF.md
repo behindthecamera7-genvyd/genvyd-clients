@@ -1,42 +1,59 @@
-# Synology setup for the Genvyd client portal (brief for Muse)
+# Genvyd client portal setup (brief for Muse)
 
-You are setting up the Synology side of clients.genvyd.com on Anthony's DS920+
-(DSM 7.2.2). Do only what is listed here. Stop and ask Anthony before doing
-anything not on this list.
+You are setting up clients.genvyd.com for Anthony, working from his Mac mini,
+which is already signed in to the Synology (DS920+, DSM 7.2.2) and can sign in
+to Cloudflare. The code is already written and lives in the GitHub repo
+`behindthecamera7-genvyd/genvyd-clients`. Your job is the clicking: Synology,
+Cloudflare dashboard, and the final deploy.
+
+Work through Part A, stop at the checkpoint, then do Part B once Anthony says go.
 
 ## Ground rules
 
-- Do NOT change, move, rename or delete any existing shared folder, file, user,
-  permission, or package setting.
-- Do NOT open or forward any router ports, and do NOT enable QuickConnect,
-  DDNS, or the DSM reverse proxy for this. The Cloudflare Tunnel replaces all of that.
-- Do NOT publish any container ports (no `ports:` section in the compose file).
-- The client share is mounted READ ONLY into the containers. Keep `:ro`.
-- The tunnel token is a password. Do not paste it anywhere except the compose file
-  in step 3, and do not echo it back in your reply.
+- Do only what is listed. If a screen asks for something not covered here, stop and ask Anthony.
+- Never enter payment details or approve a charge. If Cloudflare asks for a card to
+  activate the Free Zero Trust plan, stop and ask Anthony to do that screen himself.
+- On the Synology: do NOT change, move, rename or delete any existing shared folder,
+  file, user, permission or package setting. Do NOT open router ports, enable
+  QuickConnect, DDNS, or the DSM reverse proxy for this. Do NOT add a `ports:`
+  section to the compose file. Keep the share mounted read only (`:ro`).
+- In Cloudflare: do NOT change or delete any existing DNS record, Worker, or
+  Access application. Only create the new items below. The genvyd.com marketing
+  site (Worker `genvyd-website`) must not be touched.
+- Secrets: the **tunnel token** and the **service token Client Secret** are passwords.
+  Paste them only into the exact places named below. Never put them in a chat
+  message, a file, GitHub, or your report.
 
-## Needed from Anthony before step 3
+## Part A
 
-The **Cloudflare Tunnel token** (Cloudflare Zero Trust > Networks > Tunnels >
-genvyd-nas, the long value after `--token`). If you do not have it, do steps 1
-and 2, then stop and ask for it.
+### A1. Create the client share (Synology)
 
-## Step 1. Create the client share
+1. DSM > Control Panel > Shared Folder > Create.
+2. Name `GenvydClients`, Volume 1. Encryption off. Recycle bin on. Anthony's DSM
+   user gets Read/Write. No guest access.
+3. Inside it create `_Example Client/Sample Project/` (empty is fine).
+4. Confirm the path is `/volume1/GenvydClients`.
 
-1. Control Panel > Shared Folder > Create.
-2. Name `GenvydClients`, location Volume 1. Leave encryption off. Leave the
-   recycle bin on. Give Anthony's own DSM user Read/Write. Do not give guests access.
-3. Inside it create one example folder so the portal has something to list:
-   `GenvydClients/_Example Client/Sample Project/` (empty is fine).
+### A2. Turn on Cloudflare Zero Trust
 
-Confirm the path is exactly `/volume1/GenvydClients`.
+1. dash.cloudflare.com > **Zero Trust**. If it is not set up yet, choose the **Free** plan.
+2. Team name: `genvyd` (if taken, `genvyd-studio`).
+3. Note the **team domain**: `<team name>.cloudflareaccess.com`.
+4. Settings > Authentication: make sure **One-time PIN** is listed as a login method. Add it if not.
 
-## Step 2. Install Container Manager and stage the config
+### A3. Create the tunnel
 
-1. Package Center: install **Container Manager** if it is not already installed.
-2. File Station: in the `docker` shared folder (Container Manager creates it),
-   create the folder `genvyd-portal`.
-3. In `docker/genvyd-portal`, create a file named `nginx.conf` with exactly this content:
+1. Zero Trust > Networks > Tunnels > **Create a tunnel** > **Cloudflared**. Name `genvyd-nas`.
+2. On the install screen choose **Docker**. Copy the long value after `--token`.
+   Hold it for A5 only.
+3. Next, **Public hostname**: Subdomain `nas-media`, Domain `genvyd.com`,
+   Service type `HTTP`, URL `files:80`. Save.
+
+### A4. Stage the Synology config
+
+1. Package Center: install **Container Manager** if missing.
+2. File Station: in the `docker` shared folder, create `genvyd-portal`.
+3. In `docker/genvyd-portal` create `nginx.conf` with exactly:
 
 ```nginx
 # Read-only file server for the Genvyd client portal.
@@ -77,12 +94,11 @@ http {
 }
 ```
 
-## Step 3. Create the Container Manager project
+### A5. Run the containers (Synology)
 
-1. Container Manager > Project > Create.
-2. Project name `genvyd-portal`. Path: `/docker/genvyd-portal`.
-3. Source: **Create docker-compose.yml**. Paste exactly this, then replace
-   `PASTE_TUNNEL_TOKEN_HERE` with the tunnel token from Anthony:
+1. Container Manager > Project > Create. Name `genvyd-portal`, Path `/docker/genvyd-portal`.
+2. Source **Create docker-compose.yml**, paste exactly this, replacing
+   `PASTE_TUNNEL_TOKEN_HERE` with the token from A3:
 
 ```yaml
 # Genvyd client portal: Synology side.
@@ -114,19 +130,75 @@ services:
       - files
 ```
 
-4. Skip the web portal settings (no Web Station). Next, Done. Let it pull both images and start.
+3. Skip Web Station. Next, Done.
+4. Check: containers `genvyd-files` and `genvyd-tunnel` are **Running**, and in
+   Zero Trust > Networks > Tunnels, `genvyd-nas` shows **Healthy**.
 
-## Step 4. Check it worked
+### A6. Lock the Synology hostname to the portal
 
-1. Container Manager > Container: `genvyd-files` and `genvyd-tunnel` both **Running**.
-2. Open `genvyd-tunnel` > Log. Look for a line saying it registered a tunnel
-   connection. Errors mentioning an invalid token mean the token was pasted wrong.
-3. Open `genvyd-files` > Log. It should be quiet. "Permission denied" means the
-   share path is wrong.
-4. Report back to Anthony: both container states, and the last few tunnel log
-   lines with the token removed.
+1. Zero Trust > Access > Service Auth > Service Tokens > **Create**. Name
+   `portal-worker`, duration Non-expiring.
+2. The Client ID and Client Secret are shown once. Keep this tab open, or keep
+   them somewhere private, until B3. Do not report them.
+3. Access > Applications > **Add an application** > **Self-hosted**:
+   name `Genvyd NAS media`, domain `nas-media.genvyd.com`, policy name
+   `portal only`, Action **Service Auth**, Include **Service Token** = `portal-worker`. Save.
+4. Check: opening `https://nas-media.genvyd.com` in a browser is now refused. That is correct.
 
-## Not your job
+### A7. Create the database
 
-Everything in the Cloudflare dashboard (Zero Trust, tunnel hostname, Access apps,
-D1, Worker deploy) is handled by Anthony and Claude. Do not log in to Cloudflare.
+1. Cloudflare > Storage & Databases > D1 > **Create**. Name `genvyd-clients`.
+2. Note the **Database ID**.
+
+### A8. Put the login in front of clients.genvyd.com
+
+1. Zero Trust > Access > Applications > Add > **Self-hosted**:
+   - Name `Genvyd Client Review`, domain `clients.genvyd.com`
+   - Login methods: **One-time PIN** only
+   - Policy name `anyone with email`, Action **Allow**, Include **Everyone**
+     (The portal itself decides which client each email can see.)
+2. Save, reopen it, and note the **Application Audience (AUD) Tag**.
+
+## CHECKPOINT: report to Anthony and stop
+
+Report exactly these three values (they are not secrets):
+
+- Team domain (A2)
+- D1 Database ID (A7)
+- AUD tag (A8)
+
+Plus: container states, tunnel status (Healthy or not), and anything that did not
+go as written. Then wait. Anthony will pass the values to Claude, who updates the
+code, and Anthony will tell you to continue.
+
+## Part B (only after Anthony says go)
+
+### B1. Connect the repo
+
+1. Cloudflare > Workers & Pages > **Create** > **Import a repository**.
+2. Pick GitHub account `behindthecamera7-genvyd`, repo `genvyd-clients`.
+3. Project name `genvyd-clients`. Build command: leave empty.
+   Deploy command: `npm run deploy`. Root directory: `/`.
+4. Deploy. The custom domain clients.genvyd.com is created automatically.
+   If the build log shows an error, copy the last 30 lines of the log for Anthony and stop.
+
+### B2. Check the domain
+
+Worker `genvyd-clients` > Settings > Domains & Routes should list `clients.genvyd.com`.
+
+### B3. Add the two secrets
+
+Worker `genvyd-clients` > Settings > Variables and Secrets > Add, type **Secret**:
+
+- `MEDIA_CLIENT_ID` = Client ID from A6
+- `MEDIA_CLIENT_SECRET` = Client Secret from A6
+
+Save and deploy.
+
+### B4. Test
+
+1. Open `https://clients.genvyd.com`. Enter `behindthecamera7@gmail.com`. Anthony
+   gets the code by email; ask him for it or let him finish the login.
+2. Click **Admin**. The "Pick their Synology folder" list should show `_Example Client`.
+   If a red Synology error shows instead, report the exact message.
+3. Report back to Anthony. Do not add real clients; Anthony does that.
