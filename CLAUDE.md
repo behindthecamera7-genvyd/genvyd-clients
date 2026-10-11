@@ -58,7 +58,7 @@ it off on their projects page.
 
 `welcomeEmail()` / `sendWelcome()` in worker.ts. Adding a new login (`POST /api/admin/members`)
 sends it automatically when client email is on (`CLIENT_NOTIFY_FROM` + `RESEND_API_KEY`),
-reply-to is NOTIFY_TO, and stamps `members.welcomed_at` (migration 0006). Admin page:
+reply-to is CLIENT_REPLY_TO (anthony@genvyd.com; new-work alerts use it too), and stamps `members.welcomed_at` (migration 0006). Admin page:
 Send/Resend welcome, Copy invite (`GET /api/admin/welcome-text`, for pasting into his own
 email while client email is off), and Preview welcome email (sent to NOTIFY_TO via
 NOTIFY_FROM, which is `Genvyd <alerts@notify.genvyd.com>` on the Resend-verified subdomain). Steps reference Cloudflare Access's

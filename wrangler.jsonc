@@ -43,8 +43,10 @@
     "NOTIFY_FROM": "Genvyd <alerts@notify.genvyd.com>",
     "PORTAL_URL": "https://clients.genvyd.com",
     // Welcome and "new work" emails to clients, from the Resend-verified subdomain
-    // notify.genvyd.com. Replies go to NOTIFY_TO. Empty = client emails off.
-    "CLIENT_NOTIFY_FROM": "Genvyd <studio@notify.genvyd.com>"
+    // notify.genvyd.com. Empty = client emails off.
+    "CLIENT_NOTIFY_FROM": "Genvyd <studio@notify.genvyd.com>",
+    // Where clients' replies to those emails go.
+    "CLIENT_REPLY_TO": "anthony@genvyd.com"
   },
 
   // Checks for new client activity every 15 minutes and emails a digest.

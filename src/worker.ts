@@ -20,6 +20,7 @@ export interface Env {
   MEDIA_CLIENT_ID?: string;
   MEDIA_CLIENT_SECRET?: string;
   NOTIFY_TO?: string;
+  CLIENT_REPLY_TO?: string;
   NOTIFY_FROM?: string;
   PORTAL_URL?: string;
   RESEND_API_KEY?: string;
@@ -1179,8 +1180,7 @@ async function sendWelcome(env: Env, slug: string, email: string): Promise<{ sen
   const c = await env.DB.prepare("SELECT name FROM clients WHERE slug = ?").bind(slug).first<{ name: string }>();
   if (!c) throw new HttpError(404, "No such client.");
   const w = welcomeEmail(env, c.name, email);
-  const replyTo = (env.NOTIFY_TO || env.ADMIN_EMAILS || "").split(",")[0]?.trim() || undefined;
-  await sendEmail(env, w.subject, w.html, w.text, { to: [email], from: env.CLIENT_NOTIFY_FROM, replyTo });
+  await sendEmail(env, w.subject, w.html, w.text, { to: [email], from: env.CLIENT_NOTIFY_FROM, replyTo: clientReplyTo(env) });
   await env.DB.prepare("UPDATE members SET welcomed_at = ? WHERE client_slug = ? AND email = ?").bind(now(), slug, email).run();
   return { sent: true };
 }
@@ -1198,6 +1198,11 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "
 function itemLink(env: Env, slug: string, path: string) {
   const base = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
   return `${base}/#/c/${encodeURIComponent(slug)}/i/${encodeURIComponent(path)}`;
+}
+
+// Where client replies go (welcome and new-work emails). Falls back to NOTIFY_TO.
+function clientReplyTo(env: Env) {
+  return (env.CLIENT_REPLY_TO || env.NOTIFY_TO || env.ADMIN_EMAILS || "").split(",")[0]?.trim() || undefined;
 }
 
 async function sendEmail(env: Env, subject: string, html: string, text: string, opts: { to?: string[]; from?: string; replyTo?: string } = {}) {
@@ -1416,7 +1421,7 @@ async function runClientAlerts(env: Env) {
       html += `<p style="color:#888;font-size:12px;margin-top:24px">You get this because you have access to ${esc(c.name)} on clients.genvyd.com. To stop these emails, open the portal and switch off "Email me when there is new work".</p></div>`;
       text += `\nSee what's new: ${open}\nTo stop these emails, switch off "Email me when there is new work" in the portal.\n`;
       try {
-        await sendEmail(env, subject, html, text, { to, from: env.CLIENT_NOTIFY_FROM });
+        await sendEmail(env, subject, html, text, { to, from: env.CLIENT_NOTIFY_FROM, replyTo: clientReplyTo(env) });
       } catch (err) {
         console.error("client alert failed", slug, err);
         continue; // leave them pending, retry next run
