@@ -351,7 +351,8 @@
           data.folders.map((f) =>
             h("a", { class: "card folder-card", href: `#/c/${enc(slug)}/f/${enc(f.path)}` },
               h("div", { class: "folder-icon", html: ICON_FOLDER }),
-              h("div", {}, h("h3", {}, f.name)),
+              h("div", { style: "flex:1;min-width:0" }, h("h3", {}, f.name)),
+              f.newCount ? h("span", { class: "new-badge" }, `${f.newCount} new`) : null,
             ),
           ),
         ),
@@ -360,7 +361,22 @@
 
     if (data.items.length) {
       if (data.folders.length) parts.push(h("div", { style: "height:28px" }));
-      parts.push(mediaBrowser(data.items, { tileFn: (it) => tile(slug, it) }));
+      parts.push(mediaBrowser(data.items, { tileFn: (it) => tile(slug, it), slug }));
+    }
+
+    if (!dir && !state.me.admin && state.me.clientAlertsEnabled && slug in (state.me.alerts || {})) {
+      const box = h("input", {
+        type: "checkbox",
+        checked: state.me.alerts[slug],
+        onchange: async () => {
+          try {
+            const r = await api("POST", "/api/me/alerts", { client: slug, on: box.checked });
+            state.me.alerts[slug] = r.on;
+            toast(r.on ? "You will get an email when there is new work." : "New-work emails are off.");
+          } catch (err) { toast(err.message); box.checked = !box.checked; }
+        },
+      });
+      parts.push(h("label", { class: "check alerts-toggle" }, box, "Email me when there is new work"));
     }
 
     if (!data.folders.length && !data.items.length) {
@@ -389,9 +405,9 @@
   ];
   const STATUS_ORDER = { pending: 0, changes: 1, approved: 2 };
 
-  function mediaBrowser(items, { tileFn, emptyText }) {
+  function mediaBrowser(items, { tileFn, emptyText, slug }) {
     const prefs = loadPrefs();
-    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null };
+    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null, seen: "all" };
     const root = h("div", { class: "browser" });
     items.forEach((it, i) => (it._i = i));
 
@@ -414,7 +430,11 @@
 
     function render() {
       savePrefs({ type: st.type, sort: st.sort });
-      const base = items.filter((it) => (st.status === "all" || it.status === st.status) && (!st.tag || (it.tags || []).includes(st.tag)));
+      const base = items.filter((it) =>
+        (st.status === "all" || it.status === st.status) &&
+        (!st.tag || (it.tags || []).includes(st.tag)) &&
+        (st.seen === "all" || (st.seen === "new" ? !it.seen : it.seen)));
+      const unseenCount = items.filter((it) => !it.seen).length;
       const count = (k) => base.filter((it) => k === "all" || kindOfItem(it) === k).length;
 
       const typeTabs = h("div", { class: "seg" },
@@ -426,6 +446,31 @@
         [["all", "Any status"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"]].map(([v, l]) =>
           h("option", { value: v, selected: st.status === v }, l)),
       );
+      const seenSel = h("select", { class: "mini-select", "aria-label": "Viewed", onchange: (e) => { st.seen = e.target.value; render(); } },
+        [["all", "Viewed and new"], ["new", `New to you (${unseenCount})`], ["seen", `Viewed (${items.length - unseenCount})`]].map(([v, l]) =>
+          h("option", { value: v, selected: st.seen === v }, l)),
+      );
+      const markAll = unseenCount
+        ? h("button", {
+            class: "btn small",
+            title: "Mark everything here as viewed",
+            onclick: async () => {
+              const todo = items.filter((it) => !it.seen);
+              const groups = new Map();
+              for (const it of todo) {
+                const s = it.clientSlug || slug;
+                groups.set(s, [...(groups.get(s) || []), it.path]);
+              }
+              try {
+                for (const [s, paths] of groups) await api("POST", `/api/c/${enc(s)}/view`, { paths });
+                todo.forEach((it) => (it.seen = true));
+                state.listCache.clear();
+                toast("Marked as viewed.");
+                render();
+              } catch (err) { toast(err.message); }
+            },
+          }, "Mark all viewed")
+        : null;
       const sortSel = h("select", { class: "mini-select", "aria-label": "Sort", onchange: (e) => { st.sort = e.target.value; render(); } },
         SORTS.map(([v, l]) => h("option", { value: v, selected: st.sort === v }, l)),
       );
@@ -451,7 +496,7 @@
       }
 
       root.replaceChildren(
-        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, statusSel, sortSel)), tagRow, body].filter(Boolean),
+        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, markAll)), tagRow, body].filter(Boolean),
       );
     }
     render();
@@ -475,6 +520,7 @@
         media,
         it.kind === "video" ? h("div", { class: "play" }, h("span", { html: ICON_PLAY })) : null,
         h("span", { class: `pill ${it.status}` }, STATUS_LABEL[it.status]),
+        it.seen === false ? h("span", { class: "pill new" }, "NEW") : null,
       ),
       h("div", { class: "tile-meta" },
         h("div", { class: "tile-name", title: it.name }, it.name),
@@ -506,6 +552,13 @@
       return;
     }
     state.listCache.set(`${slug}|${dir}`, list);
+
+    // Opening an ad marks it as viewed for this person.
+    const cached = list.items.find((i) => i.path === path);
+    if (!cached || !cached.seen) {
+      api("POST", `/api/c/${enc(slug)}/view`, { path }).catch(() => {});
+      if (cached) cached.seen = true;
+    }
 
     const items = list.items;
     const idx = items.findIndex((i) => i.path === path);
@@ -761,7 +814,7 @@
       clientTabs(slug, "favorites"),
       h("div", { class: "page-head" }, h("h1", {}, "Your favorites")),
       data.items.length
-        ? mediaBrowser(data.items, { tileFn: (it) => tile(slug, it, true) })
+        ? mediaBrowser(data.items, { tileFn: (it) => tile(slug, it, true), slug })
         : h("div", { class: "card empty" }, h("h2", {}, "No favorites yet"),
             h("p", { class: "muted" }, "Open any ad and tap ♡ Favorite to keep it here.")),
     );
@@ -874,7 +927,7 @@
         adminTools,
       ),
       data.items.length
-        ? mediaBrowser(data.items, { tileFn: campTile })
+        ? mediaBrowser(data.items, { tileFn: campTile, slug })
         : h("div", { class: "card empty" }, h("h2", {}, "No ads picked yet"),
             h("p", { class: "muted" }, "Open any ad and choose this campaign under “Use in campaign”.")),
     );

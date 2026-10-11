@@ -114,3 +114,7 @@ behindthecamera7@gmail.com, create an API key, and add it to the Worker as the s
 `RESEND_API_KEY`. Then Admin > Email alerts > Send test email. The digest runs every
 15 minutes and only sends when clients did something (approvals, change requests,
 comments, favorites, campaign picks). Your own actions are never emailed to you.
+
+Client "new work" emails also need a verified sending subdomain in Resend (step 5 of
+`synology/EMAIL_SETUP.md`); until `CLIENT_NOTIFY_FROM` is set, clients still see NEW
+badges in the portal but get no email.

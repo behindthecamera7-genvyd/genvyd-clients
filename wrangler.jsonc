@@ -41,7 +41,10 @@
     // Until a sending domain is verified in Resend, keep onboarding@resend.dev
     // (Resend then only delivers to the email the Resend account was made with).
     "NOTIFY_FROM": "Genvyd Portal <onboarding@resend.dev>",
-    "PORTAL_URL": "https://clients.genvyd.com"
+    "PORTAL_URL": "https://clients.genvyd.com",
+    // "New work" emails to clients. Needs a sending domain verified in Resend
+    // (e.g. "Genvyd <studio@notify.genvyd.com>"). Empty = client emails off.
+    "CLIENT_NOTIFY_FROM": ""
   },
 
   // Checks for new client activity every 15 minutes and emails a digest.

@@ -220,3 +220,8 @@ label.check input { width: auto; }
 @media (min-width: 1100px) { .dash-cols { grid-template-columns: minmax(0, 1fr) 380px; } }
 .dash-h { margin: 8px 0 14px; }
 .feed-item.fresh { background: rgba(255, 42, 42, 0.06); }
+
+/* ---- new / viewed ------------------------------------------------------ */
+.thumb .pill.new { position: absolute; top: auto; bottom: 10px; left: 10px; right: auto; background: var(--accent); color: #fff; border-color: var(--accent); }
+.new-badge { flex: none; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--accent); color: #fff; font: 500 12px var(--mono); display: inline-flex; align-items: center; }
+.alerts-toggle { margin-top: 28px; }

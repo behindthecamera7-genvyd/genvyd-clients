@@ -36,8 +36,17 @@ file or report.
    first time; mark it "Not spam").
 3. Report back: whether the card says On and whether the test email arrived.
 
-## Not needed now
+## 5. Emails to clients about new work (needed for client alerts)
 
-Verifying a sending domain in Resend (so emails come from an @genvyd.com address)
-is optional. If Anthony wants it later, use a subdomain such as `notify.genvyd.com`
-so the DNS records never touch genvyd.com's existing email.
+Resend only lets the shared test address email Anthony himself. To email clients,
+verify a sending subdomain. Use a SUBDOMAIN so genvyd.com's existing email is never
+touched.
+
+1. Resend > **Domains** > **Add Domain** > `notify.genvyd.com`.
+2. Resend shows a few DNS records (TXT and MX, all on `notify.genvyd.com` or names
+   under it). In Cloudflare > genvyd.com > **DNS** > **Records**, add each one exactly as
+   shown. Do NOT change or delete any existing record, and do not touch records for
+   the bare `genvyd.com`. For any record Cloudflare offers to proxy, choose **DNS only**.
+3. Back in Resend click **Verify**. Wait until it says Verified (can take a few minutes).
+4. Report the verified domain to Anthony. Claude then sets
+   `CLIENT_NOTIFY_FROM` to `Genvyd <studio@notify.genvyd.com>` in the code and pushes.

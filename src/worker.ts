@@ -23,6 +23,8 @@ export interface Env {
   NOTIFY_FROM?: string;
   PORTAL_URL?: string;
   RESEND_API_KEY?: string;
+  /** Sender for "new work" emails to clients. Must be on a domain verified in Resend. Empty = off. */
+  CLIENT_NOTIFY_FROM?: string;
   /** Hosts the admin "Import from links" tool may download from (comma separated). */
   IMPORT_HOSTS?: string;
   /** Local testing only: point the digest at a fake email API. */
@@ -312,6 +314,39 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// New / viewed tracking
+// ---------------------------------------------------------------------------
+
+async function baselineDone(env: Env, slug: string) {
+  return !!(await env.DB.prepare("SELECT 1 FROM notify_state WHERE key = ?").bind(`files_baseline:${slug}`).first());
+}
+
+/** Remember files the portal has seen. Files found before a client's first scan count as old. */
+async function registerFiles(env: Env, slug: string, paths: string[]) {
+  if (!paths.length) return;
+  const notified = (await baselineDone(env, slug)) ? 0 : 1;
+  const t = now();
+  for (let i = 0; i < paths.length; i += 50) {
+    await env.DB.batch(
+      paths.slice(i, i + 50).map((p) =>
+        env.DB.prepare("INSERT OR IGNORE INTO files (client_slug, path, first_seen, notified) VALUES (?, ?, ?, ?)").bind(slug, p, t, notified),
+      ),
+    );
+  }
+}
+
+async function markViewed(env: Env, slug: string, email: string, paths: string[]) {
+  const t = now();
+  for (let i = 0; i < paths.length; i += 50) {
+    await env.DB.batch(
+      paths.slice(i, i + 50).map((p) =>
+        env.DB.prepare("INSERT OR IGNORE INTO views (client_slug, path, email, viewed_at) VALUES (?, ?, ?, ?)").bind(slug, p, email, t),
+      ),
+    );
+  }
+}
+
 async function listDir(env: Env, user: User, c: Client, dir: string) {
   const segs = cleanPath(dir, true);
   const entries = await listNas(env, c.folder, segs);
@@ -324,6 +359,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
 
   const files = entries.filter((e) => e.type === "file");
   const paths = files.map((f) => prefix + f.name);
+  await registerFiles(env, c.slug, paths);
 
   // Pull all social data for this folder in one go.
   const like = prefix.replace(/[%_\\]/g, (m) => "\\" + m) + "%";
@@ -337,6 +373,28 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
     ).bind(c.slug, like),
     env.DB.prepare("SELECT path, tag FROM item_tags WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' ORDER BY tag").bind(c.slug, like),
   ]);
+  // Unviewed files under this folder (any depth), for "NEW" badges and folder counts.
+  const [unseenRows, knownRows] = await env.DB.batch([
+    env.DB.prepare(
+      "SELECT f.path FROM files f WHERE f.client_slug = ? AND f.path LIKE ? ESCAPE '\\' " +
+        "AND NOT EXISTS (SELECT 1 FROM views v WHERE v.client_slug = f.client_slug AND v.path = f.path AND v.email = ?)",
+    ).bind(c.slug, like, user.email),
+    env.DB.prepare("SELECT path FROM files WHERE client_slug = ? AND path LIKE ? ESCAPE '\\'").bind(c.slug, like),
+  ]);
+  const unseen = new Set((unseenRows.results as { path: string }[]).map((r) => r.path));
+  // Forget direct children that are no longer on the Synology (deleted or renamed in Finder).
+  const here = new Set(paths);
+  const gone = (knownRows.results as { path: string }[])
+    .map((r) => r.path)
+    .filter((p) => !p.slice(prefix.length).includes("/") && !here.has(p));
+  if (gone.length) {
+    await env.DB.batch(gone.slice(0, 90).map((p) => env.DB.prepare("DELETE FROM files WHERE client_slug = ? AND path = ?").bind(c.slug, p)));
+    gone.forEach((p) => unseen.delete(p));
+  }
+  for (const f of folders as { path: string; newCount?: number }[]) {
+    const pre = f.path + "/";
+    f.newCount = [...unseen].filter((p) => p.startsWith(pre)).length;
+  }
   const tags = groupTags(tagRows.results as { path: string; tag: string }[]);
   const status = new Map((statusRows.results as { path: string; status: string }[]).map((r) => [r.path, r.status]));
   const likes = new Map((likeRows.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
@@ -357,6 +415,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
         comments: comments.get(p)?.n ?? 0,
         openComments: comments.get(p)?.open ?? 0,
         tags: tags.get(p) ?? [],
+        seen: !unseen.has(p),
       };
     })
     .sort((a, b) => (b.mtime ? Date.parse(b.mtime) : 0) - (a.mtime ? Date.parse(a.mtime) : 0));
@@ -368,7 +427,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
 async function itemsFor(env: Env, user: User, c: Client, paths: string[]) {
   // D1 allows 100 bound values per query, so look paths up in chunks.
   const out = [];
-  for (let i = 0; i < paths.length; i += 90) out.push(...(await itemsChunk(env, user, c, paths.slice(i, i + 90))));
+  for (let i = 0; i < paths.length; i += 45) out.push(...(await itemsChunk(env, user, c, paths.slice(i, i + 45))));
   return out;
 }
 
@@ -385,6 +444,10 @@ async function itemsChunk(env: Env, user: User, c: Client, paths: string[]) {
     ).bind(c.slug, ...paths),
     env.DB.prepare(`SELECT path, tag FROM item_tags WHERE client_slug = ? AND path IN (${marks}) ORDER BY tag`).bind(c.slug, ...paths),
   ]);
+  const viewRows = await env.DB.prepare(`SELECT path FROM views WHERE client_slug = ? AND email = ? AND path IN (${marks})`)
+    .bind(c.slug, user.email, ...paths)
+    .all<{ path: string }>();
+  const viewed = new Set(viewRows.results.map((r) => r.path));
   const tags = groupTags(tagRows.results as { path: string; tag: string }[]);
   const status = new Map((statusRows.results as { path: string; status: string }[]).map((r) => [r.path, r.status]));
   const likes = new Map((likeRows.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
@@ -404,6 +467,7 @@ async function itemsChunk(env: Env, user: User, c: Client, paths: string[]) {
       comments: comments.get(p)?.n ?? 0,
       openComments: comments.get(p)?.open ?? 0,
       tags: tags.get(p) ?? [],
+      seen: viewed.has(p),
     };
   });
 }
@@ -510,7 +574,25 @@ async function route(req: Request, env: Env): Promise<Response> {
 
   // ---- me -----------------------------------------------------------------
   if (path === "/api/me" && method === "GET") {
-    return json({ email: user.email, admin: user.admin, clients: await clientsFor(env, user) });
+    const alerts = (
+      await env.DB.prepare("SELECT client_slug, email_alerts FROM members WHERE email = ?").bind(user.email).all<{ client_slug: string; email_alerts: number }>()
+    ).results;
+    return json({
+      email: user.email,
+      admin: user.admin,
+      clients: await clientsFor(env, user),
+      alerts: Object.fromEntries(alerts.map((a) => [a.client_slug, !!a.email_alerts])),
+      clientAlertsEnabled: !!(env.CLIENT_NOTIFY_FROM && env.RESEND_API_KEY),
+    });
+  }
+  if (path === "/api/me/alerts" && method === "POST") {
+    const body = await readBody(req);
+    const slug = String(body.client ?? "");
+    const r = await env.DB.prepare("UPDATE members SET email_alerts = ? WHERE client_slug = ? AND email = ?")
+      .bind(body.on ? 1 : 0, slug, user.email)
+      .run();
+    if (!r.meta.changes) throw new HttpError(404, "You are not on that client's list.");
+    return json({ ok: true, on: !!body.on });
   }
 
   // ---- favorites and campaigns ------------------------------------------
@@ -617,7 +699,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import|view)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
@@ -642,6 +724,8 @@ async function route(req: Request, env: Env): Promise<Response> {
       }
       if (res.status === 413) throw new HttpError(413, "The Synology says that file is too large.");
       if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status} to the upload.`);
+      await registerFiles(env, c.slug, [[...dir, name].join("/")]);
+      await markViewed(env, c.slug, user.email, [[...dir, name].join("/")]);
       return json({ ok: true, path: [...dir, name].join("/"), renamed: name !== wanted ? name : null });
     }
     if (action === "folder" && method === "POST") {
@@ -651,6 +735,13 @@ async function route(req: Request, env: Env): Promise<Response> {
       const name = folderName(body.name);
       const created = await makeNasFolder(env, user, [c.folder, ...parent, name]);
       return json({ ok: true, created, path: [...parent, name].join("/") });
+    }
+    if (action === "view" && method === "POST") {
+      // Record that this person opened these files ("New to you" turns into "Viewed").
+      const body = await readBody(req);
+      const list = (Array.isArray(body.paths) ? body.paths : [body.path]).slice(0, 500).map((p: unknown) => cleanPath(String(p ?? "")).join("/"));
+      await markViewed(env, c.slug, user.email, list);
+      return json({ ok: true, count: list.length });
     }
     if (action === "import" && method === "POST") {
       // Admin only: copy one finished file from Higgsfield's CDN straight onto the Synology.
@@ -687,6 +778,8 @@ async function route(req: Request, env: Env): Promise<Response> {
       if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status}.`);
 
       const path = [...dir, name].join("/");
+      await registerFiles(env, c.slug, [path]);
+      await markViewed(env, c.slug, user.email, [path]);
       const tags = (Array.isArray(body.tags) ? body.tags : String(body.tags ?? "").split(","))
         .map((t: unknown) => String(t).trim())
         .filter(Boolean)
@@ -728,7 +821,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status} to the rename.`);
 
       // Carry favorites, approvals, comments, tags, campaign picks and history over to the new name.
-      const tables = ["item_status", "likes", "comments", "item_tags", "activity"];
+      const tables = ["item_status", "likes", "comments", "item_tags", "activity", "files", "views"];
       await env.DB.batch([
         ...tables.map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE client_slug = ? AND path = ?`).bind(c.slug, newPath)),
         env.DB.prepare(
@@ -1003,14 +1096,14 @@ function itemLink(env: Env, slug: string, path: string) {
   return `${base}/#/c/${encodeURIComponent(slug)}/i/${encodeURIComponent(path)}`;
 }
 
-async function sendEmail(env: Env, subject: string, html: string, text: string) {
+async function sendEmail(env: Env, subject: string, html: string, text: string, opts: { to?: string[]; from?: string } = {}) {
   if (!env.RESEND_API_KEY) throw new HttpError(503, "Email is not set up yet (RESEND_API_KEY secret is missing).");
-  const to = (env.NOTIFY_TO || env.ADMIN_EMAILS || "").split(",").map((e) => e.trim()).filter(Boolean);
+  const to = opts.to ?? (env.NOTIFY_TO || env.ADMIN_EMAILS || "").split(",").map((e) => e.trim()).filter(Boolean);
   if (!to.length) throw new HttpError(503, "No NOTIFY_TO address is set.");
   const res = await fetch(env.RESEND_API_URL || "https://api.resend.com/emails", {
     method: "POST",
     headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ from: env.NOTIFY_FROM || "Genvyd Portal <onboarding@resend.dev>", to, subject, html, text }),
+    body: JSON.stringify({ from: opts.from || env.NOTIFY_FROM || "Genvyd Portal <onboarding@resend.dev>", to, subject, html, text }),
   });
   if (!res.ok) throw new HttpError(502, `The email service answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
 }
@@ -1092,9 +1185,149 @@ async function runDigest(env: Env) {
   return { sent: rows.length > 0, count: rows.length };
 }
 
+// ---------------------------------------------------------------------------
+// "New work" alerts to clients. Each run scans client folders on a small budget
+// (the free Workers plan allows about 50 outgoing requests and 50 database queries
+// per run, so it scans a slice per run and rotates through clients), records files it has not seen,
+// and emails each client's logins once a batch has settled for 10 minutes.
+// ---------------------------------------------------------------------------
+
+const SCAN_BUDGET = 20;
+const ALERT_CLIENTS_PER_RUN = 4;
+const SETTLE_MS = 10 * 60 * 1000;
+
+async function scanClients(env: Env) {
+  const clients = (
+    await env.DB.prepare(
+      "SELECT DISTINCT c.slug, c.name, c.folder FROM clients c JOIN members m ON m.client_slug = c.slug ORDER BY c.slug",
+    ).all<Client>()
+  ).results;
+  if (!clients.length || !env.MEDIA_ORIGIN) return;
+  const cur = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'scan_cursor'").first<{ value: string }>();
+  const start = Math.max(0, clients.findIndex((c) => c.slug > (cur?.value ?? "")));
+  const order = [...clients.slice(start), ...clients.slice(0, start)];
+  let budget = SCAN_BUDGET;
+  let last = cur?.value ?? "";
+  for (const c of order) {
+    if (budget < 2) break;
+    // Breadth first: client folder, its projects, then one more level, until the budget runs out.
+    const found: string[] = [];
+    let queue: string[][] = [[]];
+    let complete = true;
+    while (queue.length) {
+      const next: string[][] = [];
+      for (const segs of queue) {
+        if (budget <= 0) { complete = false; break; }
+        budget--;
+        let entries: NasEntry[];
+        try { entries = await listNas(env, c.folder, segs); } catch { complete = false; continue; }
+        for (const e of entries) {
+          if (e.type === "file") found.push([...segs, e.name].join("/"));
+          else if (segs.length < 3) next.push([...segs, e.name]);
+        }
+      }
+      if (!complete) break;
+      queue = next;
+    }
+    await registerFiles(env, c.slug, found);
+    if (complete && !(await baselineDone(env, c.slug))) {
+      // First full scan of this client: everything already there is old news.
+      await env.DB.batch([
+        env.DB.prepare("UPDATE files SET notified = 1 WHERE client_slug = ?").bind(c.slug),
+        env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES (?, ?)").bind(`files_baseline:${c.slug}`, String(now())),
+      ]);
+    }
+    last = c.slug;
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('scan_cursor', ?)").bind(last).run();
+}
+
+async function runClientAlerts(env: Env) {
+  await scanClients(env);
+  if (!env.CLIENT_NOTIFY_FROM || !env.RESEND_API_KEY) {
+    // Alerts are off: keep the backlog empty so switching them on later starts fresh.
+    await env.DB.prepare("UPDATE files SET notified = 1 WHERE notified = 0").run();
+    return;
+  }
+  const settled = now() - SETTLE_MS;
+  const pending = (
+    await env.DB.prepare(
+      "SELECT f.client_slug, f.path, f.first_seen FROM files f WHERE f.notified = 0 ORDER BY f.client_slug, f.path",
+    ).all<{ client_slug: string; path: string; first_seen: number }>()
+  ).results;
+  const bySlug = new Map<string, typeof pending>();
+  for (const r of pending) bySlug.set(r.client_slug, [...(bySlug.get(r.client_slug) ?? []), r]);
+  const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase());
+
+  let handled = 0;
+  for (const [slug, rows] of bySlug) {
+    if (handled >= ALERT_CLIENTS_PER_RUN) break;
+    // Wait until uploads have stopped for a while so one batch makes one email.
+    if (rows.some((r) => r.first_seen > settled)) continue;
+    handled++;
+    const c = await env.DB.prepare("SELECT slug, name, folder FROM clients WHERE slug = ?").bind(slug).first<Client>();
+    const to = c
+      ? (
+          await env.DB.prepare("SELECT email FROM members WHERE client_slug = ? AND email_alerts = 1").bind(slug).all<{ email: string }>()
+        ).results.map((r) => r.email).filter((e) => !admins.includes(e))
+      : [];
+    if (c && to.length) {
+      const base = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
+      const n = rows.length;
+      const byFolder = new Map<string, string[]>();
+      for (const r of rows) {
+        const folder = r.path.includes("/") ? r.path.slice(0, r.path.lastIndexOf("/")) : "";
+        byFolder.set(folder, [...(byFolder.get(folder) ?? []), r.path]);
+      }
+      const subject = `New from Genvyd: ${n} new file${n === 1 ? "" : "s"} for ${c.name}`;
+      let html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:620px"><p style="font-size:16px">Hi! There ${n === 1 ? "is 1 new file" : `are ${n} new files`} for <b>${esc(c.name)}</b> ready for you to look at.</p>`;
+      let text = `There ${n === 1 ? "is 1 new file" : `are ${n} new files`} for ${c.name} ready for you to look at.\n`;
+      let listed = 0;
+      for (const [folder, paths] of byFolder) {
+        const fl = `${base}/#/c/${encodeURIComponent(slug)}${folder ? "/f/" + encodeURIComponent(folder) : ""}`;
+        html += `<p style="margin:18px 0 6px;font-weight:bold"><a href="${esc(fl)}" style="color:#111">${esc(folder || c.name)}</a></p><ul style="margin:0;padding-left:18px">`;
+        text += `\n${folder || c.name}: ${fl}\n`;
+        for (const p of paths) {
+          if (listed >= 25) break;
+          listed++;
+          const name = p.split("/").pop() || p;
+          html += `<li style="margin:4px 0"><a href="${esc(itemLink(env, slug, p))}" style="color:#d4141a">${esc(name)}</a></li>`;
+          text += `  - ${name}\n`;
+        }
+        html += `</ul>`;
+      }
+      if (n > listed) {
+        html += `<p style="color:#555">And ${n - listed} more.</p>`;
+        text += `  ...and ${n - listed} more\n`;
+      }
+      const open = `${base}/#/c/${encodeURIComponent(slug)}`;
+      html += `<p style="margin-top:24px"><a href="${esc(open)}" style="background:#ff2a2a;color:#fff;padding:10px 16px;border-radius:999px;text-decoration:none">See what's new</a></p>`;
+      html += `<p style="color:#888;font-size:12px;margin-top:24px">You get this because you have access to ${esc(c.name)} on clients.genvyd.com. To stop these emails, open the portal and switch off "Email me when there is new work".</p></div>`;
+      text += `\nSee what's new: ${open}\nTo stop these emails, switch off "Email me when there is new work" in the portal.\n`;
+      try {
+        await sendEmail(env, subject, html, text, { to, from: env.CLIENT_NOTIFY_FROM });
+      } catch (err) {
+        console.error("client alert failed", slug, err);
+        continue; // leave them pending, retry next run
+      }
+    }
+    // Sent, or nobody to tell: either way these files are no longer pending.
+    for (let i = 0; i < rows.length; i += 50) {
+      await env.DB.batch(
+        rows.slice(i, i + 50).map((r) => env.DB.prepare("UPDATE files SET notified = 1 WHERE client_slug = ? AND path = ?").bind(slug, r.path)),
+      );
+    }
+  }
+}
+
 export default {
   async scheduled(_ctrl: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runDigest(env).catch((err) => console.error("digest failed", err)));
+    ctx.waitUntil(
+      (async () => {
+        await runDigest(env).catch((err) => console.error("digest failed", err));
+        await runClientAlerts(env).catch((err) => console.error("client alerts failed", err));
+      })(),
+    );
   },
 
   async fetch(req: Request, env: Env): Promise<Response> {

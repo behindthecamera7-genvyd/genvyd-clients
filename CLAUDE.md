@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 adds `campaigns` and `campaign_items`; 0003 adds `item_tags`. All additive.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts. All additive.
 
 ## Roles
 
@@ -40,6 +40,19 @@ emailed `activity.id` (stored in `notify_state`, migration 0004) via Resend
 (`RESEND_API_KEY` secret, `NOTIFY_TO`, `NOTIFY_FROM`). First run only initializes, so
 old history is never sent. A failed send does not advance the pointer. Comment text is
 HTML-escaped. Admin page has Send test email (`POST /api/admin/notify-test`).
+
+## New work: badges and client alerts
+
+Migration 0005: `files` (every file seen, `notified`), `views` (who opened what),
+`members.email_alerts`. Folder listings register files and prune vanished direct
+children; opening an ad posts `/view`. Tiles show NEW, folder cards show "N new",
+browser has a New to you / Viewed filter and Mark all viewed. Uploads and imports count
+as viewed for the uploader. Cron `runClientAlerts` scans client folders on a small
+budget (free plan: about 50 fetches and 50 D1 queries per run), first full scan is a
+baseline (no email), waits 10 min after the last new file, then emails each client's
+logins with alerts on (from `CLIENT_NOTIFY_FROM`, needs a Resend-verified domain; empty
+= off, and pending files are cleared so turning it on starts fresh). Clients can switch
+it off on their projects page.
 
 ## Browsing
 
