@@ -23,6 +23,8 @@ export interface Env {
   NOTIFY_FROM?: string;
   PORTAL_URL?: string;
   RESEND_API_KEY?: string;
+  /** Hosts the admin "Import from links" tool may download from (comma separated). */
+  IMPORT_HOSTS?: string;
   /** Local testing only: point the digest at a fake email API. */
   RESEND_API_URL?: string;
   /** Local development only (.dev.vars). Ignored whenever TEAM_DOMAIN is set. */
@@ -615,7 +617,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
@@ -649,6 +651,55 @@ async function route(req: Request, env: Env): Promise<Response> {
       const name = folderName(body.name);
       const created = await makeNasFolder(env, user, [c.folder, ...parent, name]);
       return json({ ok: true, created, path: [...parent, name].join("/") });
+    }
+    if (action === "import" && method === "POST") {
+      // Admin only: copy one finished file from Higgsfield's CDN straight onto the Synology.
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can import files.");
+      const body = await readBody(req);
+      let src: URL;
+      try { src = new URL(String(body.url ?? "")); } catch { throw new HttpError(400, "That is not a link."); }
+      const allowed = (env.IMPORT_HOSTS || "d8j0ntlcm91z4.cloudfront.net").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
+      const devHttp = !env.TEAM_DOMAIN && env.DEV_EMAIL && src.protocol === "http:"; // local testing only
+      if ((src.protocol !== "https:" && !devHttp) || !allowed.includes(src.hostname.toLowerCase())) {
+        throw new HttpError(400, `Only Higgsfield file links can be imported (${allowed.join(", ")}).`);
+      }
+      const dir = String(body.dir ?? "").split("/").map((x) => x.trim()).filter(Boolean).map(folderName);
+      const srcName = decodeURIComponent(src.pathname.split("/").pop() || "file");
+      const dot = srcName.lastIndexOf(".");
+      const ext = dot > 0 ? srcName.slice(dot).toLowerCase() : "";
+      let wanted = folderName(body.name || srcName);
+      if (ext && !wanted.toLowerCase().endsWith(ext)) wanted += ext;
+
+      const dl = await fetch(src.toString(), { redirect: "manual" }); // never follow a redirect off Higgsfield
+      if (!dl.ok || !dl.body) throw new HttpError(502, `Higgsfield answered ${dl.status} for that link. It may have expired.`);
+      const size = Number(dl.headers.get("content-length") || "0");
+      if (size > MAX_UPLOAD) throw new HttpError(413, `That file is ${Math.round(size / 1e6)} MB, over the 100 MB limit. Copy it in with Finder.`);
+
+      for (let i = 1; i <= dir.length; i++) await makeNasFolder(env, user, [c.folder, ...dir.slice(0, i)]);
+      const name = await freeName(env, [c.folder, ...dir], wanted);
+      const res = await nasWrite(env, user, "PUT", [c.folder, ...dir, name], {
+        body: dl.body,
+        contentType: dl.headers.get("content-type") || "application/octet-stream",
+      });
+      if (res.status === 403) {
+        throw new HttpError(502, "The Synology refused the file. Update nginx.conf on the Synology (see synology/SYNOLOGY_UPDATE.md).");
+      }
+      if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status}.`);
+
+      const path = [...dir, name].join("/");
+      const tags = (Array.isArray(body.tags) ? body.tags : String(body.tags ?? "").split(","))
+        .map((t: unknown) => String(t).trim())
+        .filter(Boolean)
+        .slice(0, 12);
+      if (tags.length) {
+        await env.DB.batch(
+          tags.map((t: string) =>
+            env.DB.prepare("INSERT OR IGNORE INTO item_tags (client_slug, path, tag, created_by, created_at) VALUES (?, ?, ?, ?, ?)")
+              .bind(c.slug, path, cleanTag(t), user.email, now()),
+          ),
+        );
+      }
+      return json({ ok: true, path, renamed: name !== wanted ? name : null });
     }
     if (action === "rename" && method === "POST") {
       if (!user.admin) throw new HttpError(403, "Only Genvyd can rename files.");

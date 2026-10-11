@@ -964,6 +964,46 @@
       );
     });
 
+    // Import from links: paste Higgsfield file links (one per line) and they are
+    // copied straight onto the Synology into the client's folder.
+    // Line format: link | folder | file name | tags   (only the link is required)
+    const impClient = h("select", {}, data.clients.map((c) => h("option", { value: c.slug }, c.name)));
+    const impText = h("textarea", { rows: "6", placeholder: "https://d8j0...cloudfront.net/....mp4 | October Ads | Ponytail hat hero | video, 9x16\nOne file per line. Folder, name and tags are optional." });
+    const impLog = h("div", { class: "upload-panel", hidden: true });
+    const impBtn = h("button", { class: "btn primary", onclick: runImport }, "Import");
+    const importCard = data.clients.length
+      ? h("div", { class: "card pad", style: "margin-bottom:20px" },
+          h("h2", { style: "margin-bottom:8px" }, "Import from links"),
+          h("p", { class: "muted", style: "margin:0 0 12px;font-size:14px" }, "Paste Higgsfield file links. Each one is copied onto the Synology into the client's folder. Nothing is ever overwritten."),
+          h("div", { style: "display:grid;gap:10px" }, impClient, impText, h("div", {}, impBtn)),
+          impLog)
+      : "";
+    async function runImport() {
+      const lines = impText.value.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+      if (!lines.length) return toast("Paste at least one link.");
+      const slug = impClient.value;
+      impBtn.disabled = true;
+      impLog.hidden = false;
+      impLog.replaceChildren();
+      let ok = 0;
+      for (const line of lines) {
+        const [url, dir = "", name = "", tags = ""] = line.split("|").map((x) => x.trim());
+        const status = h("span", { class: "mono muted" }, "copying…");
+        impLog.append(h("div", { class: "upload-row" }, h("span", { class: "tile-name" }, name || url.split("/").pop()), h("span", { class: "mono muted" }, dir || "(top)"), status));
+        try {
+          const r = await api("POST", `/api/c/${enc(slug)}/import`, { url, dir, name, tags });
+          status.textContent = r.renamed ? `saved as ${r.renamed}` : "done";
+          status.style.color = "var(--ok)";
+          ok++;
+        } catch (err) {
+          status.textContent = err.message;
+          status.style.color = "var(--accent)";
+        }
+      }
+      impBtn.disabled = false;
+      toast(`${ok} of ${lines.length} imported.`);
+    }
+
     // Email alerts: shows whether the digest is switched on, with a test button.
     const emailCard = h("div", { class: "card pad", style: "margin-bottom:20px" }, h("h2", {}, "Email alerts"), h("p", { class: "muted" }, "Checking…"));
     api("GET", "/api/admin/notify-status").then((st) => {
@@ -1004,6 +1044,7 @@
       h("div", { class: "admin" },
         h("div", {},
           h("div", { class: "card pad", style: "margin-bottom:20px" }, h("h2", { style: "margin-bottom:14px" }, "Add a client"), addClient),
+          importCard,
           emailCard,
           h("div", { class: "card" },
             clientBlocks.length ? clientBlocks : h("div", { class: "pad muted" }, "No clients yet."),

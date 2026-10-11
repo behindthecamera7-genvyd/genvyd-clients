@@ -60,6 +60,10 @@ Always render pages through `show()`, which drops null/false so they never print
   Every Synology write goes through `nasWrite()` in worker.ts, which refuses non-admin
   sessions with 403. The router refuses any verb other than GET/HEAD/POST/DELETE (DELETE is
   only used for D1 rows like comments), and /media/* is GET/HEAD only. Clients are view-only on files.
+  Admin "Import from links" (`POST /api/c/:slug/import`) streams a file from an allowed host
+  (`IMPORT_HOSTS`, default Higgsfield's CDN d8j0ntlcm91z4.cloudfront.net, https only, no
+  redirects followed) onto the Synology via `nasWrite` PUT, creating folders, never
+  overwriting, optional tags. Same 100 MB cap.
   Larger uploads (chunked, via a helper container) are a planned later step.
 - No em-dashes anywhere. Plain language; clients are small business owners.
 - Visual tokens match genvyd.com (`src/index.css` there). Accent is #ff2a2a.
