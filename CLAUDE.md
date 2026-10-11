@@ -24,6 +24,14 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   campaigns Genvyd created for them. They see tags but cannot change them. No writes to
   the Synology, no creating campaigns.
 
+## Studio dashboard
+
+Admin home (`#/`) is `viewDashboard()`: counts for new client activity since the last
+visit (per browser, `gv-last-seen`), changes requested, unanswered client comments (with
+Mark done) and approved work (filter by client; sort by Most favorited / In most
+campaigns). Data from `GET /api/admin/dashboard` plus `/api/admin/overview`. Clients
+never see it (403, and their home goes straight to their projects).
+
 ## Browsing
 
 `mediaBrowser()` in app.js powers folders, Favorites and campaign pages: Videos / Photos /

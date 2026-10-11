@@ -100,6 +100,7 @@
   // ---- views --------------------------------------------------------------
 
   async function viewHome() {
+    if (state.me.admin) return viewDashboard();
     const clients = state.me.clients;
     if (!state.me.admin && clients.length === 1) {
       location.replace(`#/c/${enc(clients[0].slug)}`);
@@ -122,6 +123,123 @@
       h("div", { class: "page-head" }, h("h1", {}, "Your projects")),
       h("div", { class: "grid" },
         clients.map((c) =>
+          h("a", { class: "card folder-card", href: `#/c/${enc(c.slug)}` },
+            h("div", { class: "folder-icon", html: ICON_FOLDER }),
+            h("div", {}, h("h3", {}, c.name), h("div", { class: "mono muted" }, "Open")),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ---- studio dashboard (admin home) -----------------------------------
+  const SEEN_KEY = "gv-last-seen";
+  async function viewDashboard() {
+    show(h("p", { class: "muted" }, "Loading your dashboard…"));
+    let dash, overview;
+    try {
+      [dash, overview] = await Promise.all([api("GET", "/api/admin/dashboard"), api("GET", "/api/admin/overview")]);
+    } catch (err) {
+      show(errorCard(err));
+      return;
+    }
+    let lastSeen = 0;
+    try { lastSeen = Number(localStorage.getItem(SEEN_KEY) || 0); localStorage.setItem(SEEN_KEY, String(Date.now())); } catch { /* private window */ }
+    const fromClients = overview.activity.filter((a) => a.email !== state.me.email);
+    const fresh = fromClients.filter((a) => a.created_at > lastSeen);
+
+    const where = (it) => it.clientName + (it.folder ? ` / ${it.folder}` : "");
+    const dashTile = (it) => tile(it.clientSlug, { ...it, folder: where(it) }, true);
+
+    const stat = (n, label, target, tone) =>
+      h("a", { class: "card stat" + (tone ? " " + tone : ""), href: target ? `#/` : null, onclick: (e) => { e.preventDefault(); document.getElementById(target)?.scrollIntoView({ behavior: "smooth" }); } },
+        h("div", { class: "stat-n" }, String(n)), h("div", { class: "mono muted" }, label));
+
+    // Unanswered client comments, newest first, with one-click "Mark done".
+    const commentRows = dash.openComments.map((cm) => {
+      const row = h("div", { class: "feed-item" },
+        h("div", { class: "mono muted" }, `${cm.clientName} · ${fmtDate(cm.created_at)}`),
+        h("div", {},
+          h("span", { style: "color:var(--bone)" }, cm.email), " on ",
+          h("a", { href: `#/c/${enc(cm.client_slug)}/i/${enc(cm.path)}` }, baseName(cm.path)),
+        ),
+        h("div", { class: "detail" }, cm.timecode != null ? h("span", { class: "tc" }, fmtTime(cm.timecode)) : null, cm.body),
+        h("div", { class: "comment-tools" },
+          h("a", { class: "linkish", href: `#/c/${enc(cm.client_slug)}/i/${enc(cm.path)}` }, "Open"),
+          h("button", {
+            class: "linkish",
+            onclick: async () => {
+              try { await api("POST", `/api/c/${enc(cm.client_slug)}/comments/${cm.id}/resolve`); row.remove(); toast("Marked done."); } catch (err) { toast(err.message); }
+            },
+          }, "Mark done"),
+        ),
+      );
+      return row;
+    });
+
+    // Approved work, filterable by client, with the usual sort and type tabs.
+    const clientsWithApproved = [...new Map(dash.approved.map((it) => [it.clientSlug, it.clientName])).entries()];
+    const approvedHolder = h("div");
+    function renderApproved(slug) {
+      const list = slug ? dash.approved.filter((it) => it.clientSlug === slug) : dash.approved;
+      approvedHolder.replaceChildren(
+        clientsWithApproved.length > 1
+          ? h("div", { class: "filters", style: "margin-bottom:12px" },
+              h("button", { class: "chip small-chip" + (!slug ? " active" : ""), onclick: () => renderApproved(null) }, "All clients"),
+              clientsWithApproved.map(([s, n]) => h("button", { class: "chip small-chip" + (slug === s ? " active" : ""), onclick: () => renderApproved(s) }, n)))
+          : "",
+        list.length
+          ? mediaBrowser(list, { tileFn: dashTile })
+          : h("div", { class: "card empty muted" }, "Nothing approved yet."),
+      );
+    }
+    renderApproved(null);
+
+    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to" };
+    const feed = fromClients.slice(0, 15).map((a) =>
+      h("div", { class: "feed-item" + (a.created_at > lastSeen ? " fresh" : "") },
+        h("div", { class: "mono muted" }, `${a.client_name || a.client_slug} · ${fmtDate(a.created_at)}${a.created_at > lastSeen ? " · NEW" : ""}`),
+        h("div", {},
+          h("span", { style: "color:var(--bone)" }, a.email), ` ${KIND[a.kind] || a.kind} `,
+          h("a", { href: `#/c/${enc(a.client_slug)}/i/${enc(a.path)}` }, baseName(a.path)),
+          a.kind.startsWith("campaign") && a.detail ? ` (${a.detail})` : "",
+        ),
+        a.kind === "comment" && a.detail ? h("div", { class: "detail" }, a.detail) : null,
+      ),
+    );
+
+    show(
+      h("div", { class: "page-head" }, h("h1", {}, "Studio dashboard"), h("a", { class: "btn small", href: "#/admin" }, "Clients and logins")),
+      h("div", { class: "stats" },
+        stat(fresh.length, "NEW SINCE LAST VISIT", "dash-activity", fresh.length ? "hot" : ""),
+        stat(dash.changes.length, "CHANGES REQUESTED", "dash-changes", dash.changes.length ? "warn" : ""),
+        stat(dash.openComments.length, "UNANSWERED COMMENTS", "dash-comments", ""),
+        stat(dash.approved.length, "APPROVED, READY TO USE", "dash-approved", "ok"),
+      ),
+      h("div", { class: "dash-cols" },
+        h("div", {},
+          h("h2", { id: "dash-changes", class: "dash-h" }, "Changes requested"),
+          dash.changes.length
+            ? h("div", { class: "grid" }, dash.changes.map(dashTile))
+            : h("div", { class: "card empty muted" }, "No open change requests."),
+          h("h2", { id: "dash-approved", class: "dash-h", style: "margin-top:36px" }, "Approved and ready to use"),
+          h("p", { class: "muted", style: "margin:-6px 0 14px" }, "Sort by Most favorited or In campaigns to see what the client likes best."),
+          approvedHolder,
+        ),
+        h("div", {},
+          h("div", { class: "card", id: "dash-comments" },
+            h("div", { class: "pad", style: "padding-bottom:8px" }, h("h2", {}, "Unanswered comments")),
+            h("div", { class: "feed" }, commentRows.length ? commentRows : h("div", { class: "feed-item muted" }, "All caught up.")),
+          ),
+          h("div", { class: "card", id: "dash-activity", style: "margin-top:20px" },
+            h("div", { class: "pad", style: "padding-bottom:8px" }, h("h2", {}, "Latest from clients")),
+            h("div", { class: "feed" }, feed.length ? feed : h("div", { class: "feed-item muted" }, "No client activity yet.")),
+          ),
+        ),
+      ),
+      h("h2", { class: "dash-h", style: "margin-top:40px" }, "Clients"),
+      h("div", { class: "grid" },
+        state.me.clients.map((c) =>
           h("a", { class: "card folder-card", href: `#/c/${enc(c.slug)}` },
             h("div", { class: "folder-icon", html: ICON_FOLDER }),
             h("div", {}, h("h3", {}, c.name), h("div", { class: "mono muted" }, "Open")),
@@ -267,6 +385,7 @@
     ["favorites", "Most favorited"],
     ["comments", "Most comments"],
     ["status", "Needs review first"],
+    ["campaigns", "In most campaigns"],
   ];
   const STATUS_ORDER = { pending: 0, changes: 1, approved: 2 };
 
@@ -288,6 +407,7 @@
         favorites: (a, b) => b.likes - a.likes || t(b) - t(a),
         comments: (a, b) => b.comments - a.comments || t(b) - t(a),
         status: (a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || t(b) - t(a),
+        campaigns: (a, b) => (b.campaigns?.length || 0) - (a.campaigns?.length || 0) || b.likes - a.likes || t(b) - t(a),
       }[st.sort];
       return [...list].sort(by);
     }
@@ -359,6 +479,7 @@
       h("div", { class: "tile-meta" },
         h("div", { class: "tile-name", title: it.name }, it.name),
         showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
+        it.campaigns && it.campaigns.length ? h("div", { class: "mono tile-folder", style: "color:var(--ok)" }, `In ${it.campaigns.join(", ")}`) : null,
         it.tags && it.tags.length ? h("div", { class: "tile-tags" }, it.tags.map((tg) => h("span", { class: "tag" }, `#${tg}`))) : null,
         h("div", { class: "tile-stats mono muted" },
           h("span", {}, `♥ ${it.likes}`),

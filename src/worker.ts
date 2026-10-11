@@ -780,6 +780,62 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (path.startsWith("/api/admin/")) {
     if (!user.admin) throw new HttpError(403, "Admins only.");
 
+    if (path === "/api/admin/dashboard" && method === "GET") {
+      // Everything Anthony needs to act on, across all clients.
+      const clients = (await env.DB.prepare("SELECT slug, name, folder FROM clients").all<Client>()).results;
+      const byClient = new Map(clients.map((c) => [c.slug, c]));
+      const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+      const adminMarks = admins.map(() => "?").join(",") || "''";
+
+      const [changes, approved, openComments, picks] = await env.DB.batch([
+        env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status WHERE status = 'changes' ORDER BY updated_at DESC LIMIT 200"),
+        env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status WHERE status = 'approved' ORDER BY updated_at DESC LIMIT 300"),
+        env.DB.prepare(
+          `SELECT id, client_slug, path, email, body, timecode, created_at FROM comments WHERE resolved = 0 AND email NOT IN (${adminMarks}) ORDER BY created_at DESC LIMIT 100`,
+        ).bind(...admins),
+        env.DB.prepare(
+          "SELECT c.client_slug, i.path, c.name FROM campaign_items i JOIN campaigns c ON c.id = i.campaign_id ORDER BY c.name",
+        ),
+      ]);
+
+      const pickMap = new Map<string, string[]>();
+      for (const r of picks.results as { client_slug: string; path: string; name: string }[]) {
+        const k = `${r.client_slug}|${r.path}`;
+        pickMap.set(k, [...(pickMap.get(k) ?? []), r.name]);
+      }
+
+      // Turn status rows into full ad cards (favorites, comments, tags), per client.
+      async function cards(rows: { client_slug: string; path: string; updated_by: string; updated_at: number }[]) {
+        const out = [];
+        const groups = new Map<string, typeof rows>();
+        for (const r of rows) if (byClient.has(r.client_slug)) groups.set(r.client_slug, [...(groups.get(r.client_slug) ?? []), r]);
+        for (const [slug, list] of groups) {
+          const c = byClient.get(slug)!;
+          const items = await itemsFor(env, user, c, list.map((r) => r.path));
+          const meta = new Map(list.map((r) => [r.path, r]));
+          for (const it of items) {
+            out.push({
+              ...it,
+              clientSlug: slug,
+              clientName: c.name,
+              statusBy: meta.get(it.path)?.updated_by,
+              statusAt: meta.get(it.path)?.updated_at,
+              campaigns: pickMap.get(`${slug}|${it.path}`) ?? [],
+            });
+          }
+        }
+        return out.sort((a, b) => (b.statusAt ?? 0) - (a.statusAt ?? 0));
+      }
+
+      return json({
+        changes: await cards(changes.results as never),
+        approved: await cards(approved.results as never),
+        openComments: (openComments.results as { client_slug: string }[])
+          .filter((r) => byClient.has(r.client_slug))
+          .map((r) => ({ ...r, clientName: byClient.get(r.client_slug)!.name })),
+      });
+    }
+
     if (path === "/api/admin/overview" && method === "GET") {
       const [clients, members, activity] = await env.DB.batch([
         env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
