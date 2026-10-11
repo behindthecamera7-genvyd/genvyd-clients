@@ -1,8 +1,9 @@
-# Synology update: folders and uploads from the portal (brief for Muse)
+# Synology update: folders, uploads and renaming from the portal (brief for Muse)
 
-The portal at clients.genvyd.com can now create folders and upload files (up to
-100 MB each) straight into the Synology. The Synology container needs two small
-changes. Do only these steps. If step 2 is already done, skip it.
+The portal at clients.genvyd.com can now create folders, upload files (up to
+100 MB each) and rename files straight on the Synology (Anthony's login only). The Synology container needs two small
+changes. Do only these steps. If you already applied an earlier version of this update, just do step 1 again
+with the new nginx.conf below, then step 3. Skip step 2 if it is already done.
 
 Ground rules: do not touch any other share, folder, file, user or permission.
 Do not open ports. Do not change the tunnel token already in the compose file.
@@ -46,13 +47,13 @@ http {
       autoindex_exact_size on;
       add_header Cache-Control "no-cache";
 
-      # The portal can create folders (MKCOL) and add new files (PUT, up to
-      # 100 MB, and it never overwrites). It cannot rename, move or delete
-      # anything: those methods are simply not enabled.
-      dav_methods PUT MKCOL;
+      # The portal (admin login only) can create folders (MKCOL), add new files
+      # (PUT, up to 100 MB) and rename files (MOVE, same folder, never
+      # overwriting). It cannot delete anything: DELETE is not enabled.
+      dav_methods PUT MKCOL MOVE;
       dav_access user:rw group:rw all:rw;   # new files and folders stay editable from Finder
       client_max_body_size 110m;
-      limit_except GET HEAD PUT MKCOL { deny all; }
+      limit_except GET HEAD PUT MKCOL MOVE { deny all; }
     }
   }
 }
@@ -82,7 +83,8 @@ Leave everything else, including `TUNNEL_TOKEN`, exactly as it is. Save.
 3. In Zero Trust > Networks > Tunnels, `genvyd-nas` should still be **Healthy**.
 4. Report back to Anthony.
 
-What this allows: nginx can create new folders and add new files inside
-GenvydClients when the portal asks (the portal never overwrites an existing file;
-it saves "name (2).mp4" instead). nginx still cannot rename, move or delete
-anything; those are switched off in nginx.conf.
+What this allows: nginx can create new folders, add new files and rename files
+inside GenvydClients when the portal asks. The portal never overwrites an existing
+file (uploads save "name (2).mp4"; a rename onto a taken name is refused), only
+renames within the same folder, and only for Anthony's admin login. Deleting is
+still switched off in nginx.conf.

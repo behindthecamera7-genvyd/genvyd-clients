@@ -90,13 +90,13 @@ http {
       autoindex_exact_size on;
       add_header Cache-Control "no-cache";
 
-      # The portal can create folders (MKCOL) and add new files (PUT, up to
-      # 100 MB, and it never overwrites). It cannot rename, move or delete
-      # anything: those methods are simply not enabled.
-      dav_methods PUT MKCOL;
+      # The portal (admin login only) can create folders (MKCOL), add new files
+      # (PUT, up to 100 MB) and rename files (MOVE, same folder, never
+      # overwriting). It cannot delete anything: DELETE is not enabled.
+      dav_methods PUT MKCOL MOVE;
       dav_access user:rw group:rw all:rw;   # new files and folders stay editable from Finder
       client_max_body_size 110m;
-      limit_except GET HEAD PUT MKCOL { deny all; }
+      limit_except GET HEAD PUT MKCOL MOVE { deny all; }
     }
   }
 }

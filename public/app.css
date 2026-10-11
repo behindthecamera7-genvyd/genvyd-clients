@@ -205,3 +205,4 @@ label.check input { width: auto; }
 .tag-x:hover { color: var(--accent); }
 .tag-add { display: flex; gap: 8px; margin-top: 10px; }
 .tag-input { height: 32px; padding: 0 12px; font-size: 13px; }
+.title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }

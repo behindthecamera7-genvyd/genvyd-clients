@@ -569,7 +569,10 @@
 
       side.replaceChildren(
         h("div", {},
-          h("h2", { style: "word-break:break-word" }, it.name),
+          h("div", { class: "title-row" },
+            h("h2", { style: "word-break:break-word" }, it.name),
+            state.me.admin ? h("button", { class: "linkish", onclick: renameFile, title: "Rename the file on the Synology too" }, "Rename") : null,
+          ),
           h("div", { style: "margin-top:10px" }, h("span", { class: `pill ${d.status}` }, STATUS_LABEL[d.status])),
         ),
         statusBtns,
@@ -584,6 +587,19 @@
         ),
       );
       list.scrollTop = list.scrollHeight;
+    }
+
+    async function renameFile() {
+      const dot = it.name.lastIndexOf(".");
+      const stem = dot > 0 ? it.name.slice(0, dot) : it.name;
+      const name = prompt(`New name for this file (the ${dot > 0 ? it.name.slice(dot) : ""} ending is kept):`, stem);
+      if (!name || !name.trim() || name.trim() === stem) return;
+      try {
+        const r = await api("POST", `/api/c/${enc(slug)}/rename`, { path, name });
+        state.listCache.delete(`${slug}|${dir}`);
+        toast(`Renamed to ${r.name}.`);
+        location.replace(`#/c/${enc(slug)}/i/${enc(r.path)}`);
+      } catch (err) { toast(err.message); }
     }
 
     async function act(p) {
@@ -827,7 +843,7 @@
       );
     });
 
-    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:" };
+    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
           h("div", { class: "feed-item" },

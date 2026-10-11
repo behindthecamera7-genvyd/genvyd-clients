@@ -17,7 +17,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
 
 ## Roles
 
-- Admin (`ADMIN_EMAILS`): everything, plus create folders, upload, tag ads, create/edit/delete
+- Admin (`ADMIN_EMAILS`): everything, plus create folders, upload, rename files, tag ads, create/edit/delete
   campaigns, resolve comments, manage clients and logins.
 - Client (members): view, play, download; favorite (the `likes` table, shown as Favorite),
   approve or request changes, comment, and add or remove any ad (approved or not) in
@@ -34,12 +34,15 @@ Always render pages through `show()`, which drops null/false so they never print
 
 - Fail closed. Never let `DEV_EMAIL` apply when `TEAM_DOMAIN` is set.
 - Paths: anything starting with `.`, `@` or `#` is hidden and rejected (`@eaDir` etc).
-- The portal's only writes to the Synology are creating folders (MKCOL) and adding new
-  files up to 100 MB (PUT, never overwriting; `freeName` picks "x (2).ext"). Admin only.
-  nginx allows GET, HEAD, PUT and MKCOL; renames, moves and deletes are disabled there.
+- The portal's only writes to the Synology are creating folders (MKCOL), adding new
+  files up to 100 MB (PUT, never overwriting; `freeName` picks "x (2).ext") and renaming
+  files in place (MOVE, same folder, Destination built by the Worker, `Overwrite: F`,
+  original extension kept). Admin only. A rename moves every D1 row keyed by the old
+  path (status, likes, comments, tags, activity, campaign picks) to the new path.
+  nginx allows GET, HEAD, PUT, MKCOL and MOVE; DELETE is disabled there.
   Every Synology write goes through `nasWrite()` in worker.ts, which refuses non-admin
-  sessions with 403. The router refuses any verb other than GET/HEAD/POST/DELETE, and
-  /media/* is GET/HEAD only. Clients are view-only on files.
+  sessions with 403. The router refuses any verb other than GET/HEAD/POST/DELETE (DELETE is
+  only used for D1 rows like comments), and /media/* is GET/HEAD only. Clients are view-only on files.
   Larger uploads (chunked, via a helper container) are a planned later step.
 - No em-dashes anywhere. Plain language; clients are small business owners.
 - Visual tokens match genvyd.com (`src/index.css` there). Accent is #ff2a2a.

@@ -209,16 +209,23 @@ function folderName(raw: unknown): string {
 async function nasWrite(
   env: Env,
   user: User,
-  method: "PUT" | "MKCOL",
+  method: "PUT" | "MKCOL" | "MOVE",
   segs: string[],
-  init: { body?: ReadableStream | null; contentType?: string } = {},
+  init: { body?: ReadableStream | null; contentType?: string; destination?: string[] } = {},
 ): Promise<Response> {
-  if (!user.admin) throw new HttpError(403, "Only Genvyd can add files or folders.");
-  if (method !== "PUT" && method !== "MKCOL") throw new HttpError(403, "Not allowed.");
+  if (!user.admin) throw new HttpError(403, "Only Genvyd can add, rename or organize files.");
+  if (method !== "PUT" && method !== "MKCOL" && method !== "MOVE") throw new HttpError(403, "Not allowed.");
   if (!env.MEDIA_ORIGIN) throw new HttpError(503, "File storage is not connected yet (MEDIA_ORIGIN is empty).");
   const base = env.MEDIA_ORIGIN.replace(/\/+$/, "");
   const url = `${base}/${segs.map(encodeURIComponent).join("/")}${method === "MKCOL" ? "/" : ""}`;
   const extra: Record<string, string> = init.contentType ? { "content-type": init.contentType } : {};
+  if (method === "MOVE") {
+    // Rename only: the destination is built by the Worker, never taken from the browser,
+    // and Overwrite: F makes nginx refuse to replace an existing file.
+    if (!init.destination) throw new HttpError(400, "Missing new name.");
+    extra["Destination"] = `${base}/${init.destination.map(encodeURIComponent).join("/")}`;
+    extra["Overwrite"] = "F";
+  }
   return fetch(url, { method, headers: originHeaders(env, extra), body: init.body ?? undefined });
 }
 
@@ -602,7 +609,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
@@ -636,6 +643,47 @@ async function route(req: Request, env: Env): Promise<Response> {
       const name = folderName(body.name);
       const created = await makeNasFolder(env, user, [c.folder, ...parent, name]);
       return json({ ok: true, created, path: [...parent, name].join("/") });
+    }
+    if (action === "rename" && method === "POST") {
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can rename files.");
+      const body = await readBody(req);
+      const segs = cleanPath(String(body.path ?? ""));
+      const oldName = segs[segs.length - 1];
+      const dir = segs.slice(0, -1);
+      // Keep the file type: "Hero cut" for "Hero ad v3.mp4" becomes "Hero cut.mp4".
+      const dot = oldName.lastIndexOf(".");
+      const ext = dot > 0 ? oldName.slice(dot) : "";
+      let newName = folderName(body.name);
+      if (ext && !newName.toLowerCase().endsWith(ext.toLowerCase())) newName += ext;
+      if (newName === oldName) return json({ ok: true, path: segs.join("/") });
+
+      const oldPath = segs.join("/");
+      const newPath = [...dir, newName].join("/");
+      const head = await fetch(originUrl(env, c.folder, [...dir, newName]), { method: "HEAD", headers: originHeaders(env) });
+      if (head.status !== 404) throw new HttpError(409, `There is already a file called "${newName}" in this folder.`);
+
+      const res = await nasWrite(env, user, "MOVE", [c.folder, ...segs], { destination: [c.folder, ...dir, newName] });
+      if (res.status === 412) throw new HttpError(409, `There is already a file called "${newName}" in this folder.`);
+      if (res.status === 404) throw new HttpError(404, "That file is no longer on the Synology.");
+      if (res.status === 403 || res.status === 405) {
+        throw new HttpError(502, "The Synology refused the rename. Update nginx.conf on the Synology (see synology/SYNOLOGY_UPDATE.md).");
+      }
+      if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status} to the rename.`);
+
+      // Carry favorites, approvals, comments, tags, campaign picks and history over to the new name.
+      const tables = ["item_status", "likes", "comments", "item_tags", "activity"];
+      await env.DB.batch([
+        ...tables.map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE client_slug = ? AND path = ?`).bind(c.slug, newPath)),
+        env.DB.prepare(
+          "DELETE FROM campaign_items WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)",
+        ).bind(newPath, c.slug),
+        ...tables.map((t) => env.DB.prepare(`UPDATE ${t} SET path = ? WHERE client_slug = ? AND path = ?`).bind(newPath, c.slug, oldPath)),
+        env.DB.prepare(
+          "UPDATE campaign_items SET path = ? WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)",
+        ).bind(newPath, oldPath, c.slug),
+      ]);
+      await logActivity(env, c.slug, newPath, user.email, "renamed", oldName);
+      return json({ ok: true, path: newPath, name: newName });
     }
     if (action === "tags" && method === "GET") {
       // Every tag used for this client, for suggestions and filters.
