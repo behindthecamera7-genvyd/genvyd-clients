@@ -75,6 +75,16 @@
     return h("div", { class: "crumbs" }, out);
   }
 
+  // Projects / Favorites / Campaigns switcher at the top of each client.
+  function clientTabs(slug, active) {
+    const tab = (key, label, href) => h("a", { class: "tab" + (active === key ? " active" : ""), href }, label);
+    return h("nav", { class: "tabs" },
+      tab("projects", "Projects", `#/c/${enc(slug)}`),
+      tab("favorites", "♥ Favorites", `#/c/${enc(slug)}/favorites`),
+      tab("campaigns", "Campaigns", `#/c/${enc(slug)}/campaigns`),
+    );
+  }
+
   // Lazy-load thumbnails so a big folder does not hammer the Synology at once.
   const lazy = new IntersectionObserver((entries) => {
     for (const e of entries) {
@@ -221,6 +231,7 @@
 
     const parts = [
       crumbs(data.client, dir),
+      dir ? null : clientTabs(slug, "projects"),
       h("div", { class: "page-head" },
         h("h1", {}, title),
         h("div", { class: "actions" }, data.items.length ? filterBar : null, newFolderBtn, uploadBtn),
@@ -256,7 +267,7 @@
     app.replaceChildren(...parts);
   }
 
-  function tile(slug, it) {
+  function tile(slug, it, showFolder) {
     const src = mediaUrl(slug, it.path);
     let media;
     if (it.kind === "image") {
@@ -276,6 +287,7 @@
       ),
       h("div", { class: "tile-meta" },
         h("div", { class: "tile-name", title: it.name }, it.name),
+        showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
         h("div", { class: "tile-stats mono muted" },
           h("span", {}, `♥ ${it.likes}`),
           h("span", {}, `${it.comments} comment${it.comments === 1 ? "" : "s"}`),
@@ -336,6 +348,44 @@
 
     const side = h("div", { class: "card side" });
 
+    // "Use in campaign" picker. Lives outside renderSide so it keeps its state.
+    const campBox = h("div", { class: "camp-box" });
+    async function loadCampaigns() {
+      try {
+        const r = await api("GET", `/api/c/${enc(slug)}/campaigns?path=${enc(path)}`);
+        if (!r.campaigns.length) {
+          campBox.replaceChildren(
+            h("div", { class: "mono muted" }, "USE IN CAMPAIGN"),
+            h("p", { class: "muted", style: "margin:6px 0 0;font-size:13px" },
+              state.me.admin ? "No campaigns yet. " : "No campaigns set up yet.",
+              state.me.admin ? h("a", { href: `#/c/${enc(slug)}/campaigns` }, "Create one") : null),
+          );
+          return;
+        }
+        campBox.replaceChildren(
+          h("div", { class: "mono muted" }, "USE IN CAMPAIGN"),
+          h("div", { class: "filters", style: "margin-top:8px" },
+            r.campaigns.map((cp) =>
+              h("button", {
+                class: "chip" + (cp.has ? " active" : ""),
+                title: cp.has ? "In this campaign. Click to take it out." : "Add to this campaign",
+                onclick: async () => {
+                  try {
+                    await api(cp.has ? "DELETE" : "POST", `/api/c/${enc(slug)}/campaigns/${cp.id}/items`, { path });
+                    toast(cp.has ? `Removed from ${cp.name}.` : `Added to ${cp.name}.`);
+                    loadCampaigns();
+                  } catch (err) { toast(err.message); }
+                },
+              }, `${cp.has ? "✓ " : "+ "}${cp.name}`),
+            ),
+          ),
+        );
+      } catch (err) {
+        campBox.replaceChildren(h("div", { class: "muted" }, err.message));
+      }
+    }
+    loadCampaigns();
+
     function renderSide(d) {
       const statusBtns = h("div", { class: "actions" },
         h("button", {
@@ -346,8 +396,8 @@
           class: "btn" + (d.status === "changes" ? " on-warn" : ""),
           onclick: () => setStatus(d.status === "changes" ? "pending" : "changes"),
         }, d.status === "changes" ? "Changes requested" : "Request changes"),
-        h("button", { class: "btn" + (d.liked ? " on-like" : ""), onclick: toggleLike, title: d.likers.join(", ") || "No likes yet" },
-          `${d.liked ? "♥" : "♡"} ${d.likes}`),
+        h("button", { class: "btn" + (d.liked ? " on-like" : ""), onclick: toggleLike, title: d.likers.length ? "Favorited by " + d.likers.map(who).join(", ") : "Save to your favorites" },
+          d.liked ? `♥ Favorited${d.likes > 1 ? " · " + d.likes : ""}` : `♡ Favorite${d.likes ? " · " + d.likes : ""}`),
       );
 
       const statusNote = d.statusBy
@@ -417,6 +467,7 @@
         ),
         statusBtns,
         statusNote,
+        campBox,
         h("div", { class: "mono muted" }, `COMMENTS (${d.comments.length})`),
         list,
         h("div", { class: "composer" },
@@ -446,6 +497,140 @@
     app.replaceChildren(
       crumbs(list.client, dir, it.name),
       h("div", { class: "viewer" }, h("div", {}, stage, navBar), side),
+    );
+  }
+
+  async function viewFavorites(slug) {
+    app.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    let data;
+    try {
+      data = await api("GET", `/api/c/${enc(slug)}/favorites`);
+    } catch (err) {
+      app.replaceChildren(errorCard(err));
+      return;
+    }
+    app.replaceChildren(
+      crumbs(data.client, "", "Favorites"),
+      clientTabs(slug, "favorites"),
+      h("div", { class: "page-head" }, h("h1", {}, "Your favorites")),
+      data.items.length
+        ? h("div", { class: "grid" }, data.items.map((it) => tile(slug, it, true)))
+        : h("div", { class: "card empty" }, h("h2", {}, "No favorites yet"),
+            h("p", { class: "muted" }, "Open any ad and tap ♡ Favorite to keep it here.")),
+    );
+  }
+
+  async function viewCampaigns(slug) {
+    app.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    let data;
+    try {
+      data = await api("GET", `/api/c/${enc(slug)}/campaigns`);
+    } catch (err) {
+      app.replaceChildren(errorCard(err));
+      return;
+    }
+    let creator = null;
+    if (state.me.admin) {
+      const nameIn = h("input", { placeholder: "Campaign name, e.g. Holiday 2026" });
+      const notesIn = h("input", { placeholder: "Notes for the client (optional), e.g. pick 3 to 5 ads" });
+      creator = h("form", {
+        class: "card pad camp-new",
+        onsubmit: async (e) => {
+          e.preventDefault();
+          try {
+            const r = await api("POST", `/api/c/${enc(slug)}/campaigns`, { name: nameIn.value, notes: notesIn.value });
+            location.hash = `#/c/${enc(slug)}/campaign/${r.id}`;
+          } catch (err) { toast(err.message); }
+        },
+      }, nameIn, notesIn, h("button", { class: "btn primary", type: "submit" }, "Create campaign"));
+    }
+    app.replaceChildren(
+      crumbs(data.client, "", "Campaigns"),
+      clientTabs(slug, "campaigns"),
+      h("div", { class: "page-head" }, h("h1", {}, "Campaigns")),
+      creator,
+      data.campaigns.length
+        ? h("div", { class: "grid" },
+            data.campaigns.map((cp) =>
+              h("a", { class: "card folder-card", href: `#/c/${enc(slug)}/campaign/${cp.id}` },
+                h("div", { class: "folder-icon", html: ICON_FLAG }),
+                h("div", {},
+                  h("h3", {}, cp.name),
+                  h("div", { class: "mono muted" }, `${cp.count} ad${cp.count === 1 ? "" : "s"} picked`),
+                ),
+              ),
+            ),
+          )
+        : h("div", { class: "card empty" }, h("h2", {}, "No campaigns yet"),
+            h("p", { class: "muted" }, state.me.admin
+              ? "Create one above. Your client then picks which ads go into it."
+              : "Genvyd will set up campaigns here. You will pick which ads go into each one.")),
+    );
+  }
+
+  async function viewCampaign(slug, id) {
+    app.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    let data;
+    try {
+      data = await api("GET", `/api/c/${enc(slug)}/campaigns/${id}`);
+    } catch (err) {
+      app.replaceChildren(errorCard(err));
+      return;
+    }
+    const cp = data.campaign;
+    const adminTools = state.me.admin
+      ? h("div", { class: "actions" },
+          h("button", {
+            class: "btn small",
+            onclick: async () => {
+              const name = prompt("Campaign name:", cp.name);
+              if (name === null) return;
+              const notes = prompt("Notes for the client:", cp.notes || "");
+              if (notes === null) return;
+              try { await api("POST", `/api/c/${enc(slug)}/campaigns/${cp.id}`, { name, notes }); viewCampaign(slug, id); } catch (err) { toast(err.message); }
+            },
+          }, "Edit"),
+          h("button", {
+            class: "btn small",
+            onclick: async () => {
+              if (!confirm(`Delete the "${cp.name}" campaign? The ads themselves are not touched.`)) return;
+              try { await api("DELETE", `/api/c/${enc(slug)}/campaigns/${cp.id}`); location.hash = `#/c/${enc(slug)}/campaigns`; } catch (err) { toast(err.message); }
+            },
+          }, "Delete"),
+        )
+      : null;
+
+    const cards = data.items.map((it) =>
+      h("div", { class: "tile-wrap" },
+        tile(slug, it, true),
+        h("button", {
+          class: "btn small tile-remove",
+          title: "Take this ad out of the campaign",
+          onclick: async () => {
+            try {
+              await api("DELETE", `/api/c/${enc(slug)}/campaigns/${cp.id}/items`, { path: it.path });
+              toast(`Removed from ${cp.name}.`);
+              viewCampaign(slug, id);
+            } catch (err) { toast(err.message); }
+          },
+        }, "Remove"),
+      ),
+    );
+
+    app.replaceChildren(
+      crumbs(data.client, "", cp.name),
+      clientTabs(slug, "campaigns"),
+      h("div", { class: "page-head" },
+        h("div", {},
+          h("h1", {}, cp.name),
+          cp.notes ? h("p", { class: "muted", style: "margin:8px 0 0;white-space:pre-wrap" }, cp.notes) : null,
+        ),
+        adminTools,
+      ),
+      data.items.length
+        ? h("div", { class: "grid" }, cards)
+        : h("div", { class: "card empty" }, h("h2", {}, "No ads picked yet"),
+            h("p", { class: "muted" }, "Open any ad and choose this campaign under “Use in campaign”.")),
     );
   }
 
@@ -533,7 +718,7 @@
       );
     });
 
-    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of" };
+    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
           h("div", { class: "feed-item" },
@@ -581,6 +766,9 @@
       if (parts[0] === "c" && parts[1]) {
         const slug = decodeURIComponent(parts[1]);
         if (parts[2] === "i" && parts[3]) return viewItem(slug, decodeURIComponent(parts.slice(3).join("/")));
+        if (parts[2] === "favorites") return viewFavorites(slug);
+        if (parts[2] === "campaigns") return viewCampaigns(slug);
+        if (parts[2] === "campaign" && /^\d+$/.test(parts[3] || "")) return viewCampaign(slug, parts[3]);
         if (parts[2] === "f" && parts[3]) return viewFolder(slug, decodeURIComponent(parts.slice(3).join("/")));
         return viewFolder(slug, "");
       }
@@ -591,6 +779,7 @@
   }
 
   const ICON_FOLDER = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+  const ICON_FLAG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4"/><path d="M4 4h12l-2 4 2 4H4"/></svg>';
   const ICON_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
 
   window.addEventListener("hashchange", router);

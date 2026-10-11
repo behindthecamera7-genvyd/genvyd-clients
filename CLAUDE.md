@@ -13,6 +13,15 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
+  0002 adds `campaigns` and `campaign_items` (additive; earlier tables untouched).
+
+## Roles
+
+- Admin (`ADMIN_EMAILS`): everything, plus create folders, upload, create/edit/delete
+  campaigns, resolve comments, manage clients and logins.
+- Client (members): view, play, download; favorite (the `likes` table, shown as Favorite),
+  approve or request changes, comment, and add or remove any ad (approved or not) in
+  campaigns Genvyd created for them. No writes to the Synology, no creating campaigns.
 
 ## Rules
 

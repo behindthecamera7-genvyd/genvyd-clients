@@ -346,6 +346,47 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
   return { client: { slug: c.slug, name: c.name }, dir: segs.join("/"), folders, items };
 }
 
+/** Ad cards for a list of paths that may span several folders (favorites, campaigns). */
+async function itemsFor(env: Env, user: User, c: Client, paths: string[]) {
+  // D1 allows 100 bound values per query, so look paths up in chunks.
+  const out = [];
+  for (let i = 0; i < paths.length; i += 90) out.push(...(await itemsChunk(env, user, c, paths.slice(i, i + 90))));
+  return out;
+}
+
+async function itemsChunk(env: Env, user: User, c: Client, paths: string[]) {
+  if (!paths.length) return [];
+  const marks = paths.map(() => "?").join(",");
+  const [statusRows, likeRows, commentRows] = await env.DB.batch([
+    env.DB.prepare(`SELECT path, status FROM item_status WHERE client_slug = ? AND path IN (${marks})`).bind(c.slug, ...paths),
+    env.DB.prepare(
+      `SELECT path, COUNT(*) AS n, SUM(CASE WHEN email = ? THEN 1 ELSE 0 END) AS mine FROM likes WHERE client_slug = ? AND path IN (${marks}) GROUP BY path`,
+    ).bind(user.email, c.slug, ...paths),
+    env.DB.prepare(
+      `SELECT path, COUNT(*) AS n, SUM(CASE WHEN resolved = 0 THEN 1 ELSE 0 END) AS open FROM comments WHERE client_slug = ? AND path IN (${marks}) GROUP BY path`,
+    ).bind(c.slug, ...paths),
+  ]);
+  const status = new Map((statusRows.results as { path: string; status: string }[]).map((r) => [r.path, r.status]));
+  const likes = new Map((likeRows.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
+  const comments = new Map((commentRows.results as { path: string; n: number; open: number }[]).map((r) => [r.path, r]));
+  return paths.map((p) => {
+    const name = p.split("/").pop() || p;
+    return {
+      name,
+      path: p,
+      folder: p.split("/").slice(0, -1).join("/"),
+      kind: kindOf(name),
+      size: null,
+      mtime: null,
+      status: status.get(p) ?? "pending",
+      likes: likes.get(p)?.n ?? 0,
+      liked: (likes.get(p)?.mine ?? 0) > 0,
+      comments: comments.get(p)?.n ?? 0,
+      openComments: comments.get(p)?.open ?? 0,
+    };
+  });
+}
+
 async function itemDetail(env: Env, user: User, c: Client, path: string) {
   const p = cleanPath(path).join("/");
   const [s, l, cm] = await env.DB.batch([
@@ -434,6 +475,109 @@ async function route(req: Request, env: Env): Promise<Response> {
   // ---- me -----------------------------------------------------------------
   if (path === "/api/me" && method === "GET") {
     return json({ email: user.email, admin: user.admin, clients: await clientsFor(env, user) });
+  }
+
+  // ---- favorites and campaigns ------------------------------------------
+  const fc = path.match(/^\/api\/c\/([^/]+)\/(favorites|campaigns)(?:\/(\d+)(?:\/(items))?)?$/);
+  if (fc) {
+    const [, slugRaw, kind, idStr, sub] = fc;
+    const c = await requireClient(env, user, decodeURIComponent(slugRaw));
+
+    // Favorites are the ads this person has hearted, across every project.
+    if (kind === "favorites" && method === "GET") {
+      const rows = (
+        await env.DB.prepare("SELECT path FROM likes WHERE client_slug = ? AND email = ? ORDER BY created_at DESC")
+          .bind(c.slug, user.email)
+          .all<{ path: string }>()
+      ).results.map((r) => r.path);
+      return json({ client: { slug: c.slug, name: c.name }, items: await itemsFor(env, user, c, rows) });
+    }
+
+    if (kind === "campaigns" && !idStr && method === "GET") {
+      const forPath = url.searchParams.get("path");
+      const p = forPath ? cleanPath(forPath).join("/") : null;
+      const rows = (
+        await env.DB.prepare(
+          "SELECT c.id, c.name, c.notes, c.created_at, COUNT(i.path) AS count, " +
+            "MAX(CASE WHEN i.path = ? THEN 1 ELSE 0 END) AS has " +
+            "FROM campaigns c LEFT JOIN campaign_items i ON i.campaign_id = c.id " +
+            "WHERE c.client_slug = ? GROUP BY c.id ORDER BY c.created_at DESC",
+        )
+          .bind(p ?? "", c.slug)
+          .all<{ id: number; name: string; notes: string | null; created_at: number; count: number; has: number }>()
+      ).results.map((r) => ({ ...r, has: !!r.has }));
+      return json({ client: { slug: c.slug, name: c.name }, campaigns: rows });
+    }
+
+    if (kind === "campaigns" && !idStr && method === "POST") {
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can create campaigns.");
+      const body = await readBody(req);
+      const name = String(body.name ?? "").trim().slice(0, 120);
+      if (!name) throw new HttpError(400, "Campaign name is required.");
+      const notes = String(body.notes ?? "").trim().slice(0, 2000) || null;
+      const r = await env.DB.prepare(
+        "INSERT INTO campaigns (client_slug, name, notes, created_by, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
+      )
+        .bind(c.slug, name, notes, user.email, now())
+        .first<{ id: number }>();
+      return json({ ok: true, id: r!.id });
+    }
+
+    if (kind === "campaigns" && idStr) {
+      const camp = await env.DB.prepare("SELECT id, name, notes, created_at FROM campaigns WHERE id = ? AND client_slug = ?")
+        .bind(Number(idStr), c.slug)
+        .first<{ id: number; name: string; notes: string | null; created_at: number }>();
+      if (!camp) throw new HttpError(404, "No such campaign.");
+
+      if (!sub && method === "GET") {
+        const rows = (
+          await env.DB.prepare("SELECT path, added_by, added_at FROM campaign_items WHERE campaign_id = ? ORDER BY added_at DESC")
+            .bind(camp.id)
+            .all<{ path: string; added_by: string; added_at: number }>()
+        ).results;
+        const items = await itemsFor(env, user, c, rows.map((r) => r.path));
+        const meta = new Map(rows.map((r) => [r.path, r]));
+        return json({
+          client: { slug: c.slug, name: c.name },
+          campaign: camp,
+          items: items.map((it) => ({ ...it, addedBy: meta.get(it.path)?.added_by, addedAt: meta.get(it.path)?.added_at })),
+        });
+      }
+      if (!sub && method === "POST") {
+        if (!user.admin) throw new HttpError(403, "Only Genvyd can edit campaigns.");
+        const body = await readBody(req);
+        const name = String(body.name ?? camp.name).trim().slice(0, 120) || camp.name;
+        const notes = body.notes === undefined ? camp.notes : String(body.notes).trim().slice(0, 2000) || null;
+        await env.DB.prepare("UPDATE campaigns SET name = ?, notes = ? WHERE id = ?").bind(name, notes, camp.id).run();
+        return json({ ok: true });
+      }
+      if (!sub && method === "DELETE") {
+        if (!user.admin) throw new HttpError(403, "Only Genvyd can delete campaigns.");
+        // Removes the campaign list only. The ads themselves stay on the Synology.
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM campaign_items WHERE campaign_id = ?").bind(camp.id),
+          env.DB.prepare("DELETE FROM campaigns WHERE id = ?").bind(camp.id),
+        ]);
+        return json({ ok: true });
+      }
+      if (sub === "items" && (method === "POST" || method === "DELETE")) {
+        // Clients and admin can both pick ads for a campaign, approved or not.
+        const p = cleanPath(String((await readBody(req)).path ?? "")).join("/");
+        if (method === "POST") {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO campaign_items (campaign_id, path, added_by, added_at) VALUES (?, ?, ?, ?)",
+          )
+            .bind(camp.id, p, user.email, now())
+            .run();
+          await logActivity(env, c.slug, p, user.email, "campaign_add", camp.name);
+        } else {
+          await env.DB.prepare("DELETE FROM campaign_items WHERE campaign_id = ? AND path = ?").bind(camp.id, p).run();
+          await logActivity(env, c.slug, p, user.email, "campaign_remove", camp.name);
+        }
+        return json({ ok: true });
+      }
+    }
+    throw new HttpError(405, "Method not allowed.");
   }
 
   // ---- client scoped ------------------------------------------------------
