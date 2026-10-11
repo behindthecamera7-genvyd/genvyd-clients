@@ -961,7 +961,7 @@ async function route(req: Request, env: Env): Promise<Response> {
         configured: !!env.RESEND_API_KEY,
         clientEmail: !!(env.RESEND_API_KEY && env.CLIENT_NOTIFY_FROM),
         to: env.NOTIFY_TO || env.ADMIN_EMAILS,
-        from: env.NOTIFY_FROM || "onboarding@resend.dev",
+        from: env.NOTIFY_FROM || "Genvyd <alerts@notify.genvyd.com>",
       });
     }
 
@@ -1208,7 +1208,7 @@ async function sendEmail(env: Env, subject: string, html: string, text: string, 
     method: "POST",
     headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
-      from: opts.from || env.NOTIFY_FROM || "Genvyd Portal <onboarding@resend.dev>",
+      from: opts.from || env.NOTIFY_FROM || "Genvyd <alerts@notify.genvyd.com>",
       to,
       subject,
       html,

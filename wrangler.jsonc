@@ -38,9 +38,9 @@
     // Email digest of client activity. Sent at most every 15 minutes, only when
     // something happened. Needs the RESEND_API_KEY secret; without it nothing is sent.
     "NOTIFY_TO": "behindthecamera7@gmail.com",
-    // Until a sending domain is verified in Resend, keep onboarding@resend.dev
-    // (Resend then only delivers to the email the Resend account was made with).
-    "NOTIFY_FROM": "Genvyd Portal <onboarding@resend.dev>",
+    // Sender for the admin digest, test and preview emails. Must be on the
+    // Resend-verified subdomain notify.genvyd.com (the root genvyd.com is not verified).
+    "NOTIFY_FROM": "Genvyd <alerts@notify.genvyd.com>",
     "PORTAL_URL": "https://clients.genvyd.com",
     // "New work" emails to clients. Needs a sending domain verified in Resend
     // (e.g. "Genvyd <studio@notify.genvyd.com>"). Empty = client emails off.

@@ -61,7 +61,7 @@ sends it automatically when client email is on (`CLIENT_NOTIFY_FROM` + `RESEND_A
 reply-to is NOTIFY_TO, and stamps `members.welcomed_at` (migration 0006). Admin page:
 Send/Resend welcome, Copy invite (`GET /api/admin/welcome-text`, for pasting into his own
 email while client email is off), and Preview welcome email (sent to NOTIFY_TO via
-NOTIFY_FROM, works before the domain is verified). Steps reference Cloudflare Access's
+NOTIFY_FROM, which is `Genvyd <alerts@notify.genvyd.com>` on the Resend-verified subdomain). Steps reference Cloudflare Access's
 "Send me a code" one-time PIN screen.
 
 ## Browsing
