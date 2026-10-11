@@ -205,9 +205,26 @@ async function makeNasFolder(env: Env, segs: string[]): Promise<boolean> {
   if (res.status === 405) return false; // already exists
   if (res.status === 409) throw new HttpError(409, "The parent folder is missing on the Synology.");
   if (res.status === 403) {
-    throw new HttpError(502, "The Synology refused to create the folder. Update nginx.conf on the Synology (see synology/UPDATE_FOR_FOLDERS.md).");
+    throw new HttpError(502, "The Synology refused to create the folder. Update nginx.conf on the Synology (see synology/SYNOLOGY_UPDATE.md).");
   }
   throw new HttpError(502, `The Synology answered ${res.status} when creating the folder.`);
+}
+
+const MAX_UPLOAD = 100 * 1024 * 1024;
+
+/** Never overwrite: "cut.mp4" becomes "cut (2).mp4" if the name is taken. */
+async function freeName(env: Env, dirSegs: string[], name: string): Promise<string> {
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 1; i <= 50; i++) {
+    const candidate = i === 1 ? name : `${stem} (${i})${ext}`;
+    const base = env.MEDIA_ORIGIN.replace(/\/+$/, "");
+    const url = `${base}/${[...dirSegs, candidate].map(encodeURIComponent).join("/")}`;
+    const res = await fetch(url, { method: "HEAD", headers: originHeaders(env) });
+    if (res.status === 404) return candidate;
+  }
+  throw new HttpError(409, "Too many files with that name already.");
 }
 
 type NasEntry = { name: string; type: "file" | "directory"; mtime?: string; size?: number };
@@ -391,13 +408,33 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
 
     if (action === "list" && method === "GET") {
       return json(await listDir(env, user, c, url.searchParams.get("dir") || ""));
+    }
+    if (action === "upload" && method === "POST") {
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can upload.");
+      const dir = cleanPath(url.searchParams.get("dir") || "", true);
+      const wanted = folderName(url.searchParams.get("name"));
+      const size = Number(req.headers.get("content-length") || "0");
+      if (size > MAX_UPLOAD) throw new HttpError(413, "That file is over 100 MB. Copy it in with Finder instead.");
+      if (!req.body) throw new HttpError(400, "No file was sent.");
+      const name = await freeName(env, [c.folder, ...dir], wanted);
+      const res = await fetch(originUrl(env, c.folder, [...dir, name]), {
+        method: "PUT",
+        headers: originHeaders(env, { "content-type": req.headers.get("content-type") || "application/octet-stream" }),
+        body: req.body,
+      });
+      if (res.status === 403) {
+        throw new HttpError(502, "The Synology refused the upload. Update nginx.conf on the Synology (see synology/SYNOLOGY_UPDATE.md).");
+      }
+      if (res.status === 413) throw new HttpError(413, "The Synology says that file is too large.");
+      if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status} to the upload.`);
+      return json({ ok: true, path: [...dir, name].join("/"), renamed: name !== wanted ? name : null });
     }
     if (action === "folder" && method === "POST") {
       if (!user.admin) throw new HttpError(403, "Only Genvyd can create folders.");

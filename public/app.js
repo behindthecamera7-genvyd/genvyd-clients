@@ -159,12 +159,73 @@
           },
         }, dir ? "+ New folder" : "+ New project")
       : null;
+    let uploadBtn = null, uploadPanel = null;
+    if (state.me.admin) {
+      const picker = h("input", { type: "file", multiple: true, hidden: true, onchange: () => { uploadFiles([...picker.files]); picker.value = ""; } });
+      uploadBtn = h("span", {}, picker, h("button", { class: "btn small primary", onclick: () => picker.click() }, "Upload"));
+      uploadPanel = h("div", { class: "upload-panel", hidden: true });
+      // Drag files anywhere on the page to upload into this folder.
+      app.ondragover = (e) => { e.preventDefault(); app.classList.add("dragging"); };
+      app.ondragleave = (e) => { if (e.target === app) app.classList.remove("dragging"); };
+      app.ondrop = (e) => { e.preventDefault(); app.classList.remove("dragging"); uploadFiles([...e.dataTransfer.files]); };
+    }
+
+    async function uploadFiles(files) {
+      if (!files.length) return;
+      uploadPanel.hidden = false;
+      uploadPanel.replaceChildren();
+      let done = 0;
+      for (const f of files) {
+        const bar = h("div", { class: "upload-bar" }, h("span"));
+        const status = h("span", { class: "mono muted" }, "waiting");
+        uploadPanel.append(h("div", { class: "upload-row" }, h("span", { class: "tile-name" }, f.name), bar, status));
+        if (f.size > 100 * 1024 * 1024) {
+          status.textContent = "over 100 MB, use Finder";
+          status.style.color = "var(--warn)";
+          continue;
+        }
+        try {
+          const r = await sendFile(f, (pct) => {
+            bar.firstChild.style.width = pct + "%";
+            status.textContent = pct + "%";
+          });
+          status.textContent = r.renamed ? `saved as ${r.renamed}` : "done";
+          status.style.color = "var(--ok)";
+          done++;
+        } catch (err) {
+          status.textContent = err.message;
+          status.style.color = "var(--accent)";
+        }
+      }
+      if (done) {
+        toast(`${done} file${done === 1 ? "" : "s"} uploaded.`);
+        setTimeout(() => viewFolder(slug, dir, filter), 900);
+      }
+    }
+
+    function sendFile(file, onProgress) {
+      return new Promise((resolve, reject) => {
+        const x = new XMLHttpRequest();
+        x.open("POST", `/api/c/${enc(slug)}/upload?dir=${enc(dir)}&name=${enc(file.name)}`);
+        x.setRequestHeader("content-type", file.type || "application/octet-stream");
+        x.upload.onprogress = (e) => e.lengthComputable && onProgress(Math.round((e.loaded / e.total) * 100));
+        x.onload = () => {
+          let d = null;
+          try { d = JSON.parse(x.responseText); } catch {}
+          x.status < 300 ? resolve(d || {}) : reject(new Error((d && d.error) || `Upload failed (${x.status}).`));
+        };
+        x.onerror = () => reject(new Error("Upload failed. Check your connection."));
+        x.send(file);
+      });
+    }
+
     const parts = [
       crumbs(data.client, dir),
       h("div", { class: "page-head" },
         h("h1", {}, title),
-        h("div", { class: "actions" }, data.items.length ? filterBar : null, newFolderBtn),
+        h("div", { class: "actions" }, data.items.length ? filterBar : null, newFolderBtn, uploadBtn),
       ),
+      uploadPanel,
     ];
 
     if (data.folders.length) {
@@ -190,7 +251,7 @@
     }
 
     if (!data.folders.length && !data.items.length) {
-      parts.push(h("div", { class: "card empty" }, h("h2", {}, "Nothing here yet"), h("p", { class: "muted" }, "New work will show up here as soon as it is ready.")));
+      parts.push(h("div", { class: "card empty" }, h("h2", {}, "Nothing here yet"), h("p", { class: "muted" }, state.me.admin ? "Click Upload, or drag files onto this page." : "New work will show up here as soon as it is ready.")));
     }
     app.replaceChildren(...parts);
   }

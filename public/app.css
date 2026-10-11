@@ -165,3 +165,12 @@ label.check input { width: auto; }
   background: var(--surface-2); color: var(--bone); border: 1px solid var(--line);
   padding: 10px 18px; border-radius: 999px; font-size: 14px; z-index: 50; max-width: calc(100vw - 32px);
 }
+
+/* ---- uploads ---------------------------------------------------------- */
+#app.dragging { outline: 2px dashed var(--accent); outline-offset: -8px; border-radius: var(--radius); }
+.upload-panel { margin-bottom: 20px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; gap: 10px; }
+.upload-row { display: grid; grid-template-columns: minmax(0, 1fr) 120px auto; gap: 12px; align-items: center; font-size: 14px; }
+@media (max-width: 640px) { .upload-row { grid-template-columns: minmax(0, 1fr) 70px; } .upload-row > :last-child { grid-column: 1 / -1; } }
+.upload-bar { height: 6px; background: var(--panel); border-radius: 999px; overflow: hidden; }
+.upload-bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.upload-panel[hidden] { display: none; }

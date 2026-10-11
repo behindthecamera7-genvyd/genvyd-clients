@@ -49,7 +49,7 @@ Export review copies as **H.264 MP4**. ProRes `.mov` files will not play in a br
    - Replace `PASTE_TUNNEL_TOKEN_HERE` with the token from step 3
 4. Next, Done. Both containers should show as running, and the tunnel in Zero Trust should turn **Healthy**.
 
-No router ports are opened. The portal can read files and create new folders, but nginx blocks uploads, renames and deletes, so it can never change or remove your work.
+No router ports are opened. The portal can read files, create folders and add new files, but it never overwrites, renames or deletes anything, so it can never change or remove your work.
 
 ## 5. Lock the Synology hostname so only the portal can read it
 
