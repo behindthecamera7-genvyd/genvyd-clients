@@ -272,3 +272,11 @@ label.check input { width: auto; }
   /* File links inside activity sentences get a little extra hit area. */
   .feed-item a { display: inline-block; padding: 6px 0; margin: -6px 0; }
 }
+
+/* ---- preview Fit / Fill ------------------------------------------------ */
+.thumbs-fit .thumb { background: #000; }
+.thumbs-fit .thumb img, .thumbs-fit .thumb video { object-fit: contain; }
+.fit-seg .seg-btn { min-width: 56px; }
+@media (max-width: 720px) {
+  .toolbar-right .fit-seg { width: 100%; }
+}

@@ -57,7 +57,8 @@ it off on their projects page.
 ## Browsing
 
 `mediaBrowser()` in app.js powers folders, Favorites and campaign pages: Videos / Photos /
-Other sections, status and tag filters, and a sort menu (remembered per browser).
+Other sections, status and tag filters, a sort menu, and a Fit / Fill preview switch
+(Fit = whole image, black bars, default; Fill = cropped). Choices remembered per browser.
 Always render pages through `show()`, which drops null/false so they never print as text.
 
 ## Rules

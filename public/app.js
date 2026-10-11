@@ -409,7 +409,7 @@
 
   function mediaBrowser(items, { tileFn, emptyText, slug }) {
     const prefs = loadPrefs();
-    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null, seen: "all" };
+    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null, seen: "all", fit: prefs.fit || "fit" };
     const root = h("div", { class: "browser" });
     items.forEach((it, i) => (it._i = i));
 
@@ -431,7 +431,9 @@
     }
 
     function render() {
-      savePrefs({ type: st.type, sort: st.sort });
+      savePrefs({ type: st.type, sort: st.sort, fit: st.fit });
+      // Fit = whole image with black bars; Fill = cropped to fill the box.
+      root.classList.toggle("thumbs-fit", st.fit === "fit");
       const base = items.filter((it) =>
         (st.status === "all" || it.status === st.status) &&
         (!st.tag || (it.tags || []).includes(st.tag)) &&
@@ -473,6 +475,10 @@
             },
           }, "Mark all viewed")
         : null;
+      const fitSeg = h("div", { class: "seg fit-seg", title: "How previews are shown" },
+        [["fit", "Fit"], ["fill", "Fill"]].map(([k, label]) =>
+          h("button", { class: "seg-btn" + (st.fit === k ? " active" : ""), "aria-pressed": st.fit === k ? "true" : "false", onclick: () => { st.fit = k; render(); } }, label)),
+      );
       const sortSel = h("select", { class: "mini-select", "aria-label": "Sort", onchange: (e) => { st.sort = e.target.value; render(); } },
         SORTS.map(([v, l]) => h("option", { value: v, selected: st.sort === v }, l)),
       );
@@ -498,7 +504,7 @@
       }
 
       fill(root, 
-        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, markAll)), tagRow, body].filter(Boolean),
+        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, fitSeg, markAll)), tagRow, body].filter(Boolean),
       );
     }
     render();
