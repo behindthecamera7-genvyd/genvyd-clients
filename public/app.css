@@ -187,3 +187,21 @@ label.check input { width: auto; }
 .tile-wrap .tile { height: 100%; }
 .tile-remove { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,.65); backdrop-filter: blur(6px); }
 .tile-folder { margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- browse toolbar, tags -------------------------------------------- */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.toolbar-right { display: flex; flex-wrap: wrap; gap: 8px; }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; }
+.seg-btn { height: 30px; padding: 0 14px; border: 0; border-radius: 999px; background: transparent; color: var(--ash); font: 500 13px var(--sans); cursor: pointer; }
+.seg-btn.active { background: var(--bone); color: #000; }
+.mini-select { width: auto; height: 36px; padding: 0 34px 0 14px; border-radius: 999px; background: var(--surface); font-size: 13px; }
+.tag-filters { margin-bottom: 6px; }
+.small-chip { height: 28px; padding: 0 12px; font-size: 12px; }
+.browser .section-label { margin: 22px 0 12px; }
+.tile-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.tag { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 999px; background: rgba(255,255,255,.06); color: var(--ash); font: 12px var(--mono); }
+.tag-lg { height: 26px; padding: 0 10px; }
+.tag-x { background: none; border: 0; color: var(--smoke); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 0 0 2px; }
+.tag-x:hover { color: var(--accent); }
+.tag-add { display: flex; gap: 8px; margin-top: 10px; }
+.tag-input { height: 32px; padding: 0 12px; font-size: 13px; }

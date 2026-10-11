@@ -312,7 +312,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
 
   // Pull all social data for this folder in one go.
   const like = prefix.replace(/[%_\\]/g, (m) => "\\" + m) + "%";
-  const [statusRows, likeRows, commentRows] = await env.DB.batch([
+  const [statusRows, likeRows, commentRows, tagRows] = await env.DB.batch([
     env.DB.prepare("SELECT path, status FROM item_status WHERE client_slug = ? AND path LIKE ? ESCAPE '\\'").bind(c.slug, like),
     env.DB.prepare(
       "SELECT path, COUNT(*) AS n, SUM(CASE WHEN email = ? THEN 1 ELSE 0 END) AS mine FROM likes WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' GROUP BY path",
@@ -320,7 +320,9 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
     env.DB.prepare(
       "SELECT path, COUNT(*) AS n, SUM(CASE WHEN resolved = 0 THEN 1 ELSE 0 END) AS open FROM comments WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' GROUP BY path",
     ).bind(c.slug, like),
+    env.DB.prepare("SELECT path, tag FROM item_tags WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' ORDER BY tag").bind(c.slug, like),
   ]);
+  const tags = groupTags(tagRows.results as { path: string; tag: string }[]);
   const status = new Map((statusRows.results as { path: string; status: string }[]).map((r) => [r.path, r.status]));
   const likes = new Map((likeRows.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
   const comments = new Map((commentRows.results as { path: string; n: number; open: number }[]).map((r) => [r.path, r]));
@@ -339,6 +341,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
         liked: (likes.get(p)?.mine ?? 0) > 0,
         comments: comments.get(p)?.n ?? 0,
         openComments: comments.get(p)?.open ?? 0,
+        tags: tags.get(p) ?? [],
       };
     })
     .sort((a, b) => (b.mtime ? Date.parse(b.mtime) : 0) - (a.mtime ? Date.parse(a.mtime) : 0));
@@ -357,7 +360,7 @@ async function itemsFor(env: Env, user: User, c: Client, paths: string[]) {
 async function itemsChunk(env: Env, user: User, c: Client, paths: string[]) {
   if (!paths.length) return [];
   const marks = paths.map(() => "?").join(",");
-  const [statusRows, likeRows, commentRows] = await env.DB.batch([
+  const [statusRows, likeRows, commentRows, tagRows] = await env.DB.batch([
     env.DB.prepare(`SELECT path, status FROM item_status WHERE client_slug = ? AND path IN (${marks})`).bind(c.slug, ...paths),
     env.DB.prepare(
       `SELECT path, COUNT(*) AS n, SUM(CASE WHEN email = ? THEN 1 ELSE 0 END) AS mine FROM likes WHERE client_slug = ? AND path IN (${marks}) GROUP BY path`,
@@ -365,7 +368,9 @@ async function itemsChunk(env: Env, user: User, c: Client, paths: string[]) {
     env.DB.prepare(
       `SELECT path, COUNT(*) AS n, SUM(CASE WHEN resolved = 0 THEN 1 ELSE 0 END) AS open FROM comments WHERE client_slug = ? AND path IN (${marks}) GROUP BY path`,
     ).bind(c.slug, ...paths),
+    env.DB.prepare(`SELECT path, tag FROM item_tags WHERE client_slug = ? AND path IN (${marks}) ORDER BY tag`).bind(c.slug, ...paths),
   ]);
+  const tags = groupTags(tagRows.results as { path: string; tag: string }[]);
   const status = new Map((statusRows.results as { path: string; status: string }[]).map((r) => [r.path, r.status]));
   const likes = new Map((likeRows.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
   const comments = new Map((commentRows.results as { path: string; n: number; open: number }[]).map((r) => [r.path, r]));
@@ -383,18 +388,33 @@ async function itemsChunk(env: Env, user: User, c: Client, paths: string[]) {
       liked: (likes.get(p)?.mine ?? 0) > 0,
       comments: comments.get(p)?.n ?? 0,
       openComments: comments.get(p)?.open ?? 0,
+      tags: tags.get(p) ?? [],
     };
   });
 }
 
+function groupTags(rows: { path: string; tag: string }[]) {
+  const m = new Map<string, string[]>();
+  for (const r of rows) m.set(r.path, [...(m.get(r.path) ?? []), r.tag]);
+  return m;
+}
+
+/** Tags are short, lowercase labels: "instagram", "15s", "vertical 9x16". */
+function cleanTag(raw: unknown): string {
+  const t = String(raw ?? "").toLowerCase().replace(/[^\p{L}\p{N} :x._+-]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 40);
+  if (!t) throw new HttpError(400, "Tag is empty.");
+  return t;
+}
+
 async function itemDetail(env: Env, user: User, c: Client, path: string) {
   const p = cleanPath(path).join("/");
-  const [s, l, cm] = await env.DB.batch([
+  const [s, l, cm, tg] = await env.DB.batch([
     env.DB.prepare("SELECT status, updated_by, updated_at FROM item_status WHERE client_slug = ? AND path = ?").bind(c.slug, p),
     env.DB.prepare("SELECT email FROM likes WHERE client_slug = ? AND path = ? ORDER BY created_at").bind(c.slug, p),
     env.DB.prepare(
       "SELECT id, email, body, timecode, resolved, created_at FROM comments WHERE client_slug = ? AND path = ? ORDER BY created_at",
     ).bind(c.slug, p),
+    env.DB.prepare("SELECT tag FROM item_tags WHERE client_slug = ? AND path = ? ORDER BY tag").bind(c.slug, p),
   ]);
   const st = (s.results[0] as { status: string; updated_by: string; updated_at: number } | undefined) ?? null;
   const likers = (l.results as { email: string }[]).map((r) => r.email);
@@ -406,6 +426,7 @@ async function itemDetail(env: Env, user: User, c: Client, path: string) {
     likes: likers.length,
     liked: likers.includes(user.email),
     likers,
+    tags: (tg.results as { tag: string }[]).map((r) => r.tag),
     comments: (cm.results as Record<string, unknown>[]).map((r) => ({
       ...r,
       resolved: !!r.resolved,
@@ -581,7 +602,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
@@ -615,6 +636,31 @@ async function route(req: Request, env: Env): Promise<Response> {
       const name = folderName(body.name);
       const created = await makeNasFolder(env, user, [c.folder, ...parent, name]);
       return json({ ok: true, created, path: [...parent, name].join("/") });
+    }
+    if (action === "tags" && method === "GET") {
+      // Every tag used for this client, for suggestions and filters.
+      const rows = (
+        await env.DB.prepare("SELECT tag, COUNT(*) AS n FROM item_tags WHERE client_slug = ? GROUP BY tag ORDER BY n DESC, tag")
+          .bind(c.slug)
+          .all<{ tag: string; n: number }>()
+      ).results;
+      return json({ tags: rows });
+    }
+    if (action === "tags" && (method === "POST" || method === "DELETE")) {
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can tag ads.");
+      const body = await readBody(req);
+      const p = cleanPath(String(body.path ?? "")).join("/");
+      const tag = cleanTag(body.tag);
+      if (method === "POST") {
+        await env.DB.prepare(
+          "INSERT OR IGNORE INTO item_tags (client_slug, path, tag, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+          .bind(c.slug, p, tag, user.email, now())
+          .run();
+      } else {
+        await env.DB.prepare("DELETE FROM item_tags WHERE client_slug = ? AND path = ? AND tag = ?").bind(c.slug, p, tag).run();
+      }
+      return json(await itemDetail(env, user, c, p));
     }
     if (action === "item" && method === "GET") {
       return json(await itemDetail(env, user, c, url.searchParams.get("path") || ""));

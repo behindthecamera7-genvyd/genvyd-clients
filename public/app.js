@@ -4,6 +4,8 @@
 
   const app = document.getElementById("app");
   const state = { me: null, listCache: new Map() };
+  // Replace the page, skipping empty slots (null, false) so they never print as text.
+  const show = (...kids) => app.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
 
   // ---- tiny helpers -------------------------------------------------------
 
@@ -16,7 +18,7 @@
       else if (k === "html") el.innerHTML = v; // only ever used with static strings
       else el.setAttribute(k, v === true ? "" : v);
     }
-    for (const kid of kids.flat()) {
+    for (const kid of kids.flat(Infinity)) {
       if (kid === null || kid === undefined || kid === false) continue;
       el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
     }
@@ -104,7 +106,7 @@
       return;
     }
     if (!clients.length) {
-      app.replaceChildren(
+      show(
         h("div", { class: "card empty" },
           h("h2", {}, "Nothing to review yet"),
           h("p", { class: "muted" },
@@ -116,7 +118,7 @@
       );
       return;
     }
-    app.replaceChildren(
+    show(
       h("div", { class: "page-head" }, h("h1", {}, "Your projects")),
       h("div", { class: "grid" },
         clients.map((c) =>
@@ -129,30 +131,16 @@
     );
   }
 
-  async function viewFolder(slug, dir, filter) {
-    app.replaceChildren(h("p", { class: "muted" }, "Loading from the studio…"));
+  async function viewFolder(slug, dir) {
+    show(h("p", { class: "muted" }, "Loading from the studio…"));
     let data;
     try {
       data = await api("GET", `/api/c/${enc(slug)}/list?dir=${enc(dir)}`);
     } catch (err) {
-      app.replaceChildren(errorCard(err));
+      show(errorCard(err));
       return;
     }
     state.listCache.set(`${slug}|${dir}`, data);
-    filter = filter || "all";
-
-    const counts = { all: data.items.length, pending: 0, approved: 0, changes: 0 };
-    data.items.forEach((i) => counts[i.status]++);
-    const shown = filter === "all" ? data.items : data.items.filter((i) => i.status === filter);
-
-    const filterBar = h("div", { class: "filters" },
-      [["all", "All"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"]].map(([k, label]) =>
-        h("button", {
-          class: "chip" + (filter === k ? " active" : ""),
-          onclick: () => viewFolder(slug, dir, k),
-        }, `${label} ${counts[k]}`),
-      ),
-    );
 
     const title = dir ? baseName(dir) : data.client.name;
     const newFolderBtn = state.me.admin
@@ -209,7 +197,7 @@
       }
       if (done) {
         toast(`${done} file${done === 1 ? "" : "s"} uploaded.`);
-        setTimeout(() => viewFolder(slug, dir, filter), 900);
+        setTimeout(() => viewFolder(slug, dir), 900);
       }
     }
 
@@ -234,7 +222,7 @@
       dir ? null : clientTabs(slug, "projects"),
       h("div", { class: "page-head" },
         h("h1", {}, title),
-        h("div", { class: "actions" }, data.items.length ? filterBar : null, newFolderBtn, uploadBtn),
+        h("div", { class: "actions" }, newFolderBtn, uploadBtn),
       ),
       uploadPanel,
     ];
@@ -253,18 +241,101 @@
     }
 
     if (data.items.length) {
-      if (data.folders.length) parts.push(h("div", { class: "section-label mono muted" }, "FILES"));
-      parts.push(
-        shown.length
-          ? h("div", { class: "grid" }, shown.map((it) => tile(slug, it)))
-          : h("div", { class: "card empty muted" }, "Nothing in this filter."),
-      );
+      if (data.folders.length) parts.push(h("div", { style: "height:28px" }));
+      parts.push(mediaBrowser(data.items, { tileFn: (it) => tile(slug, it) }));
     }
 
     if (!data.folders.length && !data.items.length) {
       parts.push(h("div", { class: "card empty" }, h("h2", {}, "Nothing here yet"), h("p", { class: "muted" }, state.me.admin ? "Click Upload, or drag files onto this page." : "New work will show up here as soon as it is ready.")));
     }
-    app.replaceChildren(...parts);
+    show(...parts.filter(Boolean));
+  }
+
+  // Shared grid for folders, favorites and campaigns: photos and videos in their
+  // own sections, filters for type, status and tag, and a sort menu.
+  const PREFS_KEY = "gv-browse";
+  function loadPrefs() {
+    try { return JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"); } catch { return {}; }
+  }
+  function savePrefs(p) {
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* private window */ }
+  }
+  const SORTS = [
+    ["newest", "Newest first"],
+    ["oldest", "Oldest first"],
+    ["name", "Name A to Z"],
+    ["favorites", "Most favorited"],
+    ["comments", "Most comments"],
+    ["status", "Needs review first"],
+  ];
+  const STATUS_ORDER = { pending: 0, changes: 1, approved: 2 };
+
+  function mediaBrowser(items, { tileFn, emptyText }) {
+    const prefs = loadPrefs();
+    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null };
+    const root = h("div", { class: "browser" });
+    items.forEach((it, i) => (it._i = i));
+
+    const kindOfItem = (it) => (it.kind === "video" ? "video" : it.kind === "image" ? "image" : "other");
+    const allTags = [...new Set(items.flatMap((it) => it.tags || []))].sort();
+
+    function sorted(list) {
+      const t = (it) => (it.mtime ? Date.parse(it.mtime) : -it._i);
+      const by = {
+        newest: (a, b) => t(b) - t(a),
+        oldest: (a, b) => t(a) - t(b),
+        name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }),
+        favorites: (a, b) => b.likes - a.likes || t(b) - t(a),
+        comments: (a, b) => b.comments - a.comments || t(b) - t(a),
+        status: (a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || t(b) - t(a),
+      }[st.sort];
+      return [...list].sort(by);
+    }
+
+    function render() {
+      savePrefs({ type: st.type, sort: st.sort });
+      const base = items.filter((it) => (st.status === "all" || it.status === st.status) && (!st.tag || (it.tags || []).includes(st.tag)));
+      const count = (k) => base.filter((it) => k === "all" || kindOfItem(it) === k).length;
+
+      const typeTabs = h("div", { class: "seg" },
+        [["all", "All"], ["video", "Videos"], ["image", "Photos"], ["other", "Other"]]
+          .filter(([k]) => k === "all" || items.some((it) => kindOfItem(it) === k))
+          .map(([k, label]) => h("button", { class: "seg-btn" + (st.type === k ? " active" : ""), onclick: () => { st.type = k; render(); } }, `${label} ${count(k)}`)),
+      );
+      const statusSel = h("select", { class: "mini-select", "aria-label": "Status", onchange: (e) => { st.status = e.target.value; render(); } },
+        [["all", "Any status"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"]].map(([v, l]) =>
+          h("option", { value: v, selected: st.status === v }, l)),
+      );
+      const sortSel = h("select", { class: "mini-select", "aria-label": "Sort", onchange: (e) => { st.sort = e.target.value; render(); } },
+        SORTS.map(([v, l]) => h("option", { value: v, selected: st.sort === v }, l)),
+      );
+      const tagRow = allTags.length
+        ? h("div", { class: "filters tag-filters" },
+            h("span", { class: "mono muted", style: "align-self:center" }, "TAGS"),
+            allTags.map((tg) => h("button", { class: "chip small-chip" + (st.tag === tg ? " active" : ""), onclick: () => { st.tag = st.tag === tg ? null : tg; render(); } }, `#${tg}`)),
+          )
+        : null;
+
+      const shown = sorted(base.filter((it) => st.type === "all" || kindOfItem(it) === st.type));
+      const grid = (list) => h("div", { class: "grid" }, list.map(tileFn));
+      let body;
+      if (!shown.length) {
+        body = h("div", { class: "card empty muted" }, items.length ? "Nothing matches these filters." : emptyText || "Nothing here yet.");
+      } else if (st.type === "all") {
+        const groups = [["video", "VIDEOS"], ["image", "PHOTOS"], ["other", "OTHER FILES"]]
+          .map(([k, label]) => [label, shown.filter((it) => kindOfItem(it) === k)])
+          .filter(([, list]) => list.length);
+        body = h("div", {}, groups.map(([label, list]) => [h("div", { class: "section-label mono muted" }, `${label} · ${list.length}`), grid(list)]));
+      } else {
+        body = grid(shown);
+      }
+
+      root.replaceChildren(
+        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, statusSel, sortSel)), tagRow, body].filter(Boolean),
+      );
+    }
+    render();
+    return root;
   }
 
   function tile(slug, it, showFolder) {
@@ -288,6 +359,7 @@
       h("div", { class: "tile-meta" },
         h("div", { class: "tile-name", title: it.name }, it.name),
         showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
+        it.tags && it.tags.length ? h("div", { class: "tile-tags" }, it.tags.map((tg) => h("span", { class: "tag" }, `#${tg}`))) : null,
         h("div", { class: "tile-stats mono muted" },
           h("span", {}, `♥ ${it.likes}`),
           h("span", {}, `${it.comments} comment${it.comments === 1 ? "" : "s"}`),
@@ -299,7 +371,7 @@
 
   async function viewItem(slug, path) {
     const dir = parentOf(path);
-    app.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    show(h("p", { class: "muted" }, "Loading…"));
 
     let list = state.listCache.get(`${slug}|${dir}`);
     let detail;
@@ -309,7 +381,7 @@
         list ? Promise.resolve(list) : api("GET", `/api/c/${enc(slug)}/list?dir=${enc(dir)}`),
       ]);
     } catch (err) {
-      app.replaceChildren(errorCard(err));
+      show(errorCard(err));
       return;
     }
     state.listCache.set(`${slug}|${dir}`, list);
@@ -350,6 +422,41 @@
 
     // "Use in campaign" picker. Lives outside renderSide so it keeps its state.
     const campBox = h("div", { class: "camp-box" });
+
+    // Tags: Genvyd adds and removes them, clients see them.
+    const tagBox = h("div", { class: "tag-box" });
+    let tagSuggestions = null;
+    function renderTags(tags) {
+      if (!state.me.admin && !tags.length) { tagBox.replaceChildren(); return; }
+      const chips = tags.map((tg) =>
+        h("span", { class: "tag tag-lg" }, `#${tg}`,
+          state.me.admin ? h("button", { class: "tag-x", title: `Remove #${tg}`, onclick: () => tagAct("DELETE", tg) }, "×") : null));
+      let adder = null;
+      if (state.me.admin) {
+        const listId = "tag-suggest";
+        const input = h("input", { class: "tag-input", placeholder: "Add tag, e.g. instagram", list: listId, maxlength: "40",
+          onkeydown: (e) => { if (e.key === "Enter" && input.value.trim()) { e.preventDefault(); tagAct("POST", input.value); } } });
+        tagSuggestions = tagSuggestions || h("datalist", { id: listId });
+        adder = h("div", { class: "tag-add" }, input, tagSuggestions,
+          h("button", { class: "btn small", onclick: () => input.value.trim() && tagAct("POST", input.value) }, "Add"));
+      }
+      tagBox.replaceChildren(h("div", { class: "mono muted" }, "TAGS"), h("div", { class: "tile-tags", style: "margin-top:8px" }, chips), adder);
+    }
+    async function tagAct(method, tag) {
+      try {
+        const d = await api(method, `/api/c/${enc(slug)}/tags`, { path, tag });
+        renderTags(d.tags);
+        state.listCache.delete(`${slug}|${dir}`);
+        loadTagSuggestions();
+      } catch (err) { toast(err.message); }
+    }
+    async function loadTagSuggestions() {
+      if (!state.me.admin) return;
+      try {
+        const r = await api("GET", `/api/c/${enc(slug)}/tags`);
+        if (tagSuggestions) tagSuggestions.replaceChildren(...r.tags.map((t) => h("option", { value: t.tag })));
+      } catch { /* suggestions are optional */ }
+    }
     async function loadCampaigns() {
       try {
         const r = await api("GET", `/api/c/${enc(slug)}/campaigns?path=${enc(path)}`);
@@ -467,6 +574,7 @@
         ),
         statusBtns,
         statusNote,
+        tagBox,
         campBox,
         h("div", { class: "mono muted" }, `COMMENTS (${d.comments.length})`),
         list,
@@ -494,39 +602,41 @@
     };
 
     renderSide(detail);
-    app.replaceChildren(
+    renderTags(detail.tags || []);
+    loadTagSuggestions();
+    show(
       crumbs(list.client, dir, it.name),
       h("div", { class: "viewer" }, h("div", {}, stage, navBar), side),
     );
   }
 
   async function viewFavorites(slug) {
-    app.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    show(h("p", { class: "muted" }, "Loading…"));
     let data;
     try {
       data = await api("GET", `/api/c/${enc(slug)}/favorites`);
     } catch (err) {
-      app.replaceChildren(errorCard(err));
+      show(errorCard(err));
       return;
     }
-    app.replaceChildren(
+    show(
       crumbs(data.client, "", "Favorites"),
       clientTabs(slug, "favorites"),
       h("div", { class: "page-head" }, h("h1", {}, "Your favorites")),
       data.items.length
-        ? h("div", { class: "grid" }, data.items.map((it) => tile(slug, it, true)))
+        ? mediaBrowser(data.items, { tileFn: (it) => tile(slug, it, true) })
         : h("div", { class: "card empty" }, h("h2", {}, "No favorites yet"),
             h("p", { class: "muted" }, "Open any ad and tap ♡ Favorite to keep it here.")),
     );
   }
 
   async function viewCampaigns(slug) {
-    app.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    show(h("p", { class: "muted" }, "Loading…"));
     let data;
     try {
       data = await api("GET", `/api/c/${enc(slug)}/campaigns`);
     } catch (err) {
-      app.replaceChildren(errorCard(err));
+      show(errorCard(err));
       return;
     }
     let creator = null;
@@ -544,7 +654,7 @@
         },
       }, nameIn, notesIn, h("button", { class: "btn primary", type: "submit" }, "Create campaign"));
     }
-    app.replaceChildren(
+    show(
       crumbs(data.client, "", "Campaigns"),
       clientTabs(slug, "campaigns"),
       h("div", { class: "page-head" }, h("h1", {}, "Campaigns")),
@@ -569,12 +679,12 @@
   }
 
   async function viewCampaign(slug, id) {
-    app.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    show(h("p", { class: "muted" }, "Loading…"));
     let data;
     try {
       data = await api("GET", `/api/c/${enc(slug)}/campaigns/${id}`);
     } catch (err) {
-      app.replaceChildren(errorCard(err));
+      show(errorCard(err));
       return;
     }
     const cp = data.campaign;
@@ -600,7 +710,7 @@
         )
       : null;
 
-    const cards = data.items.map((it) =>
+    const campTile = (it) =>
       h("div", { class: "tile-wrap" },
         tile(slug, it, true),
         h("button", {
@@ -614,10 +724,9 @@
             } catch (err) { toast(err.message); }
           },
         }, "Remove"),
-      ),
-    );
+      );
 
-    app.replaceChildren(
+    show(
       crumbs(data.client, "", cp.name),
       clientTabs(slug, "campaigns"),
       h("div", { class: "page-head" },
@@ -628,7 +737,7 @@
         adminTools,
       ),
       data.items.length
-        ? h("div", { class: "grid" }, cards)
+        ? mediaBrowser(data.items, { tileFn: campTile })
         : h("div", { class: "card empty" }, h("h2", {}, "No ads picked yet"),
             h("p", { class: "muted" }, "Open any ad and choose this campaign under “Use in campaign”.")),
     );
@@ -639,12 +748,12 @@
       location.replace("#/");
       return;
     }
-    app.replaceChildren(h("p", { class: "muted" }, "Loading…"));
+    show(h("p", { class: "muted" }, "Loading…"));
     let data, folders;
     try {
       [data, folders] = await Promise.all([api("GET", "/api/admin/overview"), api("GET", "/api/admin/folders")]);
     } catch (err) {
-      app.replaceChildren(errorCard(err));
+      show(errorCard(err));
       return;
     }
 
@@ -732,7 +841,7 @@
         )
       : [h("div", { class: "feed-item muted" }, "No client activity yet.")];
 
-    app.replaceChildren(
+    show(
       h("div", { class: "page-head" }, h("h1", {}, "Admin")),
       folders.error ? h("div", { class: "card error", style: "margin-bottom:20px" }, `Synology: ${folders.error}`) : "",
       h("div", { class: "admin" },
@@ -774,7 +883,7 @@
       }
       return viewHome();
     } catch (err) {
-      app.replaceChildren(errorCard(err));
+      show(errorCard(err));
     }
   }
 
