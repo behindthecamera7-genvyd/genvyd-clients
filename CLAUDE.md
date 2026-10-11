@@ -32,6 +32,15 @@ Mark done) and approved work (filter by client; sort by Most favorited / In most
 campaigns). Data from `GET /api/admin/dashboard` plus `/api/admin/overview`. Clients
 never see it (403, and their home goes straight to their projects).
 
+## Email digest
+
+Cron every 15 min (`scheduled()` in worker.ts, `runDigest`): emails client activity
+(approved, changes, comment, campaign_add, like; admin actions excluded) since the last
+emailed `activity.id` (stored in `notify_state`, migration 0004) via Resend
+(`RESEND_API_KEY` secret, `NOTIFY_TO`, `NOTIFY_FROM`). First run only initializes, so
+old history is never sent. A failed send does not advance the pointer. Comment text is
+HTML-escaped. Admin page has Send test email (`POST /api/admin/notify-test`).
+
 ## Browsing
 
 `mediaBrowser()` in app.js powers folders, Favorites and campaign pages: Videos / Photos /

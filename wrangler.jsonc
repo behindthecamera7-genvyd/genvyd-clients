@@ -34,10 +34,21 @@
     // Application Audience (AUD) tag from the clients.genvyd.com Access app.
     "POLICY_AUD": "8ceffaff2dd137d455ac00b5c43decffff072d931f4e6cd650941d211e4c6930",
     // Tunnel hostname that serves the Synology folder, e.g. "https://nas-media.genvyd.com".
-    "MEDIA_ORIGIN": "https://nas-media.genvyd.com"
-  }
+    "MEDIA_ORIGIN": "https://nas-media.genvyd.com",
+    // Email digest of client activity. Sent at most every 15 minutes, only when
+    // something happened. Needs the RESEND_API_KEY secret; without it nothing is sent.
+    "NOTIFY_TO": "behindthecamera7@gmail.com",
+    // Until a sending domain is verified in Resend, keep onboarding@resend.dev
+    // (Resend then only delivers to the email the Resend account was made with).
+    "NOTIFY_FROM": "Genvyd Portal <onboarding@resend.dev>",
+    "PORTAL_URL": "https://clients.genvyd.com"
+  },
+
+  // Checks for new client activity every 15 minutes and emails a digest.
+  "triggers": { "crons": ["*/15 * * * *"] }
 
   // Secrets (set in the Cloudflare dashboard, never in this file):
   //   MEDIA_CLIENT_ID      Access service token client ID for the NAS hostname
   //   MEDIA_CLIENT_SECRET  Access service token client secret
+  //   RESEND_API_KEY       API key from resend.com, for the email digest
 }

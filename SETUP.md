@@ -106,3 +106,11 @@ Wait until Claude confirms the values from steps 2, 6 and 7 are pushed.
 | "The Synology answered 502/530" | Containers running? Tunnel Healthy in Zero Trust? |
 | Folder list empty on Admin | The share path in `docker-compose.yml` is `/volume1/GenvydClients` |
 | Video shows but will not play | Re-export as H.264 MP4 |
+
+## Email alerts (optional)
+
+Follow `synology/EMAIL_SETUP.md`: make a free Resend account with
+behindthecamera7@gmail.com, create an API key, and add it to the Worker as the secret
+`RESEND_API_KEY`. Then Admin > Email alerts > Send test email. The digest runs every
+15 minutes and only sends when clients did something (approvals, change requests,
+comments, favorites, campaign picks). Your own actions are never emailed to you.

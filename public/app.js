@@ -964,6 +964,26 @@
       );
     });
 
+    // Email alerts: shows whether the digest is switched on, with a test button.
+    const emailCard = h("div", { class: "card pad", style: "margin-bottom:20px" }, h("h2", {}, "Email alerts"), h("p", { class: "muted" }, "Checking…"));
+    api("GET", "/api/admin/notify-status").then((st) => {
+      const testBtn = h("button", {
+        class: "btn small",
+        onclick: async () => {
+          testBtn.disabled = true;
+          try { const r = await api("POST", "/api/admin/notify-test"); toast(`Test email sent to ${r.to}.`); } catch (err) { toast(err.message); }
+          testBtn.disabled = false;
+        },
+      }, "Send test email");
+      emailCard.replaceChildren(
+        h("h2", { style: "margin-bottom:8px" }, "Email alerts"),
+        st.configured
+          ? h("p", { class: "muted", style: "margin:0 0 12px" }, `On. A summary goes to ${st.to} when clients approve, request changes, comment, favorite or pick campaign ads (at most every 15 minutes).`)
+          : h("p", { class: "muted", style: "margin:0 0 12px" }, "Off. Add the RESEND_API_KEY secret to the genvyd-clients Worker in Cloudflare to switch it on (see SETUP.md)."),
+        st.configured ? testBtn : "",
+      );
+    }).catch(() => {});
+
     const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
@@ -984,6 +1004,7 @@
       h("div", { class: "admin" },
         h("div", {},
           h("div", { class: "card pad", style: "margin-bottom:20px" }, h("h2", { style: "margin-bottom:14px" }, "Add a client"), addClient),
+          emailCard,
           h("div", { class: "card" },
             clientBlocks.length ? clientBlocks : h("div", { class: "pad muted" }, "No clients yet."),
           ),

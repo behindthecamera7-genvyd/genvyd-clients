@@ -19,6 +19,12 @@ export interface Env {
   MEDIA_ORIGIN: string;
   MEDIA_CLIENT_ID?: string;
   MEDIA_CLIENT_SECRET?: string;
+  NOTIFY_TO?: string;
+  NOTIFY_FROM?: string;
+  PORTAL_URL?: string;
+  RESEND_API_KEY?: string;
+  /** Local testing only: point the digest at a fake email API. */
+  RESEND_API_URL?: string;
   /** Local development only (.dev.vars). Ignored whenever TEAM_DOMAIN is set. */
   DEV_EMAIL?: string;
 }
@@ -780,6 +786,19 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (path.startsWith("/api/admin/")) {
     if (!user.admin) throw new HttpError(403, "Admins only.");
 
+    if (path === "/api/admin/notify-test" && method === "POST") {
+      await sendEmail(
+        env,
+        "Test from clients.genvyd.com",
+        `<div style="font-family:Arial,Helvetica,sans-serif"><p>Email from your client portal is working.</p><p>You will get a short summary here whenever clients approve, request changes, comment, favorite or pick ads for a campaign, at most every 15 minutes.</p></div>`,
+        "Email from your client portal is working.",
+      );
+      return json({ ok: true, to: env.NOTIFY_TO || env.ADMIN_EMAILS });
+    }
+    if (path === "/api/admin/notify-status" && method === "GET") {
+      return json({ configured: !!env.RESEND_API_KEY, to: env.NOTIFY_TO || env.ADMIN_EMAILS, from: env.NOTIFY_FROM || "onboarding@resend.dev" });
+    }
+
     if (path === "/api/admin/dashboard" && method === "GET") {
       // Everything Anthony needs to act on, across all clients.
       const clients = (await env.DB.prepare("SELECT slug, name, folder FROM clients").all<Client>()).results;
@@ -918,7 +937,115 @@ async function route(req: Request, env: Env): Promise<Response> {
   throw new HttpError(404, "Not found.");
 }
 
+// ---------------------------------------------------------------------------
+// Email digest: what clients did since the last email, sent every 15 minutes
+// at most, and only when there is something to report.
+// ---------------------------------------------------------------------------
+
+type ActivityRow = { id: number; client_slug: string; path: string; email: string; kind: string; detail: string | null; created_at: number };
+const DIGEST_KINDS = ["approved", "changes", "comment", "campaign_add", "like"];
+
+const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
+
+function itemLink(env: Env, slug: string, path: string) {
+  const base = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
+  return `${base}/#/c/${encodeURIComponent(slug)}/i/${encodeURIComponent(path)}`;
+}
+
+async function sendEmail(env: Env, subject: string, html: string, text: string) {
+  if (!env.RESEND_API_KEY) throw new HttpError(503, "Email is not set up yet (RESEND_API_KEY secret is missing).");
+  const to = (env.NOTIFY_TO || env.ADMIN_EMAILS || "").split(",").map((e) => e.trim()).filter(Boolean);
+  if (!to.length) throw new HttpError(503, "No NOTIFY_TO address is set.");
+  const res = await fetch(env.RESEND_API_URL || "https://api.resend.com/emails", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({ from: env.NOTIFY_FROM || "Genvyd Portal <onboarding@resend.dev>", to, subject, html, text }),
+  });
+  if (!res.ok) throw new HttpError(502, `The email service answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
+}
+
+function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) {
+  const count = (k: string) => rows.filter((r) => r.kind === k).length;
+  const bits = [
+    count("approved") && `${count("approved")} approved`,
+    count("changes") && `${count("changes")} change request${count("changes") === 1 ? "" : "s"}`,
+    count("comment") && `${count("comment")} comment${count("comment") === 1 ? "" : "s"}`,
+    count("campaign_add") && `${count("campaign_add")} campaign pick${count("campaign_add") === 1 ? "" : "s"}`,
+    count("like") && `${count("like")} favorite${count("like") === 1 ? "" : "s"}`,
+  ].filter(Boolean);
+  const clientList = [...new Set(rows.map((r) => names.get(r.client_slug) || r.client_slug))];
+  const subject = `${clientList.join(", ")}: ${bits.join(", ")}`;
+
+  const LABEL: Record<string, string> = {
+    changes: "Changes requested",
+    comment: "New comments",
+    approved: "Approved",
+    campaign_add: "Added to campaigns",
+    like: "Favorited",
+  };
+  const order = ["changes", "comment", "approved", "campaign_add", "like"];
+  let html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:620px">`;
+  let text = "";
+  for (const slug of [...new Set(rows.map((r) => r.client_slug))]) {
+    const name = names.get(slug) || slug;
+    html += `<h2 style="margin:24px 0 8px;font-size:18px">${esc(name)}</h2>`;
+    text += `\n${name}\n`;
+    for (const kind of order) {
+      const list = rows.filter((r) => r.client_slug === slug && r.kind === kind);
+      if (!list.length) continue;
+      html += `<p style="margin:14px 0 6px;font-weight:bold;color:${kind === "changes" ? "#b26a00" : kind === "approved" ? "#127a3f" : "#111"}">${LABEL[kind]}</p><ul style="margin:0;padding-left:18px">`;
+      text += `  ${LABEL[kind]}:\n`;
+      for (const r of list) {
+        const file = r.path.split("/").pop() || r.path;
+        const link = itemLink(env, slug, r.path);
+        const extra = kind === "comment" && r.detail ? `: "${r.detail}"` : kind === "campaign_add" && r.detail ? ` (${r.detail})` : "";
+        html += `<li style="margin:4px 0"><a href="${esc(link)}" style="color:#d4141a">${esc(file)}</a> <span style="color:#555">by ${esc(r.email)}${esc(extra)}</span></li>`;
+        text += `   - ${file} by ${r.email}${extra}\n     ${link}\n`;
+      }
+      html += `</ul>`;
+    }
+  }
+  const dash = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "") + "/#/";
+  html += `<p style="margin-top:28px"><a href="${esc(dash)}" style="background:#ff2a2a;color:#fff;padding:10px 16px;border-radius:999px;text-decoration:none">Open the studio dashboard</a></p>`;
+  html += `<p style="color:#888;font-size:12px;margin-top:24px">Sent by clients.genvyd.com. You get at most one of these every 15 minutes, only when clients do something.</p></div>`;
+  text += `\nOpen the studio dashboard: ${dash}\n`;
+  return { subject, html, text };
+}
+
+async function runDigest(env: Env) {
+  if (!env.RESEND_API_KEY) return { sent: false, reason: "no RESEND_API_KEY" };
+  const state = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'last_activity_id'").first<{ value: string }>();
+  const max = (await env.DB.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM activity").first<{ m: number }>())!.m;
+  if (!state) {
+    // First run after email is switched on: start from now, do not send old history.
+    await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('last_activity_id', ?)").bind(String(max)).run();
+    return { sent: false, reason: "initialized" };
+  }
+  const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+  const rows = (
+    await env.DB.prepare(
+      `SELECT id, client_slug, path, email, kind, detail, created_at FROM activity WHERE id > ? AND kind IN (${DIGEST_KINDS.map(() => "?").join(",")}) ORDER BY id LIMIT 300`,
+    )
+      .bind(Number(state.value), ...DIGEST_KINDS)
+      .all<ActivityRow>()
+  ).results.filter((r) => !admins.includes(r.email));
+
+  if (rows.length) {
+    const names = new Map(
+      (await env.DB.prepare("SELECT slug, name FROM clients").all<{ slug: string; name: string }>()).results.map((c) => [c.slug, c.name]),
+    );
+    const d = buildDigest(env, rows, names);
+    await sendEmail(env, d.subject, d.html, d.text); // throws on failure, so the pointer is not advanced
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('last_activity_id', ?)").bind(String(max)).run();
+  return { sent: rows.length > 0, count: rows.length };
+}
+
 export default {
+  async scheduled(_ctrl: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runDigest(env).catch((err) => console.error("digest failed", err)));
+  },
+
   async fetch(req: Request, env: Env): Promise<Response> {
     try {
       return await route(req, env);
