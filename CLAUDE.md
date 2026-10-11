@@ -21,6 +21,9 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
 - The portal's only writes to the Synology are creating folders (MKCOL) and adding new
   files up to 100 MB (PUT, never overwriting; `freeName` picks "x (2).ext"). Admin only.
   nginx allows GET, HEAD, PUT and MKCOL; renames, moves and deletes are disabled there.
+  Every Synology write goes through `nasWrite()` in worker.ts, which refuses non-admin
+  sessions with 403. The router refuses any verb other than GET/HEAD/POST/DELETE, and
+  /media/* is GET/HEAD only. Clients are view-only on files.
   Larger uploads (chunked, via a helper container) are a planned later step.
 - No em-dashes anywhere. Plain language; clients are small business owners.
 - Visual tokens match genvyd.com (`src/index.css` there). Accent is #ff2a2a.

@@ -195,12 +195,36 @@ function folderName(raw: unknown): string {
   return n;
 }
 
-/** Creates a folder on the Synology. Returns false if it was already there. */
-async function makeNasFolder(env: Env, segs: string[]): Promise<boolean> {
+// ---------------------------------------------------------------------------
+// Writes to the Synology: one choke point, admin only.
+// ---------------------------------------------------------------------------
+
+/**
+ * The ONLY place this Worker sends a write request to the Synology.
+ * Clients are view-only: any non-admin session is refused here with 403
+ * before anything leaves the Worker, whatever route or UI it came through.
+ * Only PUT (new file) and MKCOL (new folder) exist; nobody can rename, move
+ * or delete.
+ */
+async function nasWrite(
+  env: Env,
+  user: User,
+  method: "PUT" | "MKCOL",
+  segs: string[],
+  init: { body?: ReadableStream | null; contentType?: string } = {},
+): Promise<Response> {
+  if (!user.admin) throw new HttpError(403, "Only Genvyd can add files or folders.");
+  if (method !== "PUT" && method !== "MKCOL") throw new HttpError(403, "Not allowed.");
   if (!env.MEDIA_ORIGIN) throw new HttpError(503, "File storage is not connected yet (MEDIA_ORIGIN is empty).");
   const base = env.MEDIA_ORIGIN.replace(/\/+$/, "");
-  const url = `${base}/${segs.map(encodeURIComponent).join("/")}/`;
-  const res = await fetch(url, { method: "MKCOL", headers: originHeaders(env) });
+  const url = `${base}/${segs.map(encodeURIComponent).join("/")}${method === "MKCOL" ? "/" : ""}`;
+  const extra: Record<string, string> = init.contentType ? { "content-type": init.contentType } : {};
+  return fetch(url, { method, headers: originHeaders(env, extra), body: init.body ?? undefined });
+}
+
+/** Creates a folder on the Synology (admin only). Returns false if it was already there. */
+async function makeNasFolder(env: Env, user: User, segs: string[]): Promise<boolean> {
+  const res = await nasWrite(env, user, "MKCOL", segs);
   if (res.status === 201) return true;
   if (res.status === 405) return false; // already exists
   if (res.status === 409) throw new HttpError(409, "The parent folder is missing on the Synology.");
@@ -386,11 +410,16 @@ async function route(req: Request, env: Env): Promise<Response> {
 
   const email = await authenticate(req, env);
   const user: User = { email, admin: isAdmin(env, email) };
-  const method = req.method;
+  const method = req.method.toUpperCase();
 
-  // ---- media --------------------------------------------------------------
+  // Only these methods exist on the portal. Raw WebDAV or write verbs
+  // (PUT, MKCOL, MOVE, COPY, PROPPATCH, LOCK, PATCH...) are refused for everyone;
+  // admin writes go through POST /api/c/:slug/upload and /folder instead.
+  if (!["GET", "HEAD", "POST", "DELETE"].includes(method)) throw new HttpError(403, "Not allowed.");
+
+  // ---- media (read only, for everyone) ------------------------------------
   if (isMedia) {
-    if (method !== "GET" && method !== "HEAD") throw new HttpError(405, "Method not allowed.");
+    if (method !== "GET" && method !== "HEAD") throw new HttpError(403, "Files here are view only.");
     let rest: string[];
     try {
       rest = path.slice("/media/".length).split("/").map((s) => decodeURIComponent(s));
@@ -424,10 +453,9 @@ async function route(req: Request, env: Env): Promise<Response> {
       if (size > MAX_UPLOAD) throw new HttpError(413, "That file is over 100 MB. Copy it in with Finder instead.");
       if (!req.body) throw new HttpError(400, "No file was sent.");
       const name = await freeName(env, [c.folder, ...dir], wanted);
-      const res = await fetch(originUrl(env, c.folder, [...dir, name]), {
-        method: "PUT",
-        headers: originHeaders(env, { "content-type": req.headers.get("content-type") || "application/octet-stream" }),
+      const res = await nasWrite(env, user, "PUT", [c.folder, ...dir, name], {
         body: req.body,
+        contentType: req.headers.get("content-type") || "application/octet-stream",
       });
       if (res.status === 403) {
         throw new HttpError(502, "The Synology refused the upload. Update nginx.conf on the Synology (see synology/SYNOLOGY_UPDATE.md).");
@@ -441,7 +469,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       const body = await readBody(req);
       const parent = cleanPath(String(body.dir ?? ""), true);
       const name = folderName(body.name);
-      const created = await makeNasFolder(env, [c.folder, ...parent, name]);
+      const created = await makeNasFolder(env, user, [c.folder, ...parent, name]);
       return json({ ok: true, created, path: [...parent, name].join("/") });
     }
     if (action === "item" && method === "GET") {
@@ -548,7 +576,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       if (!name) throw new HttpError(400, "Client name is required.");
       // No folder picked means "make one named after the client".
       const folder = body.folder ? String(body.folder).trim() : folderName(name);
-      if (!body.folder) await makeNasFolder(env, [folder]);
+      if (!body.folder) await makeNasFolder(env, user, [folder]);
       const slug = String(body.slug ?? folder)
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
