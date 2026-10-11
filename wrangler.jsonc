@@ -21,8 +21,7 @@
     {
       "binding": "DB",
       "database_name": "genvyd-clients",
-      // Paste the Database ID from Cloudflare > Storage & Databases > D1 here.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "ad0df7f0-35e3-4b59-8441-c68ffc3c0b9b",
       "migrations_dir": "migrations"
     }
   ],
@@ -31,9 +30,9 @@
     // Emails that see every client and the admin page. Comma separated.
     "ADMIN_EMAILS": "behindthecamera7@gmail.com",
     // Zero Trust team domain, e.g. "genvyd.cloudflareaccess.com".
-    "TEAM_DOMAIN": "",
+    "TEAM_DOMAIN": "genvyd.cloudflareaccess.com",
     // Application Audience (AUD) tag from the clients.genvyd.com Access app.
-    "POLICY_AUD": "",
+    "POLICY_AUD": "8ceffaff2dd137d455ac00b5c43decffff072d931f4e6cd650941d211e4c6930",
     // Tunnel hostname that serves the Synology folder, e.g. "https://nas-media.genvyd.com".
     "MEDIA_ORIGIN": "https://nas-media.genvyd.com"
   }
