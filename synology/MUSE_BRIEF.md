@@ -16,7 +16,7 @@ Work through Part A, stop at the checkpoint, then do Part B once Anthony says go
 - On the Synology: do NOT change, move, rename or delete any existing shared folder,
   file, user, permission or package setting. Do NOT open router ports, enable
   QuickConnect, DDNS, or the DSM reverse proxy for this. Do NOT add a `ports:`
-  section to the compose file. Keep the share mounted read only (`:ro`).
+  section to the compose file. Mount the share exactly as written in the compose file.
 - In Cloudflare: do NOT change or delete any existing DNS record, Worker, or
   Access application. Only create the new items below. The genvyd.com marketing
   site (Worker `genvyd-website`) must not be touched.
@@ -56,9 +56,10 @@ Work through Part A, stop at the checkpoint, then do Part B once Anthony says go
 3. In `docker/genvyd-portal` create `nginx.conf` with exactly:
 
 ```nginx
-# Read-only file server for the Genvyd client portal.
-# Root is needed only so nginx can read the Synology share regardless of its
-# folder permissions. The share is mounted read only and no port is published.
+# File server for the Genvyd client portal.
+# Root is needed only so nginx can read and write the Synology share regardless
+# of its folder permissions. No port is published; only the tunnel reaches it,
+# and the tunnel hostname only accepts the portal's service token.
 user root;
 worker_processes 2;
 error_log /dev/stderr warn;
@@ -69,7 +70,6 @@ events { worker_connections 256; }
 http {
   include /etc/nginx/mime.types;
   default_type application/octet-stream;
-  types { video/mp4 m4v; }
   access_log off;
   sendfile on;
   tcp_nopush on;
@@ -89,6 +89,12 @@ http {
       autoindex_format json;   # the portal reads folder contents from this
       autoindex_exact_size on;
       add_header Cache-Control "no-cache";
+
+      # The portal can create folders (MKCOL). It cannot upload, rename,
+      # move or delete anything: those methods are simply not enabled.
+      dav_methods MKCOL;
+      dav_access user:rw group:rw all:rw;   # new folders stay writable from Finder
+      limit_except GET HEAD MKCOL { deny all; }
     }
   }
 }
@@ -114,8 +120,9 @@ services:
     container_name: genvyd-files
     restart: unless-stopped
     volumes:
-      # Your client share, read only. The portal can never change or delete files.
-      - /volume1/GenvydClients:/srv:ro
+      # Your client share. Writable only so the portal can create folders;
+      # nginx allows nothing but reading and making new folders.
+      - /volume1/GenvydClients:/srv
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
 
   tunnel:

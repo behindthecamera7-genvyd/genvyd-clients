@@ -49,7 +49,7 @@ Export review copies as **H.264 MP4**. ProRes `.mov` files will not play in a br
    - Replace `PASTE_TUNNEL_TOKEN_HERE` with the token from step 3
 4. Next, Done. Both containers should show as running, and the tunnel in Zero Trust should turn **Healthy**.
 
-No router ports are opened. The files are mounted read only, so the portal can never edit or delete anything.
+No router ports are opened. The portal can read files and create new folders, but nginx blocks uploads, renames and deletes, so it can never change or remove your work.
 
 ## 5. Lock the Synology hostname so only the portal can read it
 
@@ -93,7 +93,7 @@ Wait until Claude confirms the values from steps 2, 6 and 7 are pushed.
 ## 9. Try it
 
 1. Open `clients.genvyd.com`, enter your Gmail, enter the code.
-2. **Admin → Add a client**: pick their folder from the list (it reads the Synology live).
+2. **Admin → Add a client**: type their name. A folder is created for them on the Synology (or pick an existing one).
 3. **Add login**: their email. Send them the link. That is the whole onboarding.
 
 ## If something is off

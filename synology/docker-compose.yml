@@ -11,8 +11,9 @@ services:
     container_name: genvyd-files
     restart: unless-stopped
     volumes:
-      # Your client share, read only. The portal can never change or delete files.
-      - /volume1/GenvydClients:/srv:ro
+      # Your client share. Writable only so the portal can create folders;
+      # nginx allows nothing but reading and making new folders.
+      - /volume1/GenvydClients:/srv
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
 
   tunnel:

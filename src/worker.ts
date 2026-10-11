@@ -182,6 +182,34 @@ function originHeaders(env: Env, extra: Record<string, string> = {}) {
   return h;
 }
 
+/** Turns whatever Anthony types into a safe single folder name. */
+function folderName(raw: unknown): string {
+  const n = String(raw ?? "")
+    .replace(/[\/\\:*?"<>|\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[.@#\s-]+/, "")
+    .slice(0, 100)
+    .trim();
+  if (!n) throw new HttpError(400, "Folder name is empty.");
+  return n;
+}
+
+/** Creates a folder on the Synology. Returns false if it was already there. */
+async function makeNasFolder(env: Env, segs: string[]): Promise<boolean> {
+  if (!env.MEDIA_ORIGIN) throw new HttpError(503, "File storage is not connected yet (MEDIA_ORIGIN is empty).");
+  const base = env.MEDIA_ORIGIN.replace(/\/+$/, "");
+  const url = `${base}/${segs.map(encodeURIComponent).join("/")}/`;
+  const res = await fetch(url, { method: "MKCOL", headers: originHeaders(env) });
+  if (res.status === 201) return true;
+  if (res.status === 405) return false; // already exists
+  if (res.status === 409) throw new HttpError(409, "The parent folder is missing on the Synology.");
+  if (res.status === 403) {
+    throw new HttpError(502, "The Synology refused to create the folder. Update nginx.conf on the Synology (see synology/UPDATE_FOR_FOLDERS.md).");
+  }
+  throw new HttpError(502, `The Synology answered ${res.status} when creating the folder.`);
+}
+
 type NasEntry = { name: string; type: "file" | "directory"; mtime?: string; size?: number };
 
 async function listNas(env: Env, folder: string, segs: string[]): Promise<NasEntry[]> {
@@ -363,13 +391,21 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
 
     if (action === "list" && method === "GET") {
       return json(await listDir(env, user, c, url.searchParams.get("dir") || ""));
+    }
+    if (action === "folder" && method === "POST") {
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can create folders.");
+      const body = await readBody(req);
+      const parent = cleanPath(String(body.dir ?? ""), true);
+      const name = folderName(body.name);
+      const created = await makeNasFolder(env, [c.folder, ...parent, name]);
+      return json({ ok: true, created, path: [...parent, name].join("/") });
     }
     if (action === "item" && method === "GET") {
       return json(await itemDetail(env, user, c, url.searchParams.get("path") || ""));
@@ -472,12 +508,14 @@ async function route(req: Request, env: Env): Promise<Response> {
     if (path === "/api/admin/clients" && method === "POST") {
       const body = await readBody(req);
       const name = String(body.name ?? "").trim();
-      const folder = String(body.folder ?? "").trim();
+      if (!name) throw new HttpError(400, "Client name is required.");
+      // No folder picked means "make one named after the client".
+      const folder = body.folder ? String(body.folder).trim() : folderName(name);
+      if (!body.folder) await makeNasFolder(env, [folder]);
       const slug = String(body.slug ?? folder)
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-+|-+$/g, "");
-      if (!name) throw new HttpError(400, "Client name is required.");
       cleanPath(folder); // same rules as any path segment
       if (folder.includes("/")) throw new HttpError(400, "Folder must be a single top level folder.");
       if (!SLUG.test(slug)) throw new HttpError(400, "Could not make a URL name from that folder.");

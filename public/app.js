@@ -145,9 +145,26 @@
     );
 
     const title = dir ? baseName(dir) : data.client.name;
+    const newFolderBtn = state.me.admin
+      ? h("button", {
+          class: "btn small",
+          onclick: async () => {
+            const name = prompt(dir ? "New folder name:" : "New project name (e.g. Spring Campaign):");
+            if (!name || !name.trim()) return;
+            try {
+              const r = await api("POST", `/api/c/${enc(slug)}/folder`, { dir, name });
+              toast(r.created ? "Folder created." : "That folder already exists.");
+              location.hash = `#/c/${enc(slug)}/f/${enc(r.path)}`;
+            } catch (err) { toast(err.message); }
+          },
+        }, dir ? "+ New folder" : "+ New project")
+      : null;
     const parts = [
       crumbs(data.client, dir),
-      h("div", { class: "page-head" }, h("h1", {}, title), data.items.length ? filterBar : null),
+      h("div", { class: "page-head" },
+        h("h1", {}, title),
+        h("div", { class: "actions" }, data.items.length ? filterBar : null, newFolderBtn),
+      ),
     ];
 
     if (data.folders.length) {
@@ -394,16 +411,18 @@
     const nameIn = h("input", { placeholder: "Client name, e.g. WYCOGA" });
     const used = new Set(data.clients.map((c) => c.folder));
     const free = folders.folders.filter((f) => !used.has(f));
-    const folderIn = free.length
-      ? h("select", {}, h("option", { value: "" }, "Pick their Synology folder"), free.map((f) => h("option", { value: f }, f)))
-      : h("input", { placeholder: "Folder name on the Synology" });
+    // Default is a brand new folder named after the client; existing unused folders are listed too.
+    const folderIn = h("select", {},
+      h("option", { value: "" }, "Create a new folder for them"),
+      free.length ? h("optgroup", { label: "Or use an existing folder" }, free.map((f) => h("option", { value: f }, f))) : null,
+    );
     const addClient = h("form", {
       class: "form-row",
       onsubmit: async (e) => {
         e.preventDefault();
         try {
           await api("POST", "/api/admin/clients", { name: nameIn.value, folder: folderIn.value });
-          toast("Client added.");
+          toast(folderIn.value ? "Client added." : `Client added, with a new "${nameIn.value.trim()}" folder on the Synology.`);
           refresh();
         } catch (err) { toast(err.message); }
       },
