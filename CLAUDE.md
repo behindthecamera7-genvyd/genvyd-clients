@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts. All additive.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at. All additive.
 
 ## Roles
 
@@ -53,6 +53,16 @@ baseline (no email), waits 10 min after the last new file, then emails each clie
 logins with alerts on (from `CLIENT_NOTIFY_FROM`, needs a Resend-verified domain; empty
 = off, and pending files are cleared so turning it on starts fresh). Clients can switch
 it off on their projects page.
+
+## Welcome email
+
+`welcomeEmail()` / `sendWelcome()` in worker.ts. Adding a new login (`POST /api/admin/members`)
+sends it automatically when client email is on (`CLIENT_NOTIFY_FROM` + `RESEND_API_KEY`),
+reply-to is NOTIFY_TO, and stamps `members.welcomed_at` (migration 0006). Admin page:
+Send/Resend welcome, Copy invite (`GET /api/admin/welcome-text`, for pasting into his own
+email while client email is off), and Preview welcome email (sent to NOTIFY_TO via
+NOTIFY_FROM, works before the domain is verified). Steps reference Cloudflare Access's
+"Send me a code" one-time PIN screen.
 
 ## Browsing
 

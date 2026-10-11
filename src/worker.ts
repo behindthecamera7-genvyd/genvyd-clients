@@ -939,8 +939,30 @@ async function route(req: Request, env: Env): Promise<Response> {
       );
       return json({ ok: true, to: env.NOTIFY_TO || env.ADMIN_EMAILS });
     }
+    if (path === "/api/admin/welcome-preview" && method === "POST") {
+      // Sends a sample welcome email to Anthony (works before client email is switched on).
+      const body = await readBody(req);
+      const c = await env.DB.prepare("SELECT name FROM clients WHERE slug = ?").bind(String(body.client ?? "")).first<{ name: string }>();
+      const w = welcomeEmail(env, c?.name || "Your Company", "client@theircompany.com");
+      await sendEmail(env, `[Preview] ${w.subject}`, w.html, w.text);
+      return json({ ok: true, to: env.NOTIFY_TO || env.ADMIN_EMAILS });
+    }
+    if (path === "/api/admin/welcome-text" && method === "GET") {
+      // Plain-text version Anthony can paste into his own email.
+      const slug = url.searchParams.get("client") || "";
+      const em = (url.searchParams.get("email") || "").toLowerCase();
+      const c = await env.DB.prepare("SELECT name FROM clients WHERE slug = ?").bind(slug).first<{ name: string }>();
+      if (!c) throw new HttpError(404, "No such client.");
+      const w = welcomeEmail(env, c.name, em || "your email");
+      return json({ subject: w.subject, text: w.text });
+    }
     if (path === "/api/admin/notify-status" && method === "GET") {
-      return json({ configured: !!env.RESEND_API_KEY, to: env.NOTIFY_TO || env.ADMIN_EMAILS, from: env.NOTIFY_FROM || "onboarding@resend.dev" });
+      return json({
+        configured: !!env.RESEND_API_KEY,
+        clientEmail: !!(env.RESEND_API_KEY && env.CLIENT_NOTIFY_FROM),
+        to: env.NOTIFY_TO || env.ADMIN_EMAILS,
+        from: env.NOTIFY_FROM || "onboarding@resend.dev",
+      });
     }
 
     if (path === "/api/admin/dashboard" && method === "GET") {
@@ -1002,7 +1024,7 @@ async function route(req: Request, env: Env): Promise<Response> {
     if (path === "/api/admin/overview" && method === "GET") {
       const [clients, members, activity] = await env.DB.batch([
         env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
-        env.DB.prepare("SELECT client_slug, email FROM members ORDER BY email"),
+        env.DB.prepare("SELECT client_slug, email, welcomed_at FROM members ORDER BY email"),
         env.DB.prepare(
           "SELECT a.id, a.client_slug, c.name AS client_name, a.path, a.email, a.kind, a.detail, a.created_at " +
             "FROM activity a LEFT JOIN clients c ON c.slug = a.client_slug ORDER BY a.created_at DESC LIMIT 100",
@@ -1068,9 +1090,17 @@ async function route(req: Request, env: Env): Promise<Response> {
       const exists = await env.DB.prepare("SELECT 1 FROM clients WHERE slug = ?").bind(slug).first();
       if (!exists) throw new HttpError(404, "No such client.");
       if (method === "POST") {
-        await env.DB.prepare("INSERT OR IGNORE INTO members (client_slug, email, created_at) VALUES (?, ?, ?)")
+        const r = await env.DB.prepare("INSERT OR IGNORE INTO members (client_slug, email, created_at) VALUES (?, ?, ?)")
           .bind(slug, em, now())
           .run();
+        const isNew = r.meta.changes > 0;
+        let welcome: { sent: boolean; reason?: string } = { sent: false, reason: "Not requested." };
+        if (body.welcome !== false && (isNew || body.resend)) {
+          try { welcome = await sendWelcome(env, slug, em); } catch (err) {
+            welcome = { sent: false, reason: err instanceof HttpError ? err.message : "The email service failed." };
+          }
+        }
+        return json({ ok: true, added: isNew, welcome });
       } else {
         await env.DB.prepare("DELETE FROM members WHERE client_slug = ? AND email = ?").bind(slug, em).run();
       }
@@ -1079,6 +1109,80 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   throw new HttpError(404, "Not found.");
+}
+
+// ---------------------------------------------------------------------------
+// Welcome email for a new client login
+// ---------------------------------------------------------------------------
+
+function welcomeEmail(env: Env, clientName: string, email: string) {
+  const portal = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
+  const host = portal.replace(/^https?:\/\//, "");
+  const subject = `Your ${clientName} review space at Genvyd is ready`;
+  const steps = [
+    ["Open the portal", `Go to <a href="${esc(portal)}" style="color:#d4141a">${esc(host)}</a> on your phone or computer.`, `Go to ${portal}`],
+    ["Enter your email", `Type <b>${esc(email)}</b> (this exact address) and tap <b>Send me a code</b>.`, `Type ${email} (this exact address) and tap "Send me a code".`],
+    ["Check your inbox", `You will get a short sign-in code within a minute. It comes from Cloudflare, the service that keeps the portal private. Not there? Check spam.`, "You will get a short sign-in code within a minute. It comes from Cloudflare, the service that keeps the portal private. Not there? Check spam."],
+    ["Enter the code", `Type the code on the sign-in page and you are in. There is no password to create or remember.`, "Type the code on the sign-in page and you are in. No password to create or remember."],
+  ];
+  const can = [
+    ["Watch and look", "every video and image we make for you, full quality, on any device."],
+    ["Approve or request changes", "with one tap on each piece."],
+    ["Leave comments", "on videos, pause where you mean and your note is pinned to that exact moment."],
+    ["Favorite", "the ones you love so they are easy to find later."],
+    ["Pick ads for each campaign", "when we set one up, so we know exactly what to run."],
+    ["See what is new", "new work is marked NEW, and you can download anything you need."],
+  ];
+
+  const stepHtml = steps
+    .map(
+      ([t, d], i) =>
+        `<tr><td valign="top" style="padding:0 14px 18px 0"><div style="width:30px;height:30px;border-radius:15px;background:#ff2a2a;color:#fff;font-weight:bold;text-align:center;line-height:30px">${i + 1}</div></td>` +
+        `<td valign="top" style="padding:0 0 18px"><div style="font-weight:bold;font-size:16px;margin:4px 0 4px">${t}</div><div style="color:#444;line-height:1.5">${d}</div></td></tr>`,
+    )
+    .join("");
+  const canHtml = can.map(([t, d]) => `<li style="margin:6px 0;line-height:1.5"><b>${t}:</b> ${d}</li>`).join("");
+
+  const html =
+    `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:600px;margin:0 auto">` +
+    `<div style="background:#000;color:#fff;padding:22px 24px;border-radius:16px 16px 0 0"><div style="font-size:22px;font-weight:bold">genvyd</div><div style="color:#bbb;font-size:12px;letter-spacing:2px;margin-top:4px">CLIENT REVIEW</div></div>` +
+    `<div style="border:1px solid #eee;border-top:0;border-radius:0 0 16px 16px;padding:26px 24px">` +
+    `<p style="font-size:17px;margin:0 0 12px">Hi,</p>` +
+    `<p style="line-height:1.6;margin:0 0 12px">Your private review space for <b>${esc(clientName)}</b> is ready. This is where we share every video and image we make for you, and where you tell us what you like, what to change, and what to use.</p>` +
+    `<p style="line-height:1.6;margin:0 0 22px">Getting in takes about a minute:</p>` +
+    `<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%">${stepHtml}</table>` +
+    `<p style="text-align:center;margin:6px 0 28px"><a href="${esc(portal)}" style="display:inline-block;background:#ff2a2a;color:#fff;padding:14px 26px;border-radius:999px;text-decoration:none;font-weight:bold">Open my review space</a></p>` +
+    `<div style="font-weight:bold;font-size:16px;margin:0 0 6px">What you can do there</div><ul style="padding-left:18px;margin:0 0 22px">${canHtml}</ul>` +
+    `<div style="background:#f6f6f6;border-radius:12px;padding:14px 16px;line-height:1.55;color:#333;font-size:14px">` +
+    `<b>Good to know</b><ul style="margin:6px 0 0;padding-left:18px">` +
+    `<li style="margin:4px 0">On your phone, add the portal to your home screen so it opens like an app.</li>` +
+    `<li style="margin:4px 0">Only the emails we add can see your space. If someone else on your team needs access, just reply and tell us their email.</li>` +
+    `<li style="margin:4px 0">Now and then the portal may ask for a fresh code. Same steps, a few seconds.</li></ul></div>` +
+    `<p style="line-height:1.6;margin:22px 0 0">Questions or stuck? Just reply to this email.</p>` +
+    `<p style="line-height:1.6;margin:8px 0 0">Talk soon,<br>Anthony<br><span style="color:#777">Genvyd</span></p>` +
+    `</div></div>`;
+
+  const text =
+    `Hi,\n\nYour private review space for ${clientName} is ready. This is where we share every video and image we make for you, and where you tell us what you like, what to change, and what to use.\n\n` +
+    `Getting in takes about a minute:\n\n` +
+    steps.map(([t, , txt], i) => `${i + 1}. ${t}: ${txt}`).join("\n") +
+    `\n\nWhat you can do there:\n` +
+    can.map(([t, d]) => `- ${t}: ${d}`).join("\n") +
+    `\n\nGood to know:\n- On your phone, add the portal to your home screen so it opens like an app.\n- Only the emails we add can see your space. Reply with a teammate's email to add them.\n- Now and then the portal may ask for a fresh code. Same steps.\n\nQuestions or stuck? Just reply to this email.\n\nTalk soon,\nAnthony\nGenvyd\n`;
+  return { subject, html, text };
+}
+
+/** Sends the welcome email if client email is switched on. Returns whether it went out. */
+async function sendWelcome(env: Env, slug: string, email: string): Promise<{ sent: boolean; reason?: string }> {
+  if (!env.RESEND_API_KEY) return { sent: false, reason: "Email is not set up yet (RESEND_API_KEY)." };
+  if (!env.CLIENT_NOTIFY_FROM) return { sent: false, reason: "Client email is not switched on yet (needs the verified sending address)." };
+  const c = await env.DB.prepare("SELECT name FROM clients WHERE slug = ?").bind(slug).first<{ name: string }>();
+  if (!c) throw new HttpError(404, "No such client.");
+  const w = welcomeEmail(env, c.name, email);
+  const replyTo = (env.NOTIFY_TO || env.ADMIN_EMAILS || "").split(",")[0]?.trim() || undefined;
+  await sendEmail(env, w.subject, w.html, w.text, { to: [email], from: env.CLIENT_NOTIFY_FROM, replyTo });
+  await env.DB.prepare("UPDATE members SET welcomed_at = ? WHERE client_slug = ? AND email = ?").bind(now(), slug, email).run();
+  return { sent: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,14 +1200,21 @@ function itemLink(env: Env, slug: string, path: string) {
   return `${base}/#/c/${encodeURIComponent(slug)}/i/${encodeURIComponent(path)}`;
 }
 
-async function sendEmail(env: Env, subject: string, html: string, text: string, opts: { to?: string[]; from?: string } = {}) {
+async function sendEmail(env: Env, subject: string, html: string, text: string, opts: { to?: string[]; from?: string; replyTo?: string } = {}) {
   if (!env.RESEND_API_KEY) throw new HttpError(503, "Email is not set up yet (RESEND_API_KEY secret is missing).");
   const to = opts.to ?? (env.NOTIFY_TO || env.ADMIN_EMAILS || "").split(",").map((e) => e.trim()).filter(Boolean);
   if (!to.length) throw new HttpError(503, "No NOTIFY_TO address is set.");
   const res = await fetch(env.RESEND_API_URL || "https://api.resend.com/emails", {
     method: "POST",
     headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ from: opts.from || env.NOTIFY_FROM || "Genvyd Portal <onboarding@resend.dev>", to, subject, html, text }),
+    body: JSON.stringify({
+      from: opts.from || env.NOTIFY_FROM || "Genvyd Portal <onboarding@resend.dev>",
+      to,
+      subject,
+      html,
+      text,
+      ...(opts.replyTo ? { reply_to: opts.replyTo } : {}),
+    }),
   });
   if (!res.ok) throw new HttpError(502, `The email service answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
 }

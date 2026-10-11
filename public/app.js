@@ -1001,13 +1001,21 @@
         members.length
           ? members.map((m) =>
               h("div", { class: "member" },
-                h("span", {}, m.email),
-                h("button", {
-                  class: "linkish",
-                  onclick: async () => {
-                    try { await api("DELETE", "/api/admin/members", { client: c.slug, email: m.email }); refresh(); } catch (err) { toast(err.message); }
-                  },
-                }, "Remove"),
+                h("div", { style: "min-width:0" },
+                  h("div", { style: "word-break:break-all" }, m.email),
+                  h("div", { class: "mono muted", style: "font-size:11px" }, m.welcomed_at ? `Welcome sent ${fmtDate(m.welcomed_at)}` : "Welcome email not sent"),
+                ),
+                h("div", { class: "member-tools" },
+                  h("button", { class: "linkish", onclick: () => sendWelcomeTo(c, m.email, true) }, m.welcomed_at ? "Resend welcome" : "Send welcome"),
+                  h("button", { class: "linkish", onclick: () => copyInvite(c, m.email) }, "Copy invite"),
+                  h("button", {
+                    class: "linkish",
+                    onclick: async () => {
+                      if (!confirm(`Remove ${m.email} from ${c.name}? They will no longer be able to sign in to it.`)) return;
+                      try { await api("DELETE", "/api/admin/members", { client: c.slug, email: m.email }); refresh(); } catch (err) { toast(err.message); }
+                    },
+                  }, "Remove"),
+                ),
               ),
             )
           : h("div", { class: "muted", style: "font-size:14px" }, "No one can log in to this client yet."),
@@ -1016,14 +1024,34 @@
           onsubmit: async (e) => {
             e.preventDefault();
             try {
-              await api("POST", "/api/admin/members", { client: c.slug, email: emailIn.value });
-              toast("Added. They sign in at clients.genvyd.com with that email.");
+              const r = await api("POST", "/api/admin/members", { client: c.slug, email: emailIn.value });
+              if (!r.added) toast("That email already has access.");
+              else if (r.welcome.sent) toast(`Added, and a welcome email with setup steps went to ${emailIn.value.trim()}.`);
+              else {
+                toast(`Added. Welcome email not sent: ${r.welcome.reason} Use "Copy invite" to send it yourself.`);
+              }
               refresh();
             } catch (err) { toast(err.message); }
           },
         }, emailIn, h("button", { class: "btn small", type: "submit" }, "Add login")),
       );
     });
+
+    async function sendWelcomeTo(c, email, resend) {
+      try {
+        const r = await api("POST", "/api/admin/members", { client: c.slug, email, resend });
+        if (r.welcome.sent) { toast(`Welcome email sent to ${email}.`); refresh(); }
+        else toast(`Not sent: ${r.welcome.reason} Use "Copy invite" instead.`);
+      } catch (err) { toast(err.message); }
+    }
+    async function copyInvite(c, email) {
+      try {
+        const r = await api("GET", `/api/admin/welcome-text?client=${enc(c.slug)}&email=${enc(email)}`);
+        const all = `Subject: ${r.subject}\n\n${r.text}`;
+        try { await navigator.clipboard.writeText(all); toast("Invite copied. Paste it into an email to them."); }
+        catch { prompt("Copy this invite:", all); }
+      } catch (err) { toast(err.message); }
+    }
 
     // Import from links: paste Higgsfield file links (one per line) and they are
     // copied straight onto the Synology into the client's folder.
@@ -1082,6 +1110,19 @@
           ? h("p", { class: "muted", style: "margin:0 0 12px" }, `On. A summary goes to ${st.to} when clients approve, request changes, comment, favorite or pick campaign ads (at most every 15 minutes).`)
           : h("p", { class: "muted", style: "margin:0 0 12px" }, "Off. Add the RESEND_API_KEY secret to the genvyd-clients Worker in Cloudflare to switch it on (see SETUP.md)."),
         st.configured ? testBtn : "",
+        st.configured
+          ? h("button", {
+              class: "btn small", style: "margin-left:8px",
+              onclick: async () => {
+                try { const r = await api("POST", "/api/admin/welcome-preview", { client: data.clients[0]?.slug || "" }); toast(`Preview of the client welcome email sent to ${r.to}.`); }
+                catch (err) { toast(err.message); }
+              },
+            }, "Preview welcome email")
+          : "",
+        h("p", { class: "muted", style: "margin:12px 0 0;font-size:13px" },
+          st.clientEmail
+            ? "Client emails are on: new logins get a welcome email with setup steps, and clients hear about new work."
+            : "Client emails are off until the sending address is verified (EMAIL_SETUP.md step 5). Until then, use Copy invite next to each login."),
       );
     }).catch(() => {});
 
