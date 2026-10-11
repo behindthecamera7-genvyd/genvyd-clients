@@ -225,3 +225,50 @@ label.check input { width: auto; }
 .thumb .pill.new { position: absolute; top: auto; bottom: 10px; left: 10px; right: auto; background: var(--accent); color: #fff; border-color: var(--accent); }
 .new-badge { flex: none; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--accent); color: #fff; font: 500 12px var(--mono); display: inline-flex; align-items: center; }
 .alerts-toggle { margin-top: 28px; }
+
+/* Anything marked hidden stays hidden, whatever display a later rule sets. */
+[hidden] { display: none !important; }
+
+/* Thumbnails stay invisible until loaded, so no broken-image icon flashes while scrolling. */
+.thumb img, .thumb video { opacity: 0; transition: opacity .25s; }
+.thumb img.loaded, .thumb video.loaded { opacity: 1; }
+
+/* ---- phones: thumb-sized targets, compact filters --------------------- */
+@media (max-width: 720px) {
+  /* Small text links stay small visually but get a 40px tall hit area. */
+  .linkish, .topnav a, .crumbs a, .comment-tools a {
+    display: inline-flex; align-items: center; min-height: 40px; padding: 0 6px; margin: -6px 0;
+  }
+  .topnav { gap: 10px; }
+  .comment-tools { gap: 6px; margin-top: 4px; }
+  .tag-x { min-width: 32px; min-height: 32px; font-size: 18px; }
+  button.tc { padding: 6px 8px; }
+  .seg-btn { height: 38px; }
+  .chip, .small-chip { min-height: 38px; }
+  label.check input { width: 22px; height: 22px; }
+  label.check { min-height: 40px; }
+
+  /* Filters sit two per row instead of a tall stack. */
+  .toolbar { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  .toolbar-right { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .toolbar-right > * { width: 100%; min-width: 0; }
+  .mini-select { height: 40px; padding-right: 28px; text-overflow: ellipsis; }
+  .seg { width: 100%; justify-content: space-between; }
+  .seg-btn { flex: 1; padding: 0 8px; }
+
+  /* Tags scroll sideways in one line instead of wrapping into a wall. */
+  .tag-filters { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  .tag-filters::-webkit-scrollbar { display: none; }
+  .tag-filters > * { flex: none; }
+
+  /* Viewer: keep the video in view, buttons full width. */
+  .stage video, .stage img { max-height: 60vh; }
+  .side { padding: 18px 16px; }
+  .actions .btn { flex: 1 1 auto; }
+  .composer-row .btn { flex: 1; }
+  .stats .stat-n { font-size: 28px; }
+  .btn.small, .tag-input { height: 40px; }
+  .tag-x { min-width: 36px; min-height: 36px; }
+  /* File links inside activity sentences get a little extra hit area. */
+  .feed-item a { display: inline-block; padding: 6px 0; margin: -6px 0; }
+}

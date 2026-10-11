@@ -4,8 +4,10 @@
 
   const app = document.getElementById("app");
   const state = { me: null, listCache: new Map() };
-  // Replace the page, skipping empty slots (null, false) so they never print as text.
-  const show = (...kids) => app.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
+  const clean = (kids) => kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false);
+  // Replace an element's contents, skipping empty slots (null, false) so they never print as text.
+  const fill = (el, ...kids) => el.replaceChildren(...clean(kids));
+  const show = (...kids) => fill(app, ...kids);
 
   // ---- tiny helpers -------------------------------------------------------
 
@@ -182,7 +184,7 @@
     const approvedHolder = h("div");
     function renderApproved(slug) {
       const list = slug ? dash.approved.filter((it) => it.clientSlug === slug) : dash.approved;
-      approvedHolder.replaceChildren(
+      fill(approvedHolder, 
         clientsWithApproved.length > 1
           ? h("div", { class: "filters", style: "margin-bottom:12px" },
               h("button", { class: "chip small-chip" + (!slug ? " active" : ""), onclick: () => renderApproved(null) }, "All clients"),
@@ -289,7 +291,7 @@
     async function uploadFiles(files) {
       if (!files.length) return;
       uploadPanel.hidden = false;
-      uploadPanel.replaceChildren();
+      fill(uploadPanel);
       let done = 0;
       for (const f of files) {
         const bar = h("div", { class: "upload-bar" }, h("span"));
@@ -495,7 +497,7 @@
         body = grid(shown);
       }
 
-      root.replaceChildren(
+      fill(root, 
         ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, markAll)), tagRow, body].filter(Boolean),
       );
     }
@@ -507,10 +509,10 @@
     const src = mediaUrl(slug, it.path);
     let media;
     if (it.kind === "image") {
-      media = h("img", { "data-src": src, alt: it.name, loading: "lazy" });
+      media = h("img", { "data-src": src, alt: "", loading: "lazy", onload: (e) => e.target.classList.add("loaded") });
       lazy.observe(media);
     } else if (it.kind === "video") {
-      media = h("video", { "data-src": src + "#t=0.5", preload: "metadata", muted: true, playsinline: true });
+      media = h("video", { "data-src": src + "#t=0.5", preload: "metadata", muted: true, playsinline: true, onloadeddata: (e) => e.target.classList.add("loaded") });
       lazy.observe(media);
     } else {
       media = h("div", { class: "ftype" }, it.name.split(".").pop());
@@ -601,7 +603,7 @@
     const tagBox = h("div", { class: "tag-box" });
     let tagSuggestions = null;
     function renderTags(tags) {
-      if (!state.me.admin && !tags.length) { tagBox.replaceChildren(); return; }
+      if (!state.me.admin && !tags.length) { fill(tagBox); return; }
       const chips = tags.map((tg) =>
         h("span", { class: "tag tag-lg" }, `#${tg}`,
           state.me.admin ? h("button", { class: "tag-x", title: `Remove #${tg}`, onclick: () => tagAct("DELETE", tg) }, "×") : null));
@@ -614,7 +616,7 @@
         adder = h("div", { class: "tag-add" }, input, tagSuggestions,
           h("button", { class: "btn small", onclick: () => input.value.trim() && tagAct("POST", input.value) }, "Add"));
       }
-      tagBox.replaceChildren(h("div", { class: "mono muted" }, "TAGS"), h("div", { class: "tile-tags", style: "margin-top:8px" }, chips), adder);
+      fill(tagBox, h("div", { class: "mono muted" }, "TAGS"), h("div", { class: "tile-tags", style: "margin-top:8px" }, chips), adder);
     }
     async function tagAct(method, tag) {
       try {
@@ -628,14 +630,14 @@
       if (!state.me.admin) return;
       try {
         const r = await api("GET", `/api/c/${enc(slug)}/tags`);
-        if (tagSuggestions) tagSuggestions.replaceChildren(...r.tags.map((t) => h("option", { value: t.tag })));
+        if (tagSuggestions) fill(tagSuggestions, ...r.tags.map((t) => h("option", { value: t.tag })));
       } catch { /* suggestions are optional */ }
     }
     async function loadCampaigns() {
       try {
         const r = await api("GET", `/api/c/${enc(slug)}/campaigns?path=${enc(path)}`);
         if (!r.campaigns.length) {
-          campBox.replaceChildren(
+          fill(campBox, 
             h("div", { class: "mono muted" }, "USE IN CAMPAIGN"),
             h("p", { class: "muted", style: "margin:6px 0 0;font-size:13px" },
               state.me.admin ? "No campaigns yet. " : "No campaigns set up yet.",
@@ -643,7 +645,7 @@
           );
           return;
         }
-        campBox.replaceChildren(
+        fill(campBox, 
           h("div", { class: "mono muted" }, "USE IN CAMPAIGN"),
           h("div", { class: "filters", style: "margin-top:8px" },
             r.campaigns.map((cp) =>
@@ -662,7 +664,7 @@
           ),
         );
       } catch (err) {
-        campBox.replaceChildren(h("div", { class: "muted" }, err.message));
+        fill(campBox, h("div", { class: "muted" }, err.message));
       }
     }
     loadCampaigns();
@@ -741,7 +743,7 @@
         }
       }
 
-      side.replaceChildren(
+      fill(side, 
         h("div", {},
           h("div", { class: "title-row" },
             h("h2", { style: "word-break:break-word" }, it.name),
@@ -1037,7 +1039,7 @@
       const slug = impClient.value;
       impBtn.disabled = true;
       impLog.hidden = false;
-      impLog.replaceChildren();
+      fill(impLog);
       let ok = 0;
       for (const line of lines) {
         const [url, dir = "", name = "", tags = ""] = line.split("|").map((x) => x.trim());
@@ -1068,7 +1070,7 @@
           testBtn.disabled = false;
         },
       }, "Send test email");
-      emailCard.replaceChildren(
+      fill(emailCard, 
         h("h2", { style: "margin-bottom:8px" }, "Email alerts"),
         st.configured
           ? h("p", { class: "muted", style: "margin:0 0 12px" }, `On. A summary goes to ${st.to} when clients approve, request changes, comment, favorite or pick campaign ads (at most every 15 minutes).`)
