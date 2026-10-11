@@ -49,7 +49,7 @@ h3 { font-size: 16px; }
 }
 @media (min-width: 720px) { .topbar { padding: 14px 32px; } }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--bone); }
-.brand img { display: block; }
+.brand-logo { display: block; height: 36px; width: auto; }
 .brand-word { font-family: var(--display); font-weight: 700; font-size: 20px; }
 .brand-tag { font-family: var(--mono); font-size: 11px; color: var(--smoke); text-transform: uppercase; letter-spacing: 0.12em; }
 .topnav { display: flex; align-items: center; gap: 18px; font-size: 14px; }
