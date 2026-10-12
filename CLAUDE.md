@@ -80,13 +80,20 @@ play button (one at a time, with sound and native controls; counts as viewed), a
 tile has an Open button top right for the full page. The ad page has a big "Back to
 <folder>" button; the router remembers list scroll positions and restores them on return.
 
+Saving a file never navigates (that stranded the home screen app): `saveFile()` fetches it,
+then uses the share sheet on phones (Photos, Files, Messages) or a blob download on computers.
+
 Every tile has a "..." button (`openTileMenu()`): add to or take out of any campaign (admin
 can name a new campaign right there, it is created and the ad added), Favorite, Approve,
 Open, Download. All of it covers every size of the ad. Popover on desktop, bottom sheet on phones.
 
-Sizes of one ad: files in the same folder whose names differ only by an aspect ratio
-(9x16, 4x5, 1x1, 16:9) plus words like feed/stories fold into one tile (`groupSizes()` in
-app.js) with size chips, and the ad page has a size switcher. Approve, Favorite and
+Sizes and versions of one ad: files in the same folder whose names differ only by an aspect
+ratio (9x16, 4x5, 1x1, 16:9), words like feed/stories, or a version mark (v2, rev 3, or the
+"(2)" freeName adds) fold into one tile (`groupAds()` in app.js). The tile shows the newest
+version with size chips and "v3 · 3 versions"; the ad page has size and version switchers and
+an older-version notice. Admin "New version" on the ad page uploads "<name> vN.ext" with
+`versionOf`, and the server copies tags and moves campaign picks to it (status and comments
+start fresh). Files that clash (same size and version) are left apart. Approve, Favorite and
 campaign picks send `also` (the other sizes) so the server applies them to every size,
 logging activity once. Comments and tags stay per file. Previous/Next skip sibling sizes.
 

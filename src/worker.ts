@@ -299,6 +299,8 @@ function kindOf(name: string) {
 // Handlers
 // ---------------------------------------------------------------------------
 
+const parentOf = (p: string) => p.split("/").slice(0, -1).join("/");
+
 async function logActivity(env: Env, slug: string, path: string, email: string, kind: string, detail: string | null) {
   await env.DB.prepare(
     "INSERT INTO activity (client_slug, path, email, kind, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -741,9 +743,30 @@ async function route(req: Request, env: Env): Promise<Response> {
       }
       if (res.status === 413) throw new HttpError(413, "The Synology says that file is too large.");
       if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status} to the upload.`);
-      await registerFiles(env, c.slug, [[...dir, name].join("/")]);
-      await markViewed(env, c.slug, user.email, [[...dir, name].join("/")]);
-      return json({ ok: true, path: [...dir, name].join("/"), renamed: name !== wanted ? name : null });
+      const newPath = [...dir, name].join("/");
+      await registerFiles(env, c.slug, [newPath]);
+      await markViewed(env, c.slug, user.email, [newPath]);
+      // A new version of an existing ad: it keeps the old one's tags and takes its place in
+      // campaigns. Status and comments start fresh (the new version still needs review).
+      const versionOf = url.searchParams.get("versionOf");
+      if (versionOf) {
+        const old = cleanPath(versionOf).join("/");
+        if (parentOf(old) === dir.join("/") && old !== newPath) {
+          await env.DB.batch([
+            env.DB.prepare(
+              "INSERT OR IGNORE INTO item_tags (client_slug, path, tag, created_by, created_at) " +
+                "SELECT client_slug, ?, tag, ?, ? FROM item_tags WHERE client_slug = ? AND path = ?",
+            ).bind(newPath, user.email, now(), c.slug, old),
+            env.DB.prepare(
+              "UPDATE OR IGNORE campaign_items SET path = ? WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)",
+            ).bind(newPath, old, c.slug),
+            env.DB.prepare(
+              "DELETE FROM campaign_items WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)",
+            ).bind(old, c.slug),
+          ]);
+        }
+      }
+      return json({ ok: true, path: newPath, renamed: name !== wanted ? name : null });
     }
     if (action === "folder" && method === "POST") {
       if (!user.admin) throw new HttpError(403, "Only Genvyd can create folders.");

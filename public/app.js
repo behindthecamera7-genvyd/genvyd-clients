@@ -407,48 +407,70 @@
 
   // Shared grid for folders, favorites and campaigns: photos and videos in their
   // own sections, filters for type, status and tag, and a sort menu.
-  // Sizes of the same ad. Files in one folder whose names differ only by an aspect ratio
-  // (9x16, 4x5, 1x1, 16:9...) and words like "feed" or "stories" show as one ad with a size
-  // switcher, so the grid is not flooded with copies.
+  // Sizes and versions of the same ad. Files in one folder whose names differ only by an
+  // aspect ratio (9x16, 4x5, 1x1, 16:9...), words like "feed" or "stories", or a version
+  // mark (v2, rev 3, or the "(2)" the portal adds when a name is taken) show as one ad.
+  // The tile shows the newest version; the ad page has size and version switchers.
   const SIZE_RE = /(?:^|[\s_\-.(\[])(\d{1,2})\s*[x×:]\s*(\d{1,2})(?=$|[\s_\-.)\]])/i;
+  const VER_RE = /(?:^|[\s_\-.(\[])(?:v|ver|version|rev)\s*\.?\s*(\d{1,3})(?=$|[\s_\-.)\]])/i;
+  const DUP_RE = /\s*\((\d{1,2})\)\s*$/;
   const PLACEMENT_RE = /\b(feed|stories|story|reels?|post|square|vertical|portrait|landscape|horizontal)\b/gi;
   const SIZE_ORDER = ["9:16", "4:5", "1:1", "16:9"];
   const kindOf = (it) => (it.kind === "video" ? "video" : it.kind === "image" ? "image" : "other");
-  function sizeInfo(it) {
-    const dot = it.name.lastIndexOf(".");
-    const stem = dot > 0 ? it.name.slice(0, dot) : it.name;
-    const m = stem.match(SIZE_RE);
-    if (!m) return null;
-    const base = stem.replace(m[0], " ").replace(PLACEMENT_RE, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    if (!base) return null;
-    return {
-      label: `${Number(m[1])}:${Number(m[2])}`,
-      key: [it.clientSlug || "", parentOf(it.path), kindOf(it), base].join("|"),
-    };
+  const stemOf = (name) => { const d = name.lastIndexOf("."); return d > 0 ? name.slice(0, d) : name; };
+  const extOf = (name) => { const d = name.lastIndexOf("."); return d > 0 ? name.slice(d) : ""; };
+  const norm = (t) => t.replace(PLACEMENT_RE, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  // The name with any version mark taken off (keeps the size), e.g. for naming the next version.
+  function unversioned(stem) {
+    const v = stem.match(VER_RE);
+    let out = v ? stem.replace(v[0], " ") : stem;
+    out = out.replace(DUP_RE, "");
+    return out.replace(/\s{2,}/g, " ").replace(/[\s_\-.]+$/, "").trim() || stem;
   }
-  const sizeRank = (label) => { const i = SIZE_ORDER.indexOf(label); return i < 0 ? 99 : i; };
-  // Returns the list with sizes folded together. A folded entry is the first size
-  // (9:16 first) with combined counts and `_versions` [{ label, path, item }].
-  function groupSizes(items) {
+  function adInfo(it) {
+    let rest = stemOf(it.name);
+    let size = null;
+    const m = rest.match(SIZE_RE);
+    if (m) { size = `${Number(m[1])}:${Number(m[2])}`; rest = rest.replace(m[0], " "); }
+    let ver = 1;
+    const v = rest.match(VER_RE);
+    if (v) { ver = Number(v[1]) || 1; rest = rest.replace(v[0], " "); }
+    else { const d = rest.match(DUP_RE); if (d) { ver = Number(d[1]) || 1; rest = rest.replace(DUP_RE, ""); } }
+    const base = norm(rest) || norm(stemOf(it.name)) || it.name.toLowerCase();
+    return { size, ver, key: [it.clientSlug || "", parentOf(it.path), kindOf(it), base].join("|") };
+  }
+  const sizeRank = (label) => { if (!label) return 98; const i = SIZE_ORDER.indexOf(label); return i < 0 ? 99 : i; };
+  const bySize = (a, b) => sizeRank(a.size) - sizeRank(b.size) || String(a.size).localeCompare(String(b.size));
+  // Two files claiming the same size and version (say Hero.mp4 and Hero.mov) are left apart.
+  const clashes = (entries) => new Set(entries.map((e) => `${e.ver}|${e.size}`)).size !== entries.length;
+
+  // Returns the list with sizes and versions folded together. A folded entry is the newest
+  // version's first size, with `_sizes` [{ label, path, item }] when it comes in several
+  // sizes, `_verCount` / `_verLatest` when there are versions, and `_paths` (every file).
+  function groupAds(items) {
     const byKey = new Map();
-    const out = [];
+    const order = [];
     for (const it of items) {
-      const si = sizeInfo(it);
-      if (!si) { out.push(it); continue; }
-      let g = byKey.get(si.key);
-      if (!g) { g = { versions: [] }; byKey.set(si.key, g); out.push(g); }
-      g.versions.push({ label: si.label, path: it.path, item: it });
+      const info = adInfo(it);
+      let g = byKey.get(info.key);
+      if (!g) { g = []; byKey.set(info.key, g); order.push(g); }
+      g.push({ it, ...info });
     }
-    return out.map((g) => {
-      if (!g.versions) return g;
-      if (g.versions.length === 1) return g.versions[0].item;
-      const vs = g.versions.sort((a, b) => sizeRank(a.label) - sizeRank(b.label) || a.label.localeCompare(b.label));
-      const all = vs.map((v) => v.item);
+    const out = [];
+    for (const g of order) {
+      if (g.length === 1 || clashes(g)) { g.forEach((e) => out.push(e.it)); continue; }
+      const latestVer = Math.max(...g.map((e) => e.ver));
+      const cur = g.filter((e) => e.ver === latestVer).sort(bySize);
+      const verCount = new Set(g.map((e) => e.ver)).size;
+      const all = cur.map((e) => e.it);
       const statuses = new Set(all.map((x) => x.status));
       const latest = all.map((x) => (x.mtime ? Date.parse(x.mtime) : 0)).reduce((a, b) => Math.max(a, b), 0);
-      return {
+      out.push({
         ...all[0],
-        _versions: vs,
+        _sizes: cur.length > 1 ? cur.map((e) => ({ label: e.size || "Original", path: e.it.path, item: e.it })) : null,
+        _verCount: verCount > 1 ? verCount : 0,
+        _verLatest: latestVer,
+        _paths: g.map((e) => e.it.path),
         status: statuses.size === 1 ? all[0].status : statuses.has("changes") ? "changes" : "pending",
         likes: Math.max(...all.map((x) => x.likes || 0)),
         comments: all.reduce((n, x) => n + (x.comments || 0), 0),
@@ -457,19 +479,24 @@
         tags: [...new Set(all.flatMap((x) => x.tags || []))],
         campaigns: [...new Set(all.flatMap((x) => x.campaigns || []))],
         mtime: latest ? new Date(latest).toISOString() : all[0].mtime,
-      };
-    });
+      });
+    }
+    return out;
   }
-  // The other sizes of one file, in the same folder listing.
-  function sizeSiblings(items, path) {
+  // Sizes (same version) and versions (same size) of one file, from its folder listing.
+  function adFamily(items, path) {
     const me = items.find((i) => i.path === path);
-    const si = me && sizeInfo(me);
-    if (!si) return [];
-    return items
-      .map((i) => ({ i, s: sizeInfo(i) }))
-      .filter((x) => x.s && x.s.key === si.key)
-      .map((x) => ({ label: x.s.label, path: x.i.path }))
-      .sort((a, b) => sizeRank(a.label) - sizeRank(b.label) || a.label.localeCompare(b.label));
+    if (!me) return { sizes: [], versions: [], ver: 1, latestVer: 1 };
+    const mine = adInfo(me);
+    const g = items.map((i) => ({ it: i, ...adInfo(i) })).filter((e) => e.key === mine.key);
+    if (clashes(g)) return { sizes: [], versions: [], ver: 1, latestVer: 1 };
+    const sizes = g.filter((e) => e.ver === mine.ver).sort(bySize).map((e) => ({ label: e.size || "Original", path: e.it.path }));
+    const vers = [...new Set(g.map((e) => e.ver))].sort((a, b) => a - b);
+    const versions = vers.map((n) => {
+      const same = g.find((e) => e.ver === n && e.size === mine.size) || g.filter((e) => e.ver === n).sort(bySize)[0];
+      return { n, path: same.it.path };
+    });
+    return { sizes, versions, ver: mine.ver, latestVer: vers[vers.length - 1] };
   }
 
   const PREFS_KEY = "gv-browse";
@@ -517,7 +544,7 @@
       savePrefs({ type: st.type, sort: st.sort, fit: st.fit });
       // Fit = whole image with black bars; Fill = cropped to fill the box.
       root.classList.toggle("thumbs-fit", st.fit === "fit");
-      const ads = groupSizes(items);
+      const ads = groupAds(items);
       const base = ads.filter((it) =>
         (st.status === "all" || it.status === st.status) &&
         (!st.tag || (it.tags || []).includes(st.tag)) &&
@@ -666,7 +693,11 @@
       thumb,
       h("div", { class: "meta-wrap" }, more, h("a", { class: "tile-meta", href },
         h("div", { class: "tile-name", title: it.name }, it.name),
-        it._versions ? h("div", { class: "tile-sizes" }, it._versions.map((v) => h("span", { class: "size-chip" }, v.label))) : null,
+        it._sizes || it._verCount
+          ? h("div", { class: "tile-sizes" },
+              (it._sizes || []).map((v) => h("span", { class: "size-chip" }, v.label)),
+              it._verCount ? h("span", { class: "size-chip ver-chip", title: `${it._verCount} versions, showing the newest` }, `v${it._verLatest} · ${it._verCount} versions`) : null)
+          : null,
         showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
         campLine,
         it.tags && it.tags.length ? h("div", { class: "tile-tags" }, it.tags.map((tg) => h("span", { class: "tag" }, `#${tg}`))) : null,
@@ -677,6 +708,79 @@
         ),
       )),
     );
+  }
+
+  // Save or share a file without leaving the portal. The file is fetched first, then:
+  // phones get the share sheet (Save Image to Photos, Save to Files, Messages, AirDrop),
+  // computers get a normal download. Never navigates away, so the home screen app
+  // never gets stuck on a bare file with no way back.
+  function saveFile(src, name) {
+    closeTileMenu();
+    const ctrl = new AbortController();
+    const status = h("div", { class: "muted save-status" }, "Getting it ready…");
+    const bar = h("div", { class: "upload-bar save-bar" }, h("span"));
+    const actions = h("div", { class: "save-actions" });
+    const close = () => { ctrl.abort(); layer.remove(); document.removeEventListener("keydown", esc); };
+    const esc = (e) => { if (e.key === "Escape") close(); };
+    const panel = h("div", { class: "tile-menu save-sheet", role: "dialog", "aria-label": "Save or share" },
+      h("div", { class: "menu-head" },
+        h("div", { class: "menu-title", title: name }, name),
+        h("button", { class: "menu-x", type: "button", "aria-label": "Close", onclick: close }, "×"),
+      ),
+      status, bar, actions,
+    );
+    const layer = h("div", { class: "menu-layer save-layer", onclick: (e) => { if (e.target === layer) close(); } }, panel);
+    document.addEventListener("keydown", esc);
+    document.body.append(layer);
+
+    const download = (file) => {
+      const url = URL.createObjectURL(file);
+      const a = h("a", { href: url, download: name, style: "display:none" });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    };
+
+    (async () => {
+      try {
+        const res = await fetch(src, { signal: ctrl.signal, credentials: "same-origin" });
+        if (!res.ok) throw new Error(`Could not get the file (${res.status}).`);
+        const total = Number(res.headers.get("content-length") || 0);
+        const reader = res.body.getReader();
+        const chunks = [];
+        let got = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          got += value.length;
+          if (total) { bar.firstChild.style.width = Math.round((got / total) * 100) + "%"; status.textContent = `Getting it ready… ${Math.round((got / total) * 100)}%`; }
+        }
+        bar.firstChild.style.width = "100%";
+        const type = res.headers.get("content-type") || "application/octet-stream";
+        const file = new File([new Blob(chunks, { type })], name, { type });
+        const canShare = navigator.canShare && navigator.share && navigator.canShare({ files: [file] });
+        if (canShare) {
+          status.textContent = "Ready. Pick Save Image (or Save Video) for Photos, Save to Files, or send it to someone.";
+          fill(actions,
+            h("button", { class: "btn primary save-main", type: "button", onclick: async () => {
+              try { await navigator.share({ files: [file], title: name }); close(); }
+              catch (err) { if (err && err.name !== "AbortError") { download(file); close(); } }
+            } }, "Save or share"),
+            h("button", { class: "btn save-alt", type: "button", onclick: () => { download(file); close(); } }, "Download file instead"),
+          );
+        } else {
+          download(file);
+          status.textContent = "Downloaded. Check your Downloads folder.";
+          fill(actions, h("button", { class: "btn save-main", type: "button", onclick: close }, "Done"));
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        status.textContent = err.message || "Something went wrong.";
+        fill(actions, h("button", { class: "btn save-main", type: "button", onclick: close }, "Close"));
+      }
+    })();
   }
 
   // The "..." menu on a tile: add to or take out of campaigns (or start a new one),
@@ -691,7 +795,7 @@
   function openTileMenu(anchor, slug, it, refs) {
     closeTileMenu();
     const cs = it.clientSlug || slug;
-    const also = (it._versions || []).map((v) => v.path).filter((p) => p !== it.path);
+    const also = (it._sizes || []).map((v) => v.path).filter((p) => p !== it.path);
     const sizesNote = also.length ? h("div", { class: "menu-note mono muted" }, `Covers all ${also.length + 1} sizes`) : null;
     const campList = h("div", { class: "menu-camps" }, h("div", { class: "muted menu-loading" }, "Loading campaigns…"));
     let detail = { status: it.status, liked: !!it.liked, likes: it.likes };
@@ -780,7 +884,7 @@
       favBtn,
       okBtn,
       h("a", { class: "menu-item", href: refs.href, onclick: closeTileMenu }, h("span", { class: "mi-icon", html: ICON_EXPAND }), "Open full size and comments"),
-      h("a", { class: "menu-item", href: refs.src + "?download", onclick: closeTileMenu }, h("span", { class: "mi-icon" }, "↓"), "Download"),
+      h("button", { class: "menu-item", type: "button", onclick: () => { closeTileMenu(); saveFile(refs.src, it.name); } }, h("span", { class: "mi-icon" }, "↓"), "Save or share"),
     );
     const layer = h("div", { class: "menu-layer", onclick: (e) => { if (e.target === layer) closeTileMenu(); } }, panel);
     layer._esc = (e) => { if (e.key === "Escape") closeTileMenu(); };
@@ -832,11 +936,12 @@
     const items = list.items;
     const it = items.find((i) => i.path === path) || { name: baseName(path), path, kind: "file" };
     // Previous / Next step through ads, not through every size of the same ad.
-    const ads = groupSizes(items);
-    const idx = ads.findIndex((a) => a.path === path || (a._versions || []).some((v) => v.path === path));
+    const ads = groupAds(items);
+    const idx = ads.findIndex((a) => a.path === path || (a._paths || []).includes(path));
     const prev = idx > 0 ? ads[idx - 1] : null;
     const next = idx >= 0 && idx < ads.length - 1 ? ads[idx + 1] : null;
-    const sizes = sizeSiblings(items, path);
+    const fam = adFamily(items, path);
+    const sizes = fam.sizes.length > 1 ? fam.sizes : [];
     const also = sizes.map((v) => v.path).filter((p) => p !== path);
     const thisSize = (sizes.find((v) => v.path === path) || {}).label;
     const src = mediaUrl(slug, path);
@@ -851,7 +956,7 @@
     } else if (it.kind === "pdf") {
       stageInner = h("iframe", { src, title: it.name });
     } else {
-      stageInner = h("div", { class: "empty" }, h("p", {}, "This file type does not preview in the browser."), h("a", { class: "btn", href: src + "?download" }, "Download"));
+      stageInner = h("div", { class: "empty" }, h("p", {}, "This file type does not preview in the browser."), h("button", { class: "btn", type: "button", onclick: () => saveFile(src, it.name) }, "Save or share"));
     }
 
     const stage = h("div", { class: "card stage" }, stageInner);
@@ -863,6 +968,53 @@
             onclick: () => { if (v.path !== path) location.replace(`#/c/${enc(slug)}/i/${enc(v.path)}`); },
           }, v.label)))
       : null;
+    // Versions: v1, v2, v3... of this size. Older ones stay viewable with their comments.
+    const verSeg = fam.versions.length > 1
+      ? h("div", { class: "ver-row" },
+          h("span", { class: "mono muted" }, "VERSIONS"),
+          h("div", { class: "seg ver-seg" },
+            fam.versions.map((v) => h("button", {
+              class: "seg-btn" + (v.path === path ? " active" : ""),
+              "aria-pressed": v.path === path ? "true" : "false",
+              title: v.n === fam.latestVer ? "Newest version" : "Older version",
+              onclick: () => { if (v.path !== path) location.replace(`#/c/${enc(slug)}/i/${enc(v.path)}`); },
+            }, v.n === fam.latestVer ? `v${v.n} · newest` : `v${v.n}`))))
+      : null;
+    const latestPath = (fam.versions.find((v) => v.n === fam.latestVer) || {}).path;
+    const oldNotice = fam.versions.length > 1 && fam.ver < fam.latestVer
+      ? h("div", { class: "card old-notice" },
+          h("div", {}, h("strong", {}, `You are looking at an older version (v${fam.ver}).`), " Comments on it are kept here for reference."),
+          h("a", { class: "btn small primary", href: `#/c/${enc(slug)}/i/${enc(latestPath)}`, onclick: (e) => { e.preventDefault(); location.replace(`#/c/${enc(slug)}/i/${enc(latestPath)}`); } }, `See v${fam.latestVer}`))
+      : null;
+
+    // Admin: upload an edited file as the next version of this one (same folder, "name v2.jpg").
+    let newVerBtn = null;
+    if (state.me.admin) {
+      const picker = h("input", { type: "file", hidden: true, accept: it.kind === "video" ? "video/*" : it.kind === "image" ? "image/*" : "",
+        onchange: () => { const f = picker.files[0]; picker.value = ""; if (f) uploadVersion(f); } });
+      newVerBtn = h("span", {}, picker, h("button", { class: "btn small", type: "button", title: "Upload an edited file as the next version of this one", onclick: () => picker.click() }, "↑ New version"));
+    }
+    async function uploadVersion(file) {
+      if (file.size > 100 * 1024 * 1024) return toast("That file is over 100 MB. Copy it in with Finder and name it with v2, v3...");
+      const n = fam.latestVer + 1;
+      const name = `${unversioned(stemOf(it.name))} v${n}${extOf(file.name).toLowerCase() || extOf(it.name)}`;
+      toast(`Uploading v${n}…`);
+      try {
+        const r = await new Promise((resolve, reject) => {
+          const x = new XMLHttpRequest();
+          x.open("POST", `/api/c/${enc(slug)}/upload?dir=${enc(dir)}&name=${enc(name)}&versionOf=${enc(path)}`);
+          x.setRequestHeader("content-type", file.type || "application/octet-stream");
+          x.upload.onprogress = (e) => { if (e.lengthComputable) toast(`Uploading v${n}… ${Math.round((e.loaded / e.total) * 100)}%`); };
+          x.onload = () => { let d = null; try { d = JSON.parse(x.responseText); } catch {} x.status < 300 ? resolve(d || {}) : reject(new Error((d && d.error) || `Upload failed (${x.status}).`)); };
+          x.onerror = () => reject(new Error("Upload failed. Check your connection."));
+          x.send(file);
+        });
+        state.listCache.delete(`${slug}|${dir}`);
+        toast(`v${n} is up. It starts as Awaiting review.`);
+        location.replace(`#/c/${enc(slug)}/i/${enc(r.path)}`);
+      } catch (err) { toast(err.message); }
+    }
+
     const navBar = h("div", { class: "stage-bar" },
       h("div", { class: "actions" },
         h("a", { class: "btn small", href: prev ? `#/c/${enc(slug)}/i/${enc(prev.path)}` : null, "aria-disabled": !prev, style: prev ? null : "opacity:.4;pointer-events:none" }, "← Previous"),
@@ -871,7 +1023,8 @@
       h("div", { class: "actions" },
         sizeSeg,
         it.size ? h("span", { class: "mono muted", style: "align-self:center" }, fmtSize(it.size)) : null,
-        h("a", { class: "btn small", href: src + "?download" }, "Download"),
+        newVerBtn,
+        h("button", { class: "btn small", type: "button", onclick: () => saveFile(src, it.name) }, "↓ Save"),
       ),
     );
 
@@ -1089,7 +1242,8 @@
         h("a", { class: "btn back-btn", href: back.hash }, h("span", { "aria-hidden": "true" }, "←"), `Back to ${back.label}`),
         crumbs(list.client, dir, it.name),
       ),
-      h("div", { class: "viewer" }, h("div", {}, stage, navBar), side),
+      oldNotice,
+      h("div", { class: "viewer" }, h("div", {}, stage, verSeg, navBar), side),
     );
   }
 
