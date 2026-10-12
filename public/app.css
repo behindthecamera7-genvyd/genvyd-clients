@@ -379,3 +379,8 @@ label.check input { width: auto; }
 .save-main { width: 100%; height: 48px; font-size: 16px; justify-content: center; }
 .save-alt { width: 100%; justify-content: center; }
 @media (max-width: 640px) { .save-sheet { transform: none; left: 0 !important; right: 0; top: auto !important; width: auto; } }
+
+/* Backups card */
+.backup-list { margin-top: 16px; border-top: 1px solid var(--line); }
+.backup-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.backup-name { color: var(--bone); font-family: var(--mono); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

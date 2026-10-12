@@ -1565,6 +1565,45 @@
       );
     }).catch(() => {});
 
+    // Backups of the portal's own data (approvals, comments, favorites, campaigns, logins).
+    const backupCard = h("div", { class: "card pad", style: "margin-bottom:20px" }, h("h2", {}, "Backups"), h("p", { class: "muted" }, "Checking…"));
+    async function loadBackups() {
+      let b;
+      try { b = await api("GET", "/api/admin/backups"); }
+      catch (err) { fill(backupCard, h("h2", {}, "Backups"), h("p", { class: "muted" }, err.message)); return; }
+      const nowBtn = h("button", { class: "btn small primary", type: "button", onclick: async () => {
+        nowBtn.disabled = true; nowBtn.textContent = "Backing up…";
+        try { const r = await api("POST", "/api/admin/backups"); toast(`Saved ${r.name}.`); loadBackups(); }
+        catch (err) { toast(err.message); nowBtn.disabled = false; nowBtn.textContent = "Back up now"; }
+      } }, "Back up now");
+      const rows = b.backups.slice(0, 10).map((f) =>
+        h("div", { class: "backup-row" },
+          h("div", { style: "min-width:0" },
+            h("div", { class: "backup-name" }, f.name.replace(/^portal-backup-/, "").replace(/\.json$/, "")),
+            h("div", { class: "mono muted" }, f.size ? fmtSize(f.size) : ""),
+          ),
+          h("div", { class: "actions" },
+            h("button", { class: "linkish", type: "button", onclick: () => saveFile(`/api/admin/backups/file?name=${enc(f.name)}`, f.name) }, "Download"),
+            h("button", { class: "linkish", type: "button", style: "color:var(--warn)", onclick: async () => {
+              if (!confirm(`Put the portal back the way it was in ${f.name}?\n\nApprovals, comments, favorites, campaigns, tags and logins made after it will be replaced. A safety copy of how things are right now is saved first, so this can be undone.`)) return;
+              try { const r = await api("POST", "/api/admin/backups/restore", { name: f.name }); toast(`Restored. Safety copy: ${r.safetyCopy}`); state.listCache.clear(); loadBackups(); }
+              catch (err) { toast(err.message); }
+            } }, "Restore"),
+          ),
+        ));
+      fill(backupCard,
+        h("h2", { style: "margin-bottom:8px" }, "Backups"),
+        h("p", { class: "muted", style: "margin:0 0 12px" },
+          `Every night at 3:17 AM the portal saves a copy of all approvals, comments, favorites, campaigns, tags and logins to the "${b.folder}" folder on your Synology. The videos and photos themselves are protected by the Synology's own snapshots.`),
+        h("p", { style: "margin:0 0 12px" },
+          b.last ? h("span", {}, "Last backup: ", h("strong", { style: "color:var(--bone)" }, fmtDate(b.last.at)), h("span", { class: "muted" }, ` · ${b.last.rows} records`)) : h("span", { class: "muted" }, "No backup yet. The first one runs tonight, or tap Back up now.")),
+        nowBtn,
+        b.error ? h("p", { class: "muted", style: "margin:12px 0 0" }, b.error) : null,
+        rows.length ? h("div", { class: "backup-list" }, rows) : null,
+      );
+    }
+    loadBackups();
+
     const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
@@ -1587,6 +1626,7 @@
           h("div", { class: "card pad", style: "margin-bottom:20px" }, h("h2", { style: "margin-bottom:14px" }, "Add a client"), addClient),
           importCard,
           emailCard,
+          backupCard,
           h("div", { class: "card" },
             clientBlocks.length ? clientBlocks : h("div", { class: "pad muted" }, "No clients yet."),
           ),

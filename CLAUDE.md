@@ -97,6 +97,16 @@ start fresh). Files that clash (same size and version) are left apart. Approve, 
 campaign picks send `also` (the other sizes) so the server applies them to every size,
 logging activity once. Comments and tags stay per file. Previous/Next skip sibling sizes.
 
+## Backups
+
+Portal data: `writeBackup()` exports every D1 table to JSON on the Synology in
+`_Portal backups/` (cron `17 10 * * *` = 3:17 AM Phoenix, plus Admin > Backups > Back up now).
+Admin can Download or Restore any backup; restore saves a "before-restore" copy first, then
+replaces all tables in one batch (rows sent as JSON through `json_each`, so it stays a few
+statements). The folder is hidden from the client folder picker. Cloudflare D1 Time Travel
+(7 days on the free plan, wrangler only) is the second net. Files on the Synology are
+protected by Snapshot Replication and Hyper Backup per `synology/BACKUP_SETUP.md`.
+
 ## Rules
 
 - Fail closed. Never let `DEV_EMAIL` apply when `TEAM_DOMAIN` is set.

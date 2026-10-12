@@ -222,7 +222,7 @@ async function nasWrite(
   user: User,
   method: "PUT" | "MKCOL" | "MOVE",
   segs: string[],
-  init: { body?: ReadableStream | null; contentType?: string; destination?: string[] } = {},
+  init: { body?: ReadableStream | string | null; contentType?: string; destination?: string[] } = {},
 ): Promise<Response> {
   if (!user.admin) throw new HttpError(403, "Only Genvyd can add, rename or organize files.");
   if (method !== "PUT" && method !== "MKCOL" && method !== "MOVE") throw new HttpError(403, "Not allowed.");
@@ -315,6 +315,108 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
   } catch {
     throw new HttpError(400, "Expected JSON.");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Backups of the portal's own data (approvals, comments, favorites, campaigns,
+// tags, logins). The videos and photos live on the Synology and are protected by
+// its own snapshots (synology/BACKUP_SETUP.md). Cloudflare also keeps 7 days of
+// D1 Time Travel, but that needs a terminal; these copies sit on the Synology and
+// can be restored from the Admin page.
+// ---------------------------------------------------------------------------
+
+const BACKUP_DIR = "_Portal backups";
+const BACKUP_CRON = "17 10 * * *"; // 3:17 AM Phoenix
+const BACKUP_TABLES = [
+  "clients", "members", "item_status", "likes", "comments", "activity",
+  "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views",
+];
+const BACKUP_NAME_RE = /^portal-backup-\d{4}-\d{2}-\d{2}-\d{4}(-[a-z-]{1,20})?\.json$/;
+const SYSTEM_USER: User = { email: "backup@portal", admin: true };
+
+async function exportDb(env: Env) {
+  const results = await env.DB.batch(BACKUP_TABLES.map((t) => env.DB.prepare(`SELECT * FROM ${t}`)));
+  const tables: Record<string, unknown[]> = {};
+  BACKUP_TABLES.forEach((t, i) => (tables[t] = results[i].results as unknown[]));
+  return { app: "genvyd-clients", version: 1, created_at: now(), tables };
+}
+
+async function writeBackup(env: Env, label = "") {
+  const data = await exportDb(env);
+  const d = new Date(data.created_at);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  // Names use Phoenix time so they match what Anthony sees.
+  const az = new Date(d.getTime() - 7 * 3600 * 1000);
+  const stamp = `${az.getUTCFullYear()}-${pad(az.getUTCMonth() + 1)}-${pad(az.getUTCDate())}-${pad(az.getUTCHours())}${pad(az.getUTCMinutes())}`;
+  const wanted = `portal-backup-${stamp}${label ? "-" + label : ""}.json`;
+  const mk = await nasWrite(env, SYSTEM_USER, "MKCOL", [BACKUP_DIR]);
+  if (![201, 405].includes(mk.status)) throw new HttpError(502, `The Synology answered ${mk.status} when making the backup folder.`);
+  const name = await freeName(env, [BACKUP_DIR], wanted);
+  const body = JSON.stringify(data);
+  const res = await nasWrite(env, SYSTEM_USER, "PUT", [BACKUP_DIR, name], { body, contentType: "application/json" });
+  if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status} to the backup.`);
+  const rows = Object.values(data.tables).reduce((n, r) => n + r.length, 0);
+  const info = { at: data.created_at, name, bytes: body.length, rows };
+  await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('backup_last', ?)").bind(JSON.stringify(info)).run();
+  return info;
+}
+
+async function listBackups(env: Env) {
+  const res = await fetch(env.MEDIA_ORIGIN.replace(/\/+$/, "") + "/" + encodeURIComponent(BACKUP_DIR) + "/", {
+    headers: originHeaders(env, { accept: "application/json" }),
+  });
+  if (res.status === 404) return [];
+  if (!res.ok) throw new HttpError(502, `The Synology answered ${res.status}.`);
+  const entries = (await res.json()) as NasEntry[];
+  return entries
+    .filter((e) => e.type === "file" && BACKUP_NAME_RE.test(e.name))
+    .map((e) => ({ name: e.name, size: e.size ?? null, mtime: e.mtime ?? null }))
+    .sort((a, b) => b.name.localeCompare(a.name));
+}
+
+async function readBackup(env: Env, name: string) {
+  if (!BACKUP_NAME_RE.test(name)) throw new HttpError(400, "That is not a portal backup.");
+  const res = await fetch(env.MEDIA_ORIGIN.replace(/\/+$/, "") + "/" + [BACKUP_DIR, name].map(encodeURIComponent).join("/"), {
+    headers: originHeaders(env),
+  });
+  if (res.status === 404) throw new HttpError(404, "That backup is not on the Synology.");
+  if (!res.ok) throw new HttpError(502, `The Synology answered ${res.status}.`);
+  return res;
+}
+
+/** Puts every table back the way it was in the backup, in one transaction. */
+async function restoreBackup(env: Env, name: string) {
+  const data = (await (await readBackup(env, name)).json()) as { app?: string; version?: number; tables?: Record<string, Record<string, unknown>[]> };
+  if (data.app !== "genvyd-clients" || data.version !== 1 || !data.tables) throw new HttpError(400, "That file is not a portal backup.");
+  const safe = await writeBackup(env, "before-restore");
+  const stmts: D1PreparedStatement[] = [];
+  for (const t of BACKUP_TABLES) {
+    const rows = data.tables[t];
+    if (!Array.isArray(rows)) continue; // tables added after this backup was made are left alone
+    stmts.push(env.DB.prepare(`DELETE FROM ${t}`));
+    if (!rows.length) continue;
+    const cols = Object.keys(rows[0]);
+    if (!cols.every((c) => /^[a-z_]+$/.test(c))) throw new HttpError(400, "That backup has unexpected columns.");
+    const select = cols.map((c) => `json_extract(value, '$.${c}')`).join(", ");
+    // Rows go in as JSON in chunks, so even a big backup is only a few statements.
+    let chunk: unknown[] = [];
+    let size = 0;
+    const flush = () => {
+      if (!chunk.length) return;
+      stmts.push(env.DB.prepare(`INSERT INTO ${t} (${cols.join(", ")}) SELECT ${select} FROM json_each(?)`).bind(JSON.stringify(chunk)));
+      chunk = []; size = 0;
+    };
+    for (const r of rows) {
+      const len = JSON.stringify(r).length;
+      if (size + len > 800_000) flush();
+      chunk.push(r); size += len;
+    }
+    flush();
+  }
+  if (stmts.length > 40) throw new HttpError(413, "That backup is too big to restore from here. Ask Claude to restore it.");
+  await env.DB.batch(stmts);
+  await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('backup_last', ?)").bind(JSON.stringify(safe)).run();
+  return { restored: name, safetyCopy: safe.name };
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,6 +1185,28 @@ async function route(req: Request, env: Env): Promise<Response> {
       return json({ clients: clients.results, members: members.results, activity: activity.results });
     }
 
+    if (path === "/api/admin/backups" && method === "GET") {
+      const last = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'backup_last'").first<{ value: string }>();
+      let list: Awaited<ReturnType<typeof listBackups>> = [];
+      let error: string | null = null;
+      try { list = (await listBackups(env)).slice(0, 30); } catch (e) { error = e instanceof Error ? e.message : "Could not list backups."; }
+      return json({ last: last ? JSON.parse(last.value) : null, backups: list, folder: BACKUP_DIR, error });
+    }
+    if (path === "/api/admin/backups" && method === "POST") {
+      return json({ ok: true, ...(await writeBackup(env, "manual")) });
+    }
+    if (path === "/api/admin/backups/file" && method === "GET") {
+      const name = url.searchParams.get("name") || "";
+      const res = await readBackup(env, name);
+      return new Response(res.body, {
+        headers: { "content-type": "application/json", "content-disposition": `attachment; filename="${name}"`, "cache-control": "no-store" },
+      });
+    }
+    if (path === "/api/admin/backups/restore" && method === "POST") {
+      const body = await readBody(req);
+      return json({ ok: true, ...(await restoreBackup(env, String(body.name ?? ""))) });
+    }
+
     if (path === "/api/admin/folders" && method === "GET") {
       if (!env.MEDIA_ORIGIN) return json({ folders: [], error: "MEDIA_ORIGIN is empty." });
       try {
@@ -1092,7 +1216,7 @@ async function route(req: Request, env: Env): Promise<Response> {
         if (!res.ok) return json({ folders: [], error: `Synology answered ${res.status}.` });
         const entries = (await res.json()) as NasEntry[];
         return json({
-          folders: entries.filter((e) => e.type === "directory" && !/^[.@#]/.test(e.name)).map((e) => e.name),
+          folders: entries.filter((e) => e.type === "directory" && !/^[.@#]/.test(e.name) && e.name !== BACKUP_DIR).map((e) => e.name),
         });
       } catch {
         return json({ folders: [], error: "Could not reach the Synology." });
@@ -1499,7 +1623,11 @@ async function runClientAlerts(env: Env) {
 }
 
 export default {
-  async scheduled(_ctrl: ScheduledController, env: Env, ctx: ExecutionContext) {
+  async scheduled(ctrl: ScheduledController, env: Env, ctx: ExecutionContext) {
+    if (ctrl.cron === BACKUP_CRON) {
+      ctx.waitUntil(writeBackup(env, "nightly").then((i) => console.log("backup saved", i.name)).catch((err) => console.error("backup failed", err)));
+      return;
+    }
     ctx.waitUntil(
       (async () => {
         await runDigest(env).catch((err) => console.error("digest failed", err));

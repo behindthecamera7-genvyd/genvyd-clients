@@ -49,8 +49,9 @@
     "CLIENT_REPLY_TO": "anthony@genvyd.com"
   },
 
-  // Checks for new client activity every 15 minutes and emails a digest.
-  "triggers": { "crons": ["*/15 * * * *"] }
+  // Every 15 minutes: digest and new-work alerts. 10:17 UTC (3:17 AM Phoenix): nightly
+  // backup of the portal's data to the Synology. Keep BACKUP_CRON in worker.ts in step.
+  "triggers": { "crons": ["*/15 * * * *", "17 10 * * *"] }
 
   // Secrets (set in the Cloudflare dashboard, never in this file):
   //   MEDIA_CLIENT_ID      Access service token client ID for the NAS hostname
