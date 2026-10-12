@@ -285,3 +285,8 @@ label.check input { width: auto; }
 .member:first-of-type { border-top: 0; }
 .member-tools { display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; flex: none; }
 @media (max-width: 720px) { .member { flex-direction: column; } .member-tools { justify-content: flex-start; } }
+
+/* Sizes of one ad (9:16, 4:5...) shown as one tile */
+.tile-sizes { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.size-chip { font-family: var(--mono); font-size: 11px; color: var(--bone); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+.size-seg .seg-btn { font-family: var(--mono); }

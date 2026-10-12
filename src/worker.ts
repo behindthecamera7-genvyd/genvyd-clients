@@ -681,16 +681,22 @@ async function route(req: Request, env: Env): Promise<Response> {
       }
       if (sub === "items" && (method === "POST" || method === "DELETE")) {
         // Clients and admin can both pick ads for a campaign, approved or not.
-        const p = cleanPath(String((await readBody(req)).path ?? "")).join("/");
+        const body = await readBody(req);
+        const p = cleanPath(String(body.path ?? "")).join("/");
+        const paths = [p, ...alsoPaths(body, p)];
         if (method === "POST") {
-          await env.DB.prepare(
-            "INSERT OR IGNORE INTO campaign_items (campaign_id, path, added_by, added_at) VALUES (?, ?, ?, ?)",
-          )
-            .bind(camp.id, p, user.email, now())
-            .run();
+          for (const q of paths) {
+            await env.DB.prepare(
+              "INSERT OR IGNORE INTO campaign_items (campaign_id, path, added_by, added_at) VALUES (?, ?, ?, ?)",
+            )
+              .bind(camp.id, q, user.email, now())
+              .run();
+          }
           await logActivity(env, c.slug, p, user.email, "campaign_add", camp.name);
         } else {
-          await env.DB.prepare("DELETE FROM campaign_items WHERE campaign_id = ? AND path = ?").bind(camp.id, p).run();
+          for (const q of paths) {
+            await env.DB.prepare("DELETE FROM campaign_items WHERE campaign_id = ? AND path = ?").bind(camp.id, q).run();
+          }
           await logActivity(env, c.slug, p, user.email, "campaign_remove", camp.name);
         }
         return json({ ok: true });
@@ -865,18 +871,26 @@ async function route(req: Request, env: Env): Promise<Response> {
       return json(await itemDetail(env, user, c, url.searchParams.get("path") || ""));
     }
     if (action === "like" && method === "POST") {
-      const p = cleanPath(String((await readBody(req)).path ?? "")).join("/");
+      const body = await readBody(req);
+      const p = cleanPath(String(body.path ?? "")).join("/");
+      const also = alsoPaths(body, p);
       const existing = await env.DB.prepare("SELECT 1 FROM likes WHERE client_slug = ? AND path = ? AND email = ?")
         .bind(c.slug, p, user.email)
         .first();
-      if (existing) {
-        await env.DB.prepare("DELETE FROM likes WHERE client_slug = ? AND path = ? AND email = ?").bind(c.slug, p, user.email).run();
-      } else {
-        await env.DB.prepare("INSERT INTO likes (client_slug, path, email, created_at) VALUES (?, ?, ?, ?)")
-          .bind(c.slug, p, user.email, now())
-          .run();
-        await logActivity(env, c.slug, p, user.email, "like", null);
+      // Toggle the main file; other sizes follow it.
+      for (const q of [p, ...also]) {
+        if (existing) {
+          await env.DB.prepare("DELETE FROM likes WHERE client_slug = ? AND path = ? AND email = ?").bind(c.slug, q, user.email).run();
+        } else {
+          await env.DB.prepare(
+            "INSERT INTO likes (client_slug, path, email, created_at) SELECT ?, ?, ?, ? " +
+              "WHERE NOT EXISTS (SELECT 1 FROM likes WHERE client_slug = ? AND path = ? AND email = ?)",
+          )
+            .bind(c.slug, q, user.email, now(), c.slug, q, user.email)
+            .run();
+        }
       }
+      if (!existing) await logActivity(env, c.slug, p, user.email, "like", null);
       return json(await itemDetail(env, user, c, p));
     }
     if (action === "status" && method === "POST") {
@@ -884,12 +898,14 @@ async function route(req: Request, env: Env): Promise<Response> {
       const p = cleanPath(String(body.path ?? "")).join("/");
       const status = String(body.status ?? "");
       if (!["pending", "approved", "changes"].includes(status)) throw new HttpError(400, "Bad status.");
-      await env.DB.prepare(
-        "INSERT INTO item_status (client_slug, path, status, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) " +
-          "ON CONFLICT(client_slug, path) DO UPDATE SET status = excluded.status, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
-      )
-        .bind(c.slug, p, status, user.email, now())
-        .run();
+      for (const q of [p, ...alsoPaths(body, p)]) {
+        await env.DB.prepare(
+          "INSERT INTO item_status (client_slug, path, status, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) " +
+            "ON CONFLICT(client_slug, path) DO UPDATE SET status = excluded.status, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+        )
+          .bind(c.slug, q, status, user.email, now())
+          .run();
+      }
       await logActivity(env, c.slug, p, user.email, status, null);
       return json(await itemDetail(env, user, c, p));
     }
@@ -1198,6 +1214,19 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "
 function itemLink(env: Env, slug: string, path: string) {
   const base = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
   return `${base}/#/c/${encodeURIComponent(slug)}/i/${encodeURIComponent(path)}`;
+}
+
+// Other sizes of the same ad (e.g. the 4x5 next to a 9x16). The portal shows them as one
+// ad, so approving, favoriting or picking it for a campaign covers every size. Capped and
+// cleaned like any path; only the main path is logged, so the digest lists the ad once.
+function alsoPaths(body: Record<string, unknown>, main: string): string[] {
+  const raw = Array.isArray(body.also) ? body.also.slice(0, 8) : [];
+  const out = new Set<string>();
+  for (const a of raw) {
+    const q = cleanPath(String(a ?? "")).join("/");
+    if (q && q !== main) out.add(q);
+  }
+  return [...out];
 }
 
 // Where client replies go (welcome and new-work emails). Falls back to NOTIFY_TO.

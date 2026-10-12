@@ -71,6 +71,12 @@ Other sections, status and tag filters, a sort menu, and a Fit / Fill preview sw
 (Fit = whole image, black bars, default; Fill = cropped). Choices remembered per browser.
 Always render pages through `show()`, which drops null/false so they never print as text.
 
+Sizes of one ad: files in the same folder whose names differ only by an aspect ratio
+(9x16, 4x5, 1x1, 16:9) plus words like feed/stories fold into one tile (`groupSizes()` in
+app.js) with size chips, and the ad page has a size switcher. Approve, Favorite and
+campaign picks send `also` (the other sizes) so the server applies them to every size,
+logging activity once. Comments and tags stay per file. Previous/Next skip sibling sizes.
+
 ## Rules
 
 - Fail closed. Never let `DEV_EMAIL` apply when `TEAM_DOMAIN` is set.

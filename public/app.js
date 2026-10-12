@@ -389,6 +389,71 @@
 
   // Shared grid for folders, favorites and campaigns: photos and videos in their
   // own sections, filters for type, status and tag, and a sort menu.
+  // Sizes of the same ad. Files in one folder whose names differ only by an aspect ratio
+  // (9x16, 4x5, 1x1, 16:9...) and words like "feed" or "stories" show as one ad with a size
+  // switcher, so the grid is not flooded with copies.
+  const SIZE_RE = /(?:^|[\s_\-.(\[])(\d{1,2})\s*[x×:]\s*(\d{1,2})(?=$|[\s_\-.)\]])/i;
+  const PLACEMENT_RE = /\b(feed|stories|story|reels?|post|square|vertical|portrait|landscape|horizontal)\b/gi;
+  const SIZE_ORDER = ["9:16", "4:5", "1:1", "16:9"];
+  const kindOf = (it) => (it.kind === "video" ? "video" : it.kind === "image" ? "image" : "other");
+  function sizeInfo(it) {
+    const dot = it.name.lastIndexOf(".");
+    const stem = dot > 0 ? it.name.slice(0, dot) : it.name;
+    const m = stem.match(SIZE_RE);
+    if (!m) return null;
+    const base = stem.replace(m[0], " ").replace(PLACEMENT_RE, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (!base) return null;
+    return {
+      label: `${Number(m[1])}:${Number(m[2])}`,
+      key: [it.clientSlug || "", parentOf(it.path), kindOf(it), base].join("|"),
+    };
+  }
+  const sizeRank = (label) => { const i = SIZE_ORDER.indexOf(label); return i < 0 ? 99 : i; };
+  // Returns the list with sizes folded together. A folded entry is the first size
+  // (9:16 first) with combined counts and `_versions` [{ label, path, item }].
+  function groupSizes(items) {
+    const byKey = new Map();
+    const out = [];
+    for (const it of items) {
+      const si = sizeInfo(it);
+      if (!si) { out.push(it); continue; }
+      let g = byKey.get(si.key);
+      if (!g) { g = { versions: [] }; byKey.set(si.key, g); out.push(g); }
+      g.versions.push({ label: si.label, path: it.path, item: it });
+    }
+    return out.map((g) => {
+      if (!g.versions) return g;
+      if (g.versions.length === 1) return g.versions[0].item;
+      const vs = g.versions.sort((a, b) => sizeRank(a.label) - sizeRank(b.label) || a.label.localeCompare(b.label));
+      const all = vs.map((v) => v.item);
+      const statuses = new Set(all.map((x) => x.status));
+      const latest = all.map((x) => (x.mtime ? Date.parse(x.mtime) : 0)).reduce((a, b) => Math.max(a, b), 0);
+      return {
+        ...all[0],
+        _versions: vs,
+        status: statuses.size === 1 ? all[0].status : statuses.has("changes") ? "changes" : "pending",
+        likes: Math.max(...all.map((x) => x.likes || 0)),
+        comments: all.reduce((n, x) => n + (x.comments || 0), 0),
+        openComments: all.reduce((n, x) => n + (x.openComments || 0), 0),
+        seen: all.every((x) => x.seen !== false),
+        tags: [...new Set(all.flatMap((x) => x.tags || []))],
+        campaigns: [...new Set(all.flatMap((x) => x.campaigns || []))],
+        mtime: latest ? new Date(latest).toISOString() : all[0].mtime,
+      };
+    });
+  }
+  // The other sizes of one file, in the same folder listing.
+  function sizeSiblings(items, path) {
+    const me = items.find((i) => i.path === path);
+    const si = me && sizeInfo(me);
+    if (!si) return [];
+    return items
+      .map((i) => ({ i, s: sizeInfo(i) }))
+      .filter((x) => x.s && x.s.key === si.key)
+      .map((x) => ({ label: x.s.label, path: x.i.path }))
+      .sort((a, b) => sizeRank(a.label) - sizeRank(b.label) || a.label.localeCompare(b.label));
+  }
+
   const PREFS_KEY = "gv-browse";
   function loadPrefs() {
     try { return JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"); } catch { return {}; }
@@ -413,7 +478,7 @@
     const root = h("div", { class: "browser" });
     items.forEach((it, i) => (it._i = i));
 
-    const kindOfItem = (it) => (it.kind === "video" ? "video" : it.kind === "image" ? "image" : "other");
+    const kindOfItem = kindOf;
     const allTags = [...new Set(items.flatMap((it) => it.tags || []))].sort();
 
     function sorted(list) {
@@ -434,16 +499,17 @@
       savePrefs({ type: st.type, sort: st.sort, fit: st.fit });
       // Fit = whole image with black bars; Fill = cropped to fill the box.
       root.classList.toggle("thumbs-fit", st.fit === "fit");
-      const base = items.filter((it) =>
+      const ads = groupSizes(items);
+      const base = ads.filter((it) =>
         (st.status === "all" || it.status === st.status) &&
         (!st.tag || (it.tags || []).includes(st.tag)) &&
         (st.seen === "all" || (st.seen === "new" ? !it.seen : it.seen)));
-      const unseenCount = items.filter((it) => !it.seen).length;
+      const unseenCount = ads.filter((it) => !it.seen).length;
       const count = (k) => base.filter((it) => k === "all" || kindOfItem(it) === k).length;
 
       const typeTabs = h("div", { class: "seg" },
         [["all", "All"], ["video", "Videos"], ["image", "Photos"], ["other", "Other"]]
-          .filter(([k]) => k === "all" || items.some((it) => kindOfItem(it) === k))
+          .filter(([k]) => k === "all" || ads.some((it) => kindOfItem(it) === k))
           .map(([k, label]) => h("button", { class: "seg-btn" + (st.type === k ? " active" : ""), onclick: () => { st.type = k; render(); } }, `${label} ${count(k)}`)),
       );
       const statusSel = h("select", { class: "mini-select", "aria-label": "Status", onchange: (e) => { st.status = e.target.value; render(); } },
@@ -451,7 +517,7 @@
           h("option", { value: v, selected: st.status === v }, l)),
       );
       const seenSel = h("select", { class: "mini-select", "aria-label": "Viewed", onchange: (e) => { st.seen = e.target.value; render(); } },
-        [["all", "Viewed and new"], ["new", `New to you (${unseenCount})`], ["seen", `Viewed (${items.length - unseenCount})`]].map(([v, l]) =>
+        [["all", "Viewed and new"], ["new", `New to you (${unseenCount})`], ["seen", `Viewed (${ads.length - unseenCount})`]].map(([v, l]) =>
           h("option", { value: v, selected: st.seen === v }, l)),
       );
       const markAll = unseenCount
@@ -532,6 +598,7 @@
       ),
       h("div", { class: "tile-meta" },
         h("div", { class: "tile-name", title: it.name }, it.name),
+        it._versions ? h("div", { class: "tile-sizes" }, it._versions.map((v) => h("span", { class: "size-chip" }, v.label))) : null,
         showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
         it.campaigns && it.campaigns.length ? h("div", { class: "mono tile-folder", style: "color:var(--ok)" }, `In ${it.campaigns.join(", ")}`) : null,
         it.tags && it.tags.length ? h("div", { class: "tile-tags" }, it.tags.map((tg) => h("span", { class: "tag" }, `#${tg}`))) : null,
@@ -569,10 +636,15 @@
     }
 
     const items = list.items;
-    const idx = items.findIndex((i) => i.path === path);
-    const it = items[idx] || { name: baseName(path), path, kind: "file" };
-    const prev = idx > 0 ? items[idx - 1] : null;
-    const next = idx >= 0 && idx < items.length - 1 ? items[idx + 1] : null;
+    const it = items.find((i) => i.path === path) || { name: baseName(path), path, kind: "file" };
+    // Previous / Next step through ads, not through every size of the same ad.
+    const ads = groupSizes(items);
+    const idx = ads.findIndex((a) => a.path === path || (a._versions || []).some((v) => v.path === path));
+    const prev = idx > 0 ? ads[idx - 1] : null;
+    const next = idx >= 0 && idx < ads.length - 1 ? ads[idx + 1] : null;
+    const sizes = sizeSiblings(items, path);
+    const also = sizes.map((v) => v.path).filter((p) => p !== path);
+    const thisSize = (sizes.find((v) => v.path === path) || {}).label;
     const src = mediaUrl(slug, path);
 
     let video = null;
@@ -589,12 +661,21 @@
     }
 
     const stage = h("div", { class: "card stage" }, stageInner);
+    const sizeSeg = sizes.length > 1
+      ? h("div", { class: "seg size-seg", title: "Sizes of this ad" },
+          sizes.map((v) => h("button", {
+            class: "seg-btn" + (v.path === path ? " active" : ""),
+            "aria-pressed": v.path === path ? "true" : "false",
+            onclick: () => { if (v.path !== path) location.replace(`#/c/${enc(slug)}/i/${enc(v.path)}`); },
+          }, v.label)))
+      : null;
     const navBar = h("div", { class: "stage-bar" },
       h("div", { class: "actions" },
         h("a", { class: "btn small", href: prev ? `#/c/${enc(slug)}/i/${enc(prev.path)}` : null, "aria-disabled": !prev, style: prev ? null : "opacity:.4;pointer-events:none" }, "← Previous"),
         h("a", { class: "btn small", href: next ? `#/c/${enc(slug)}/i/${enc(next.path)}` : null, "aria-disabled": !next, style: next ? null : "opacity:.4;pointer-events:none" }, "Next →"),
       ),
       h("div", { class: "actions" },
+        sizeSeg,
         it.size ? h("span", { class: "mono muted", style: "align-self:center" }, fmtSize(it.size)) : null,
         h("a", { class: "btn small", href: src + "?download" }, "Download"),
       ),
@@ -660,7 +741,7 @@
                 title: cp.has ? "In this campaign. Click to take it out." : "Add to this campaign",
                 onclick: async () => {
                   try {
-                    await api(cp.has ? "DELETE" : "POST", `/api/c/${enc(slug)}/campaigns/${cp.id}/items`, { path });
+                    await api(cp.has ? "DELETE" : "POST", `/api/c/${enc(slug)}/campaigns/${cp.id}/items`, { path, also });
                     toast(cp.has ? `Removed from ${cp.name}.` : `Added to ${cp.name}.`);
                     loadCampaigns();
                   } catch (err) { toast(err.message); }
@@ -692,6 +773,9 @@
       const statusNote = d.statusBy
         ? h("div", { class: "status-note muted" }, `${STATUS_LABEL[d.status]} by ${who(d.statusBy)}, ${fmtDate(d.statusAt)}`)
         : h("div", { class: "status-note muted" }, "Approve it, or request changes and say what in a comment.");
+      const sizesNote = also.length
+        ? h("div", { class: "status-note muted" }, `Approve, Favorite and campaign picks cover all ${sizes.length} sizes.`)
+        : null;
 
       const list = h("div", { class: "comments" },
         d.comments.length
@@ -759,9 +843,10 @@
         ),
         statusBtns,
         statusNote,
+        sizesNote,
         tagBox,
         campBox,
-        h("div", { class: "mono muted" }, `COMMENTS (${d.comments.length})`),
+        h("div", { class: "mono muted" }, `COMMENTS (${d.comments.length})`, also.length ? ` · ON THE ${thisSize} SIZE` : ""),
         list,
         h("div", { class: "composer" },
           box,
@@ -792,8 +877,8 @@
         toast(err.message);
       }
     }
-    const setStatus = (status) => act(api("POST", `/api/c/${enc(slug)}/status`, { path, status }));
-    const toggleLike = () => act(api("POST", `/api/c/${enc(slug)}/like`, { path }));
+    const setStatus = (status) => act(api("POST", `/api/c/${enc(slug)}/status`, { path, status, also }));
+    const toggleLike = () => act(api("POST", `/api/c/${enc(slug)}/like`, { path, also }));
     const resolve = (id) => act(api("POST", `/api/c/${enc(slug)}/comments/${id}/resolve`));
     const removeComment = (id) => {
       if (confirm("Delete this comment?")) act(api("DELETE", `/api/c/${enc(slug)}/comments/${id}`));
