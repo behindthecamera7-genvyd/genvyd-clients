@@ -83,6 +83,12 @@ tile has an Open button top right for the full page. The ad page has a big "Back
 Saving a file never navigates (that stranded the home screen app): `saveFile()` fetches it,
 then uses the share sheet on phones (Photos, Files, Messages) or a blob download on computers.
 
+Every list (folders, Favorites, campaigns, the dashboard's approved list) has "Download all N"
+in its toolbar: everything currently shown after filters, all sizes of each ad, newest
+versions. `saveMany()` fetches the files in the browser; phones get the share sheet with all
+files (Save N Items to Photos), computers get one zip built by the small stored-zip writer
+in app.js (`makeZip`, CRC32, no compression). Nothing zips on the Worker (CPU limits).
+
 Every tile has a "..." button (`openTileMenu()`): add to or take out of any campaign (admin
 can name a new campaign right there, it is created and the ad added), Favorite, Approve,
 Open, Download. All of it covers every size of the ad. Popover on desktop, bottom sheet on phones.

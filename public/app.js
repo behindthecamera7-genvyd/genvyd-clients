@@ -191,7 +191,7 @@
               clientsWithApproved.map(([s, n]) => h("button", { class: "chip small-chip" + (slug === s ? " active" : ""), onclick: () => renderApproved(s) }, n)))
           : "",
         list.length
-          ? mediaBrowser(list, { tileFn: dashTile })
+          ? mediaBrowser(list, { tileFn: dashTile, zipName: `Approved ads${slug ? " - " + (clientsWithApproved.find(([x]) => x === slug) || [, slug])[1] : ""}` })
           : h("div", { class: "card empty muted" }, "Nothing approved yet."),
       );
     }
@@ -354,7 +354,7 @@
 
     if (data.items.length) {
       if (data.folders.length) parts.push(h("div", { class: "section-label mono muted" }, "ALSO IN THIS FOLDER"));
-      parts.push(mediaBrowser(data.items, { tileFn: (it) => tile(slug, it), slug }));
+      parts.push(mediaBrowser(data.items, { tileFn: (it) => tile(slug, it), slug, zipName: `${data.client.name} - ${title}` }));
     }
 
     if (!dir && !state.me.admin && state.me.clientAlertsEnabled && slug in (state.me.alerts || {})) {
@@ -517,7 +517,7 @@
   ];
   const STATUS_ORDER = { pending: 0, changes: 1, approved: 2 };
 
-  function mediaBrowser(items, { tileFn, emptyText, slug }) {
+  function mediaBrowser(items, { tileFn, emptyText, slug, zipName }) {
     const prefs = loadPrefs();
     const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null, seen: "all", fit: prefs.fit || "fit" };
     const root = h("div", { class: "browser" });
@@ -601,6 +601,15 @@
         : null;
 
       const shown = sorted(base.filter((it) => st.type === "all" || kindOfItem(it) === st.type));
+      // Download everything on screen right now (all sizes of each ad, newest versions).
+      const files = shown.flatMap((a) => (a._sizes ? a._sizes.map((v) => v.item) : [a]));
+      const dlAll = files.length > 1
+        ? h("button", {
+            class: "btn small primary dl-all", type: "button",
+            title: "Download everything shown here, with the filters you have set",
+            onclick: () => saveMany(files.map((f) => ({ src: mediaUrl(f.clientSlug || slug, f.path), name: f.name, size: f.size })), zipName || "Genvyd ads"),
+          }, `↓ Download all ${files.length}`)
+        : null;
       const grid = (list) => h("div", { class: "grid" }, list.map(tileFn));
       let body;
       if (!shown.length) {
@@ -615,7 +624,7 @@
       }
 
       fill(root, 
-        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, fitSeg, markAll)), tagRow, body].filter(Boolean),
+        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, fitSeg, markAll, dlAll)), tagRow, body].filter(Boolean),
       );
     }
     render();
@@ -708,6 +717,128 @@
         ),
       )),
     );
+  }
+
+  // ---- Download all: one zip on computers, the share sheet on phones ---------
+  // A small "stored" zip writer (no compression: videos and photos are already
+  // compressed), so there is nothing to install and nothing runs on the server.
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+    return t;
+  })();
+  function crc32(buf, crc = 0) {
+    crc = ~crc >>> 0;
+    for (let i = 0; i < buf.length; i++) crc = CRC_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+    return ~crc >>> 0;
+  }
+  function makeZip(entries) {
+    // entries: [{ name, chunks: Uint8Array[], size, crc }]
+    const enc8 = new TextEncoder();
+    const parts = [];
+    const central = [];
+    let offset = 0;
+    const d = new Date();
+    const dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    const dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    for (const e of entries) {
+      const nameBytes = enc8.encode(e.name);
+      const lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+      lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true); lh.setUint32(14, e.crc, true);
+      lh.setUint32(18, e.size, true); lh.setUint32(22, e.size, true); lh.setUint16(26, nameBytes.length, true); lh.setUint16(28, 0, true);
+      parts.push(lh.buffer, nameBytes, ...e.chunks);
+      const ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true);
+      ch.setUint16(12, dosTime, true); ch.setUint16(14, dosDate, true); ch.setUint32(16, e.crc, true); ch.setUint32(20, e.size, true); ch.setUint32(24, e.size, true);
+      ch.setUint16(28, nameBytes.length, true); ch.setUint32(42, offset, true);
+      central.push(ch.buffer, nameBytes);
+      offset += 30 + nameBytes.length + e.size;
+    }
+    const cdSize = central.reduce((n, b) => n + b.byteLength, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true);
+    end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+    return new Blob([...parts, ...central, end.buffer], { type: "application/zip" });
+  }
+
+  function saveMany(list, zipName) {
+    closeTileMenu();
+    const ctrl = new AbortController();
+    const total = list.reduce((n, f) => n + (f.size || 0), 0);
+    const status = h("div", { class: "muted save-status" }, `Getting ${list.length} files ready${total ? ` (${fmtSize(total)})` : ""}…`);
+    const bar = h("div", { class: "upload-bar save-bar" }, h("span"));
+    const actions = h("div", { class: "save-actions" });
+    const close = () => { ctrl.abort(); layer.remove(); document.removeEventListener("keydown", esc); };
+    const esc = (e) => { if (e.key === "Escape") close(); };
+    const panel = h("div", { class: "tile-menu save-sheet", role: "dialog", "aria-label": "Download all" },
+      h("div", { class: "menu-head" },
+        h("div", { class: "menu-title" }, `${zipName} · ${list.length} files`),
+        h("button", { class: "menu-x", type: "button", "aria-label": "Close", onclick: close }, "×"),
+      ),
+      status, bar, actions,
+    );
+    const layer = h("div", { class: "menu-layer save-layer", onclick: (e) => { if (e.target === layer) close(); } }, panel);
+    document.addEventListener("keydown", esc);
+    document.body.append(layer);
+
+    const safe = (n) => n.replace(/[\\/:*?"<>|]+/g, "-").trim() || "file";
+    const download = (blob, name) => {
+      const url = URL.createObjectURL(blob);
+      const a = h("a", { href: url, download: name, style: "display:none" });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 120000);
+    };
+
+    (async () => {
+      try {
+        const got = [];
+        const used = new Set();
+        let done = 0;
+        for (let i = 0; i < list.length; i++) {
+          const f = list[i];
+          const res = await fetch(f.src, { signal: ctrl.signal, credentials: "same-origin" });
+          if (!res.ok) throw new Error(`Could not get ${f.name} (${res.status}).`);
+          const reader = res.body.getReader();
+          const chunks = [];
+          let size = 0, crc = 0;
+          for (;;) {
+            const { done: end, value } = await reader.read();
+            if (end) break;
+            chunks.push(value); size += value.length; crc = crc32(value, crc); done += value.length;
+            const pct = total ? Math.min(99, Math.round((done / total) * 100)) : Math.round(((i + 0.5) / list.length) * 100);
+            bar.firstChild.style.width = pct + "%";
+            status.textContent = `File ${i + 1} of ${list.length} · ${pct}%`;
+          }
+          let name = safe(f.name);
+          for (let n = 2; used.has(name.toLowerCase()); n++) name = safe(f.name).replace(/(\.[^.]*)?$/, (ext) => ` (${n})${ext || ""}`);
+          used.add(name.toLowerCase());
+          got.push({ name, chunks, size, crc, type: res.headers.get("content-type") || "application/octet-stream" });
+        }
+        bar.firstChild.style.width = "100%";
+        const zipFile = `${safe(zipName)}.zip`;
+        const shareFiles = got.map((g) => new File([new Blob(g.chunks, { type: g.type })], g.name, { type: g.type }));
+        const canShare = navigator.canShare && navigator.share && navigator.canShare({ files: shareFiles });
+        if (canShare) {
+          status.textContent = `All ${got.length} ready. Pick "Save ${got.length} Items" for Photos, or Save to Files.`;
+          fill(actions,
+            h("button", { class: "btn primary save-main", type: "button", onclick: async () => {
+              try { await navigator.share({ files: shareFiles, title: zipName }); close(); }
+              catch (err) { if (err && err.name !== "AbortError") { download(makeZip(got), zipFile); close(); } }
+            } }, `Save or share all ${got.length}`),
+            h("button", { class: "btn save-alt", type: "button", onclick: () => { download(makeZip(got), zipFile); close(); } }, "Download as one zip instead"),
+          );
+        } else {
+          download(makeZip(got), zipFile);
+          status.textContent = `Downloaded ${zipFile}. Check your Downloads folder.`;
+          fill(actions, h("button", { class: "btn save-main", type: "button", onclick: close }, "Done"));
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        status.textContent = err.message || "Something went wrong.";
+        fill(actions, h("button", { class: "btn save-main", type: "button", onclick: close }, "Close"));
+      }
+    })();
   }
 
   // Save or share a file without leaving the portal. The file is fetched first, then:
@@ -1261,7 +1392,7 @@
       clientTabs(slug, "favorites"),
       h("div", { class: "page-head" }, h("h1", {}, "Your favorites")),
       data.items.length
-        ? mediaBrowser(data.items, { tileFn: (it) => tile(slug, it, true), slug })
+        ? mediaBrowser(data.items, { tileFn: (it) => tile(slug, it, true), slug, zipName: `${data.client.name} - Favorites` })
         : h("div", { class: "card empty" }, h("h2", {}, "No favorites yet"),
             h("p", { class: "muted" }, "Open any ad and tap ♡ Favorite to keep it here.")),
     );
@@ -1374,7 +1505,7 @@
         adminTools,
       ),
       data.items.length
-        ? mediaBrowser(data.items, { tileFn: campTile, slug })
+        ? mediaBrowser(data.items, { tileFn: campTile, slug, zipName: `${data.client.name} - ${cp.name}` })
         : h("div", { class: "card empty" }, h("h2", {}, "No ads picked yet"),
             h("p", { class: "muted" }, "Open any ad and choose this campaign under “Use in campaign”.")),
     );
