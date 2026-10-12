@@ -71,6 +71,10 @@ Other sections, status and tag filters, a sort menu, and a Fit / Fill preview sw
 (Fit = whole image, black bars, default; Fill = cropped). Choices remembered per browser.
 Always render pages through `show()`, which drops null/false so they never print as text.
 
+Project folders render as `projectCard()`: up to 3 previews, file count, NEW badge and an
+Open button (from the `files` table in `listDir`, no extra Synology calls). When a folder
+also has loose files, sections read "FOLDERS · TAP TO OPEN" and "ALSO IN THIS FOLDER".
+
 Sizes of one ad: files in the same folder whose names differ only by an aspect ratio
 (9x16, 4x5, 1x1, 16:9) plus words like feed/stories fold into one tile (`groupSizes()` in
 app.js) with size chips, and the ad page has a size switcher. Approve, Favorite and

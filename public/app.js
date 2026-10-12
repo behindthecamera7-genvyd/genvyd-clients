@@ -348,21 +348,12 @@
     ];
 
     if (data.folders.length) {
-      parts.push(
-        h("div", { class: "grid" },
-          data.folders.map((f) =>
-            h("a", { class: "card folder-card", href: `#/c/${enc(slug)}/f/${enc(f.path)}` },
-              h("div", { class: "folder-icon", html: ICON_FOLDER }),
-              h("div", { style: "flex:1;min-width:0" }, h("h3", {}, f.name)),
-              f.newCount ? h("span", { class: "new-badge" }, `${f.newCount} new`) : null,
-            ),
-          ),
-        ),
-      );
+      if (data.items.length) parts.push(h("div", { class: "section-label mono muted" }, `FOLDERS · TAP TO OPEN`));
+      parts.push(h("div", { class: "grid" }, data.folders.map((f) => projectCard(slug, f))));
     }
 
     if (data.items.length) {
-      if (data.folders.length) parts.push(h("div", { style: "height:28px" }));
+      if (data.folders.length) parts.push(h("div", { class: "section-label mono muted" }, "ALSO IN THIS FOLDER"));
       parts.push(mediaBrowser(data.items, { tileFn: (it) => tile(slug, it), slug }));
     }
 
@@ -385,6 +376,33 @@
       parts.push(h("div", { class: "card empty" }, h("h2", {}, "Nothing here yet"), h("p", { class: "muted" }, state.me.admin ? "Click Upload, or drag files onto this page." : "New work will show up here as soon as it is ready.")));
     }
     show(...parts.filter(Boolean));
+  }
+
+  // A project folder: previews of what is inside, how many files, and a clear Open button,
+  // so nobody mistakes it for a label and misses the work in it.
+  function projectCard(slug, f) {
+    const previews = (f.previews || []).map((pv) => {
+      const src = mediaUrl(slug, pv.path);
+      const el = pv.kind === "image"
+        ? h("img", { "data-src": src, alt: "", loading: "lazy", onload: (e) => e.target.classList.add("loaded") })
+        : h("video", { "data-src": src + "#t=0.5", preload: "metadata", muted: true, playsinline: true, onloadeddata: (e) => e.target.classList.add("loaded") });
+      lazy.observe(el);
+      return h("div", { class: "pc-cell" }, el);
+    });
+    const count = f.fileCount ? `${f.fileCount} file${f.fileCount === 1 ? "" : "s"}` : "Open to see what is inside";
+    return h("a", { class: "card project-card", href: `#/c/${enc(slug)}/f/${enc(f.path)}` },
+      h("div", { class: "pc-mosaic pc-n" + Math.max(1, previews.length) },
+        previews.length ? previews : h("div", { class: "pc-cell pc-empty", html: ICON_FOLDER }),
+        f.newCount ? h("span", { class: "pill new pc-new" }, `${f.newCount} NEW`) : null,
+      ),
+      h("div", { class: "pc-meta" },
+        h("div", { style: "min-width:0" },
+          h("h3", { class: "pc-name" }, f.name),
+          h("div", { class: "mono muted" }, count),
+        ),
+        h("span", { class: "btn small primary pc-open" }, "Open"),
+      ),
+    );
   }
 
   // Shared grid for folders, favorites and campaigns: photos and videos in their

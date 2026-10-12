@@ -392,9 +392,19 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
     await env.DB.batch(gone.slice(0, 90).map((p) => env.DB.prepare("DELETE FROM files WHERE client_slug = ? AND path = ?").bind(c.slug, p)));
     gone.forEach((p) => unseen.delete(p));
   }
-  for (const f of folders as { path: string; newCount?: number }[]) {
+  // Folder cards show how much is inside and a few previews, so clients see there is
+  // something to open. Taken from the files the portal already knows (no extra Synology calls).
+  const known = (knownRows.results as { path: string }[]).map((r) => r.path).filter((p) => !gone.includes(p));
+  const isImg = (p: string) => /\.(jpe?g|png|webp|gif|avif)$/i.test(p);
+  const isVid = (p: string) => /\.(mp4|mov|m4v|webm)$/i.test(p);
+  for (const f of folders as { path: string; newCount?: number; fileCount?: number; previews?: { path: string; kind: string }[] }[]) {
     const pre = f.path + "/";
     f.newCount = [...unseen].filter((p) => p.startsWith(pre)).length;
+    const inside = known.filter((p) => p.startsWith(pre) && !/(^|\/)[.@#]/.test(p.slice(pre.length))).sort();
+    f.fileCount = inside.length;
+    f.previews = [...inside.filter(isImg), ...inside.filter(isVid)]
+      .slice(0, 3)
+      .map((p) => ({ path: p, kind: isImg(p) ? "image" : "video" }));
   }
   const tags = groupTags(tagRows.results as { path: string; tag: string }[]);
   const status = new Map((statusRows.results as { path: string; status: string }[]).map((r) => [r.path, r.status]));
