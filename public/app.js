@@ -3,7 +3,7 @@
   "use strict";
 
   const app = document.getElementById("app");
-  const state = { me: null, listCache: new Map() };
+  const state = { me: null, listCache: new Map(), curHash: null, backTo: null, scroll: new Map() };
   const clean = (kids) => kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false);
   // Replace an element's contents, skipping empty slots (null, false) so they never print as text.
   const fill = (el, ...kids) => el.replaceChildren(...clean(kids));
@@ -595,26 +595,69 @@
     return root;
   }
 
+  // One inline video plays at a time.
+  let playingVideo = null;
+
+  // A grid tile. Videos show their length and play right in the grid (tap the play
+  // button); the Open button (and the name) go to the full-size page with comments.
   function tile(slug, it, showFolder) {
     const src = mediaUrl(slug, it.path);
+    const href = `#/c/${enc(slug)}/i/${enc(it.path)}`;
+    const isVideo = it.kind === "video";
     let media;
-    if (it.kind === "image") {
-      media = h("img", { "data-src": src, alt: "", loading: "lazy", onload: (e) => e.target.classList.add("loaded") });
+    let thumb;
+    const pills = [
+      h("span", { class: `pill ${it.status}` }, STATUS_LABEL[it.status]),
+      it.seen === false ? h("span", { class: "pill new" }, "NEW") : null,
+    ];
+    const expand = h("a", { class: "expand", href, title: "Open full size, with comments", "aria-label": "Open full size" },
+      h("span", { html: ICON_EXPAND }), "Open");
+
+    if (isVideo) {
+      const dur = h("span", { class: "dur mono" });
+      media = h("video", {
+        "data-src": src + "#t=0.5", preload: "metadata", muted: true, playsinline: true,
+        onloadeddata: (e) => e.target.classList.add("loaded"),
+        onloadedmetadata: (e) => { if (isFinite(e.target.duration)) dur.textContent = fmtTime(e.target.duration); },
+      });
       lazy.observe(media);
-    } else if (it.kind === "video") {
-      media = h("video", { "data-src": src + "#t=0.5", preload: "metadata", muted: true, playsinline: true, onloadeddata: (e) => e.target.classList.add("loaded") });
-      lazy.observe(media);
+      const playBtn = h("button", { class: "play", type: "button", title: "Play here", "aria-label": "Play here" }, h("span", { html: ICON_PLAY }));
+      thumb = h("div", { class: "thumb" }, media, playBtn, ...pills, dur, expand);
+      const start = () => {
+        if (thumb.classList.contains("playing")) return;
+        if (!media.getAttribute("src")) { media.src = media.dataset.src; lazy.unobserve(media); }
+        if (playingVideo && playingVideo !== media) playingVideo.pause();
+        playingVideo = media;
+        thumb.classList.add("playing");
+        media.muted = false;
+        media.controls = true;
+        if (media.currentTime > 0.4 && media.currentTime < 0.6) media.currentTime = 0;
+        media.play().catch(() => {});
+        if (it.seen === false) {
+          api("POST", `/api/c/${enc(it.clientSlug || slug)}/view`, { path: it.path }).catch(() => {});
+          it.seen = true;
+          state.listCache.clear();
+        }
+      };
+      playBtn.onclick = (e) => { e.preventDefault(); start(); };
+      media.addEventListener("click", (e) => { if (!thumb.classList.contains("playing")) { e.preventDefault(); start(); } });
+      media.addEventListener("play", () => {
+        if (playingVideo && playingVideo !== media) playingVideo.pause();
+        playingVideo = media;
+      });
     } else {
-      media = h("div", { class: "ftype" }, it.name.split(".").pop());
+      if (it.kind === "image") {
+        media = h("img", { "data-src": src, alt: "", loading: "lazy", onload: (e) => e.target.classList.add("loaded") });
+        lazy.observe(media);
+      } else {
+        media = h("div", { class: "ftype" }, it.name.split(".").pop());
+      }
+      thumb = h("a", { class: "thumb", href }, media, ...pills, expand);
     }
-    return h("a", { class: "card tile", href: `#/c/${enc(slug)}/i/${enc(it.path)}` },
-      h("div", { class: "thumb" },
-        media,
-        it.kind === "video" ? h("div", { class: "play" }, h("span", { html: ICON_PLAY })) : null,
-        h("span", { class: `pill ${it.status}` }, STATUS_LABEL[it.status]),
-        it.seen === false ? h("span", { class: "pill new" }, "NEW") : null,
-      ),
-      h("div", { class: "tile-meta" },
+
+    return h("div", { class: "card tile" },
+      thumb,
+      h("a", { class: "tile-meta", href },
         h("div", { class: "tile-name", title: it.name }, it.name),
         it._versions ? h("div", { class: "tile-sizes" }, it._versions.map((v) => h("span", { class: "size-chip" }, v.label))) : null,
         showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
@@ -905,8 +948,14 @@
     renderSide(detail);
     renderTags(detail.tags || []);
     loadTagSuggestions();
+    const back = state.backTo && state.backTo.slug === slug
+      ? state.backTo
+      : { hash: dir ? `#/c/${enc(slug)}/f/${enc(dir)}` : `#/c/${enc(slug)}`, label: dir ? baseName(dir) : list.client.name };
     show(
-      crumbs(list.client, dir, it.name),
+      h("div", { class: "back-row" },
+        h("a", { class: "btn back-btn", href: back.hash }, h("span", { "aria-hidden": "true" }, "←"), `Back to ${back.label}`),
+        crumbs(list.client, dir, it.name),
+      ),
       h("div", { class: "viewer" }, h("div", {}, stage, navBar), side),
     );
   }
@@ -1265,11 +1314,46 @@
 
   // ---- router ---------------------------------------------------------------
 
+  const isItemHash = (hs) => /^\/c\/[^/]+\/i\//.test(hs || "");
+  // Where the Back button on an ad page goes: the list the person came from.
+  function backLabel(parts) {
+    if (parts[0] !== "c") return parts[0] === "admin" ? "Admin" : "Home";
+    const slug = decodeURIComponent(parts[1] || "");
+    const name = ((state.me && state.me.clients) || []).find((c) => c.slug === slug)?.name || "projects";
+    if (parts[2] === "f" && parts[3]) return baseName(decodeURIComponent(parts.slice(3).join("/")));
+    if (parts[2] === "favorites") return "Favorites";
+    if (parts[2] === "campaigns") return "Campaigns";
+    if (parts[2] === "campaign") return "the campaign";
+    return name;
+  }
+
   async function router() {
-    window.scrollTo(0, 0);
     const hash = location.hash.replace(/^#/, "") || "/";
     const parts = hash.split("/").filter(Boolean);
+    const prev = state.curHash;
+    // Remember how far down a list someone was, so Back lands them in the same spot.
+    if (prev && !isItemHash(prev)) state.scroll.set(prev, window.scrollY);
+    state.curHash = hash;
+    window.scrollTo(0, 0);
     try {
+      await route(hash, parts);
+      if (!isItemHash(hash)) {
+        state.backTo = { hash: "#" + hash, label: backLabel(parts), slug: parts[0] === "c" ? decodeURIComponent(parts[1] || "") : null };
+        const y = state.scroll.get(hash);
+        if (y && isItemHash(prev)) {
+          // Try a few times while previews lay out, so the page is tall enough to scroll.
+          let tries = 0;
+          const go = () => { window.scrollTo(0, y); if (Math.abs(window.scrollY - y) > 2 && ++tries < 15) setTimeout(go, 60); };
+          requestAnimationFrame(go);
+        }
+      }
+    } catch (err) {
+      show(errorCard(err));
+    }
+  }
+
+  async function route(hash, parts) {
+    {
       if (!state.me) {
         state.me = await api("GET", "/api/me");
         document.getElementById("nav-email").textContent = state.me.email;
@@ -1286,13 +1370,12 @@
         return viewFolder(slug, "");
       }
       return viewHome();
-    } catch (err) {
-      show(errorCard(err));
     }
   }
 
   const ICON_FOLDER = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
   const ICON_FLAG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4"/><path d="M4 4h12l-2 4 2 4H4"/></svg>';
+  const ICON_EXPAND = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
   const ICON_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
 
   window.addEventListener("hashchange", router);

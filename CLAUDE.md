@@ -75,6 +75,11 @@ Project folders render as `projectCard()`: up to 3 previews, file count, NEW bad
 Open button (from the `files` table in `listDir`, no extra Synology calls). When a folder
 also has loose files, sections read "FOLDERS · TAP TO OPEN" and "ALSO IN THIS FOLDER".
 
+Tiles (`tile()`): videos show their length (from metadata), play in place via the
+play button (one at a time, with sound and native controls; counts as viewed), and every
+tile has an Open button top right for the full page. The ad page has a big "Back to
+<folder>" button; the router remembers list scroll positions and restores them on return.
+
 Sizes of one ad: files in the same folder whose names differ only by an aspect ratio
 (9x16, 4x5, 1x1, 16:9) plus words like feed/stories fold into one tile (`groupSizes()` in
 app.js) with size chips, and the ad page has a size switcher. Approve, Favorite and

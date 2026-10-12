@@ -110,13 +110,15 @@ label.check input { width: auto; }
 
 .tile { overflow: hidden; display: block; color: inherit; }
 .tile:hover { background: var(--surface-2); color: inherit; }
-.thumb { position: relative; aspect-ratio: 16 / 9; background: var(--panel); overflow: hidden; }
+.thumb { display: block; position: relative; aspect-ratio: 16 / 9; background: var(--panel); overflow: hidden; }
 .thumb img, .thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
 .thumb .pill { position: absolute; top: 10px; left: 10px; }
 .thumb .play {
-  position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+  position: absolute; inset: 0; display: grid; place-items: center; background: transparent; border: 0; padding: 0; cursor: pointer; width: 100%;
 }
-.thumb .play span { width: 44px; height: 44px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); display: grid; place-items: center; color: #fff; }
+.thumb .play span { width: 56px; height: 56px; border-radius: 50%; background: rgba(0, 0, 0, 0.62); border: 1px solid rgba(255, 255, 255, 0.35); display: grid; place-items: center; color: #fff; transition: transform .15s, background .15s; }
+.thumb .play span svg { width: 22px; height: 22px; margin-left: 3px; }
+.thumb .play:hover span { background: var(--accent); border-color: var(--accent); transform: scale(1.06); }
 .thumb .ftype { position: absolute; inset: 0; display: grid; place-items: center; font: 500 13px var(--mono); color: var(--smoke); text-transform: uppercase; }
 .tile-meta { padding: 14px 16px 16px; }
 .tile-name { color: var(--bone); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -307,3 +309,22 @@ label.check input { width: auto; }
 .pc-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; }
 .pc-name { margin: 0 0 4px; word-break: break-word; }
 .pc-open { flex: none; pointer-events: none; }
+
+/* Inline video play, length and Open button on tiles */
+.tile-meta { display: block; color: inherit; }
+.tile-meta:hover { color: inherit; }
+.thumb .dur { position: absolute; right: 10px; bottom: 10px; background: rgba(0, 0, 0, 0.72); color: #fff; font-size: 12px; padding: 3px 8px; border-radius: 999px; pointer-events: none; }
+.thumb .dur:empty { display: none; }
+.thumb .expand { position: absolute; top: 10px; right: 10px; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 999px; background: rgba(0, 0, 0, 0.72); color: #fff; font: 500 13px var(--sans); border: 1px solid rgba(255, 255, 255, 0.3); backdrop-filter: blur(6px); z-index: 2; }
+.thumb .expand:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+.thumb.playing .play, .thumb.playing .dur, .thumb.playing .pill.new { display: none; }
+.thumb.playing video { opacity: 1; }
+.tile-wrap .tile-remove { top: 52px; z-index: 3; }
+@media (max-width: 640px) { .thumb .expand { height: 36px; padding: 0 14px; } }
+
+/* Back button on the ad page */
+.back-row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 18px; }
+.back-row .crumbs { margin: 0; }
+.back-btn { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 18px; font-weight: 500; }
+.back-btn span { font-size: 18px; line-height: 1; }
+@media (max-width: 640px) { .back-row { gap: 10px; } .back-row .crumbs { display: none; } .back-btn { width: 100%; justify-content: center; } }
