@@ -328,3 +328,36 @@ label.check input { width: auto; }
 .back-btn { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 18px; font-weight: 500; }
 .back-btn span { font-size: 18px; line-height: 1; }
 @media (max-width: 640px) { .back-row { gap: 10px; } .back-row .crumbs { display: none; } .back-btn { width: 100%; justify-content: center; } }
+
+/* "..." menu on tiles */
+.meta-wrap { position: relative; }
+.meta-wrap .tile-meta { padding-right: 60px; }
+.tile-camps { color: var(--ok); }
+.tile-camps:empty { display: none; }
+.more-btn { position: absolute; top: 10px; right: 10px; z-index: 2; width: 40px; height: 40px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--bone); display: grid; place-items: center; cursor: pointer; }
+.more-btn:hover { border-color: var(--accent); color: var(--accent); }
+.menu-layer { position: fixed; inset: 0; z-index: 100; }
+.tile-menu { position: fixed; width: 320px; max-height: calc(100vh - 24px); overflow: auto; background: var(--surface); border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 18px; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6); padding: 10px; }
+.menu-head { display: flex; align-items: center; gap: 8px; padding: 4px 6px 8px; }
+.menu-title { flex: 1; min-width: 0; color: var(--bone); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.menu-x { width: 32px; height: 32px; border-radius: 999px; border: 0; background: transparent; color: var(--smoke); font-size: 22px; cursor: pointer; }
+.menu-x:hover { color: var(--bone); background: var(--surface-2); }
+.menu-label { padding: 8px 8px 4px; }
+.menu-note { padding: 0 8px 6px; font-size: 11px; }
+.menu-loading { padding: 8px; font-size: 14px; }
+.menu-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 42px; padding: 0 10px; border: 0; border-radius: 10px; background: transparent; color: var(--bone); font: 15px var(--sans); text-align: left; cursor: pointer; }
+.menu-item:hover { background: var(--surface-2); color: var(--bone); }
+.mi-icon { width: 20px; display: inline-grid; place-items: center; color: var(--ash); }
+.menu-item.on-like .mi-icon { color: var(--accent); }
+.menu-item.on-ok .mi-icon { color: var(--ok); }
+.camp-row .camp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.camp-check { width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--line); display: grid; place-items: center; font-size: 13px; color: var(--ash); flex: none; }
+.camp-row.on .camp-check { background: var(--ok); border-color: var(--ok); color: #000; }
+.menu-create { display: flex; gap: 8px; padding: 6px 4px 2px; }
+.menu-input { flex: 1; min-width: 0; height: 36px; border-radius: 999px; border: 1px solid var(--line); background: var(--void); color: var(--bone); padding: 0 14px; font: 14px var(--sans); }
+.menu-sep { height: 1px; background: var(--line); margin: 8px 4px; }
+@media (max-width: 640px) {
+  .menu-layer { background: rgba(0, 0, 0, 0.55); }
+  .tile-menu { left: 0 !important; right: 0; bottom: 0; top: auto !important; width: auto; border-radius: 20px 20px 0 0; padding: 12px 12px calc(16px + env(safe-area-inset-bottom)); max-height: 80vh; }
+  .menu-item { min-height: 48px; }
+}

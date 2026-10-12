@@ -655,22 +655,155 @@
       thumb = h("a", { class: "thumb", href }, media, ...pills, expand);
     }
 
+    const pill = pills[0];
+    const likesEl = h("span", {}, `♥ ${it.likes}`);
+    const campLine = h("div", { class: "mono tile-folder tile-camps" }, it.campaigns && it.campaigns.length ? `In ${it.campaigns.join(", ")}` : "");
+    const more = h("button", {
+      class: "more-btn", type: "button", title: "More: add to a campaign, favorite, approve", "aria-label": "More options", "aria-haspopup": "menu",
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); openTileMenu(e.currentTarget, slug, it, { pill, likesEl, campLine, href, src }); },
+    }, h("span", { html: ICON_DOTS }));
     return h("div", { class: "card tile" },
       thumb,
-      h("a", { class: "tile-meta", href },
+      h("div", { class: "meta-wrap" }, more, h("a", { class: "tile-meta", href },
         h("div", { class: "tile-name", title: it.name }, it.name),
         it._versions ? h("div", { class: "tile-sizes" }, it._versions.map((v) => h("span", { class: "size-chip" }, v.label))) : null,
         showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
-        it.campaigns && it.campaigns.length ? h("div", { class: "mono tile-folder", style: "color:var(--ok)" }, `In ${it.campaigns.join(", ")}`) : null,
+        campLine,
         it.tags && it.tags.length ? h("div", { class: "tile-tags" }, it.tags.map((tg) => h("span", { class: "tag" }, `#${tg}`))) : null,
         h("div", { class: "tile-stats mono muted" },
-          h("span", {}, `♥ ${it.likes}`),
+          likesEl,
           h("span", {}, `${it.comments} comment${it.comments === 1 ? "" : "s"}`),
           state.me.admin && it.openComments ? h("span", { style: "color:var(--accent)" }, `${it.openComments} open`) : null,
         ),
-      ),
+      )),
     );
   }
+
+  // The "..." menu on a tile: add to or take out of campaigns (or start a new one),
+  // favorite, approve, open, download. Works on every size of the ad at once.
+  let openMenu = null;
+  function closeTileMenu() {
+    if (!openMenu) return;
+    openMenu.remove();
+    document.removeEventListener("keydown", openMenu._esc);
+    openMenu = null;
+  }
+  function openTileMenu(anchor, slug, it, refs) {
+    closeTileMenu();
+    const cs = it.clientSlug || slug;
+    const also = (it._versions || []).map((v) => v.path).filter((p) => p !== it.path);
+    const sizesNote = also.length ? h("div", { class: "menu-note mono muted" }, `Covers all ${also.length + 1} sizes`) : null;
+    const campList = h("div", { class: "menu-camps" }, h("div", { class: "muted menu-loading" }, "Loading campaigns…"));
+    let detail = { status: it.status, liked: !!it.liked, likes: it.likes };
+
+    const favBtn = h("button", { class: "menu-item", type: "button" });
+    const okBtn = h("button", { class: "menu-item", type: "button" });
+    const paintActions = () => {
+      fill(favBtn, h("span", { class: "mi-icon" }, detail.liked ? "♥" : "♡"), detail.liked ? "Favorited (tap to undo)" : "Add to favorites");
+      fill(okBtn, h("span", { class: "mi-icon" }, "✓"), detail.status === "approved" ? "Approved (tap to undo)" : "Approve");
+      favBtn.classList.toggle("on-like", detail.liked);
+      okBtn.classList.toggle("on-ok", detail.status === "approved");
+    };
+    const after = (d) => {
+      detail = d;
+      it.status = d.status; it.liked = d.liked; it.likes = d.likes;
+      refs.pill.className = `pill ${d.status}`;
+      refs.pill.textContent = STATUS_LABEL[d.status];
+      refs.likesEl.textContent = `♥ ${d.likes}`;
+      state.listCache.clear();
+      paintActions();
+    };
+    favBtn.onclick = async () => {
+      try { after(await api("POST", `/api/c/${enc(cs)}/like`, { path: it.path, also })); toast(detail.liked ? "Added to favorites." : "Removed from favorites."); }
+      catch (err) { toast(err.message); }
+    };
+    okBtn.onclick = async () => {
+      try { after(await api("POST", `/api/c/${enc(cs)}/status`, { path: it.path, status: detail.status === "approved" ? "pending" : "approved", also })); toast(detail.status === "approved" ? "Approved." : "Approval taken back."); }
+      catch (err) { toast(err.message); }
+    };
+    paintActions();
+
+    async function loadCamps() {
+      try {
+        const r = await api("GET", `/api/c/${enc(cs)}/campaigns?path=${enc(it.path)}`);
+        const names = r.campaigns.filter((c) => c.has).map((c) => c.name);
+        it.campaigns = names;
+        refs.campLine.textContent = names.length ? `In ${names.join(", ")}` : "";
+        const rows = r.campaigns.map((cp) =>
+          h("button", {
+            class: "menu-item camp-row" + (cp.has ? " on" : ""), type: "button", "aria-pressed": cp.has ? "true" : "false",
+            onclick: async () => {
+              try {
+                await api(cp.has ? "DELETE" : "POST", `/api/c/${enc(cs)}/campaigns/${cp.id}/items`, { path: it.path, also });
+                toast(cp.has ? `Taken out of ${cp.name}.` : `Added to ${cp.name}.`);
+                state.listCache.clear();
+                loadCamps();
+              } catch (err) { toast(err.message); }
+            },
+          }, h("span", { class: "camp-check" }, cp.has ? "✓" : "+"), h("span", { class: "camp-name" }, cp.name)));
+        let creator = null;
+        if (state.me.admin) {
+          const input = h("input", { class: "menu-input", placeholder: "New campaign name", maxlength: "120",
+            onkeydown: (e) => { if (e.key === "Enter") create(); } });
+          const create = async () => {
+            const name = input.value.trim();
+            if (!name) return input.focus();
+            try {
+              const c = await api("POST", `/api/c/${enc(cs)}/campaigns`, { name });
+              await api("POST", `/api/c/${enc(cs)}/campaigns/${c.id}/items`, { path: it.path, also });
+              toast(`Made "${name}" and added this ad.`);
+              state.listCache.clear();
+              loadCamps();
+            } catch (err) { toast(err.message); }
+          };
+          creator = h("div", { class: "menu-create" }, input, h("button", { class: "btn small primary", type: "button", onclick: create }, "Create"));
+        }
+        fill(campList,
+          rows.length ? rows : h("div", { class: "muted menu-loading" }, state.me.admin ? "No campaigns yet. Name one below." : "No campaigns set up yet."),
+          creator);
+      } catch (err) {
+        fill(campList, h("div", { class: "muted menu-loading" }, err.message));
+      }
+      place();
+    }
+    loadCamps();
+
+    const panel = h("div", { class: "tile-menu", role: "menu" },
+      h("div", { class: "menu-head" },
+        h("div", { class: "menu-title", title: it.name }, it.name),
+        h("button", { class: "menu-x", type: "button", "aria-label": "Close", onclick: closeTileMenu }, "×"),
+      ),
+      h("div", { class: "menu-label mono muted" }, "ADD TO CAMPAIGN"),
+      sizesNote,
+      campList,
+      h("div", { class: "menu-sep" }),
+      favBtn,
+      okBtn,
+      h("a", { class: "menu-item", href: refs.href, onclick: closeTileMenu }, h("span", { class: "mi-icon", html: ICON_EXPAND }), "Open full size and comments"),
+      h("a", { class: "menu-item", href: refs.src + "?download", onclick: closeTileMenu }, h("span", { class: "mi-icon" }, "↓"), "Download"),
+    );
+    const layer = h("div", { class: "menu-layer", onclick: (e) => { if (e.target === layer) closeTileMenu(); } }, panel);
+    layer._esc = (e) => { if (e.key === "Escape") closeTileMenu(); };
+    document.addEventListener("keydown", layer._esc);
+    document.body.append(layer);
+    openMenu = layer;
+
+    // Desktop: next to the button, kept on screen (re-run once campaigns load).
+    // Phones: a sheet from the bottom (CSS).
+    function place() {
+      if (!panel.isConnected || window.innerWidth <= 640) return;
+      const r = anchor.getBoundingClientRect();
+      const w = panel.offsetWidth, hgt = panel.offsetHeight;
+      const left = Math.max(12, Math.min(r.right - w, window.innerWidth - w - 12));
+      let top = r.bottom + 6;
+      if (top + hgt > window.innerHeight - 12) top = r.top - hgt - 6;
+      if (top < 12) top = Math.max(12, window.innerHeight - hgt - 12);
+      panel.style.left = left + "px";
+      panel.style.top = top + "px";
+    }
+    place();
+  }
+  window.addEventListener("hashchange", closeTileMenu);
 
   async function viewItem(slug, path) {
     const dir = parentOf(path);
@@ -1376,6 +1509,7 @@
   const ICON_FOLDER = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
   const ICON_FLAG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4"/><path d="M4 4h12l-2 4 2 4H4"/></svg>';
   const ICON_EXPAND = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
+  const ICON_DOTS = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
   const ICON_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
 
   window.addEventListener("hashchange", router);

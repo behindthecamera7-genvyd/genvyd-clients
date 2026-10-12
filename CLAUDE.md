@@ -80,6 +80,10 @@ play button (one at a time, with sound and native controls; counts as viewed), a
 tile has an Open button top right for the full page. The ad page has a big "Back to
 <folder>" button; the router remembers list scroll positions and restores them on return.
 
+Every tile has a "..." button (`openTileMenu()`): add to or take out of any campaign (admin
+can name a new campaign right there, it is created and the ad added), Favorite, Approve,
+Open, Download. All of it covers every size of the ad. Popover on desktop, bottom sheet on phones.
+
 Sizes of one ad: files in the same folder whose names differ only by an aspect ratio
 (9x16, 4x5, 1x1, 16:9) plus words like feed/stories fold into one tile (`groupSizes()` in
 app.js) with size chips, and the ad page has a size switcher. Approve, Favorite and
