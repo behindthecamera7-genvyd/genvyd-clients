@@ -393,3 +393,27 @@ label.check input { width: auto; }
 .menu-item.danger-item { color: var(--accent); }
 .hide-link { align-self: flex-start; color: var(--smoke); font-size: 13px; }
 .hide-link:hover { color: var(--accent); }
+
+/* Ad copy */
+.copy-adder { margin-bottom: 22px; }
+.copy-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.copy-input { width: 100%; box-sizing: border-box; border-radius: 16px; border: 1px solid var(--line); background: var(--void); color: var(--bone); padding: 12px 14px; font: 15px/1.5 var(--sans); resize: vertical; }
+.copy-adder .menu-input { width: 100%; box-sizing: border-box; height: 40px; }
+.copy-list { display: grid; gap: 14px; }
+.copy-card { padding: 18px 20px; border: 1px solid var(--line); }
+.copy-card.is-approved { border-color: rgba(61, 220, 132, 0.45); }
+.copy-card.is-changes { border-color: rgba(255, 176, 32, 0.5); }
+.copy-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.copy-text { color: var(--bone); font: 500 20px/1.4 var(--display); margin: 14px 0 0; white-space: pre-wrap; word-break: break-word; }
+.copy-note { margin-top: 8px; font-size: 14px; }
+.copy-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.copy-thread { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 10px; }
+.copy-history { display: grid; gap: 4px; }
+.copy-old { color: var(--smoke); font-size: 14px; text-decoration: line-through; text-decoration-color: rgba(255,255,255,.25); }
+@media (max-width: 640px) { .copy-text { font-size: 18px; } .copy-card { padding: 16px; } }
+
+/* Four client tabs fit on a phone: tighter, and scroll sideways if a name is long */
+.tabs { overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs .tab { white-space: nowrap; flex: none; }
+@media (max-width: 640px) { .tabs { gap: 2px; } .tabs .tab { padding-left: 8px; padding-right: 8px; font-size: 14px; } }

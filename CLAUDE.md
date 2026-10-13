@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden. All additive.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns. All additive.
 
 ## Roles
 
@@ -112,6 +112,18 @@ with Unhide. Hides go in the email digest. Admin only: Delete a hidden ad (`POST
 /api/c/:slug/delete`, refuses anything not hidden) MOVEs the file to
 `_Deleted files/<client folder>/<subfolders>/` on the Synology (Worker-built destination,
 `freeName`, never erased) and removes its D1 rows. Anthony empties that folder in Finder.
+
+## Ad copy
+
+The "Ad copy" tab (`viewCopy()`, routes `/api/c/:slug/copy[/:id/(status|edit|hide|comments|campaign|delete)]`)
+holds taglines, headlines, primary text, CTAs and captions for approval. Admin adds copy (one
+line, or "each line is its own option" for up to 50) with an optional note and campaigns;
+admin Edit keeps earlier wordings in `history`, bumps `version` and resets to Awaiting review.
+Clients Approve / Request changes / comment / Hide and put copy in campaigns; only admin
+adds, edits and deletes (hidden only). Comments live in `comments` with path `copy:<id>` so
+the dashboard, resolve and digest work (`itemHref()` / `itemLink()` send those to the Copy
+tab). Campaign pages list their copy with "Copy approved copy". "Copy all approved" puts
+every approved line on the clipboard grouped by type, for Ads Manager. It is in the Claude feed.
 
 ## Claude feed
 

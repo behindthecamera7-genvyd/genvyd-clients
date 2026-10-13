@@ -331,6 +331,7 @@ const BACKUP_CRON = "17 10 * * *"; // 3:17 AM Phoenix
 const BACKUP_TABLES = [
   "clients", "members", "item_status", "likes", "comments", "activity",
   "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views", "hidden",
+  "copy_items", "copy_campaigns",
 ];
 const BACKUP_NAME_RE = /^portal-backup-\d{4}-\d{2}-\d{2}-\d{4}(-[a-z-]{1,20})?\.json$/;
 const SYSTEM_USER: User = { email: "backup@portal", admin: true };
@@ -445,14 +446,19 @@ async function buildFeed(env: Env) {
   const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   const isAdmin = (e: string) => admins.includes(e.toLowerCase());
   const weekAgo = now() - 7 * 86400 * 1000;
-  const [clientsR, statusR, commentsR, campsR, hiddenR, actR] = await env.DB.batch([
+  const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR] = await env.DB.batch([
     env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
     env.DB.prepare("SELECT client_slug, path, status, updated_by, updated_at FROM item_status WHERE status IN ('approved','changes') ORDER BY updated_at DESC"),
     env.DB.prepare("SELECT id, client_slug, path, email, body, timecode, resolved, created_at FROM comments ORDER BY created_at"),
     env.DB.prepare("SELECT c.id, c.client_slug, c.name, c.notes, i.path FROM campaigns c LEFT JOIN campaign_items i ON i.campaign_id = c.id ORDER BY c.created_at DESC, i.added_at"),
     env.DB.prepare("SELECT client_slug, path, hidden_by, hidden_at FROM hidden ORDER BY hidden_at DESC"),
     env.DB.prepare("SELECT client_slug, path, email, kind, detail, created_at FROM activity WHERE created_at > ? ORDER BY created_at DESC LIMIT 300").bind(weekAgo),
+    env.DB.prepare("SELECT * FROM copy_items ORDER BY created_at DESC"),
+    env.DB.prepare("SELECT l.copy_id, c.name FROM copy_campaigns l JOIN campaigns c ON c.id = l.campaign_id"),
   ]);
+  const copies = copyR.results as Record<string, any>[];
+  const copyCamps = new Map<number, string[]>();
+  for (const r of copyCampR.results as { copy_id: number; name: string }[]) copyCamps.set(r.copy_id, [...(copyCamps.get(r.copy_id) ?? []), r.name]);
   type Row = Record<string, any>;
   const clients = clientsR.results as Row[];
   const status = statusR.results as Row[];
@@ -488,11 +494,18 @@ async function buildFeed(env: Env) {
       }
     }
     const approved = mine.filter((r) => r.status === "approved").map((r) => ({ ...fileInfo(r.path), approved_by: r.updated_by, at: azTime(r.updated_at), campaigns: campsByPath.get(r.path) ?? [], comments: commentsOn(r.path) }));
-    const openElsewhere = [...new Set(comments.filter((m) => m.client_slug === c.slug && !m.resolved && !isAdmin(m.email) && !changePaths.has(m.path) && !hiddenSet.has(key(m.path))).map((m) => m.path))]
+    const openElsewhere = [...new Set(comments.filter((m) => m.client_slug === c.slug && !m.resolved && !isAdmin(m.email) && !String(m.path).startsWith("copy:") && !changePaths.has(m.path) && !hiddenSet.has(key(m.path))).map((m) => m.path))]
       .map((p) => ({ ...fileInfo(p), comments: commentsOn(p) }));
     const hid = hidden.filter((r) => r.client_slug === c.slug).map((r) => ({ ...fileInfo(r.path), hidden_by: r.hidden_by, at: azTime(r.hidden_at) }));
     const recent = acts.filter((a) => a.client_slug === c.slug).slice(0, 60).map((a) => ({ at: azTime(a.created_at), by: a.email, did: a.kind, path: a.path, detail: a.detail }));
-    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, changes_requested: changes, open_comments: openElsewhere, approved, campaigns, hidden: hid, recent_activity: recent });
+    const KIND_LABEL: Record<string, string> = { tagline: "Tagline", headline: "Headline", primary: "Primary text", cta: "Call to action", caption: "Caption", other: "Other" };
+    const copy = copies.filter((r) => r.client_slug === c.slug).map((r) => ({
+      id: r.id, type: KIND_LABEL[r.kind] || r.kind, text: r.text, note: r.note, status: r.status, status_by: r.status_by,
+      at: r.status_at ? azTime(r.status_at) : null, version: r.version, hidden: !!r.hidden,
+      campaigns: copyCamps.get(r.id) ?? [], comments: commentsOn(`copy:${r.id}`),
+      earlier_wordings: (JSON.parse(r.history || "[]") as { text: string }[]).map((h) => h.text),
+    }));
+    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, changes_requested: changes, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
 
     const cm = (list: ReturnType<typeof commentsOn>) =>
       list.map((m) => `    - ${m.open ? "OPEN " : ""}${m.from === "Genvyd" ? "Genvyd" : m.by} (${m.at}): ${tc(m.timecode)}${m.text.replace(/\s+/g, " ")}`).join("\n");
@@ -504,12 +517,31 @@ async function buildFeed(env: Env) {
     md += openElsewhere.length ? openElsewhere.map((f) => `\n- ${file(f)}\n  - Comments:\n${cm(f.comments)}`).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Approved (${approved.length})\n`;
     md += approved.length ? approved.map((f) => `\n- ${file(f)}\n  - Approved by ${f.approved_by}, ${f.at}${f.campaigns.length ? `\n  - In campaigns: ${f.campaigns.join(", ")}` : ""}${f.comments.length ? "\n  - Comments:\n" + cm(f.comments) : ""}`).join("\n") + "\n" : "\nNone yet.\n";
+    const live = copy.filter((x) => !x.hidden);
+    const copyLine = (x: (typeof copy)[number]) =>
+      `\n- ${x.type} #${x.id}${x.version > 1 ? ` (v${x.version})` : ""}: "${x.text.replace(/\s+/g, " ")}"` +
+      (x.status !== "pending" && x.status_by ? `\n  - ${x.status === "approved" ? "Approved" : "Changes requested"} by ${x.status_by}, ${x.at}` : "") +
+      (x.campaigns.length ? `\n  - In campaigns: ${x.campaigns.join(", ")}` : "") +
+      (x.note ? `\n  - Note: ${x.note.replace(/\s+/g, " ")}` : "") +
+      (x.comments.length ? "\n  - Comments:\n" + cm(x.comments) : "") +
+      (x.earlier_wordings.length ? `\n  - Earlier wordings: ${x.earlier_wordings.map((t) => `"${t.replace(/\s+/g, " ")}"`).join(" / ")}` : "");
+    md += `\n### Ad copy (taglines, headlines, text)\n`;
+    if (!live.length) md += "\nNone yet.\n";
+    for (const [label, st] of [["Changes requested", "changes"], ["Awaiting review", "pending"], ["Approved", "approved"]] as const) {
+      const list = live.filter((x) => x.status === st);
+      if (list.length) md += `\n**${label} (${list.length})**\n` + list.map(copyLine).join("") + "\n";
+    }
+    const hidCopy = copy.filter((x) => x.hidden);
+    if (hidCopy.length) md += `\n**Hidden, they don't want these (${hidCopy.length})**\n` + hidCopy.map((x) => `\n- ${x.type} #${x.id}: "${x.text.replace(/\s+/g, " ")}"`).join("") + "\n";
     md += `\n### Campaigns (${campaigns.length})\n`;
-    md += campaigns.length ? campaigns.map((cp) => `\n- **${cp.name}**${cp.notes ? ` (${cp.notes.replace(/\s+/g, " ")})` : ""}: ${cp.files.length ? cp.files.join(", ") : "empty"}`).join("\n") + "\n" : "\nNone.\n";
+    md += campaigns.length ? campaigns.map((cp) => {
+      const cc = live.filter((x) => x.campaigns.includes(cp.name)).map((x) => `${x.type} #${x.id} "${x.text.replace(/\s+/g, " ")}"`);
+      return `\n- **${cp.name}**${cp.notes ? ` (${cp.notes.replace(/\s+/g, " ")})` : ""}: ${cp.files.length ? cp.files.join(", ") : "no ads"}${cc.length ? `\n  - Copy: ${cc.join("; ")}` : ""}`;
+    }).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Hidden by the client, they don't want these (${hid.length})\n`;
     md += hid.length ? hid.map((f) => `\n- ${f.path} (hidden by ${f.hidden_by}, ${f.at})`).join("") + "\n" : "\nNone.\n";
     md += `\n### Client activity, last 7 days\n`;
-    md += recent.length ? recent.map((a) => `\n- ${a.at}: ${a.by} ${a.did} ${a.path}${a.detail && a.did !== "comment" ? ` (${a.detail})` : ""}`).join("") + "\n" : "\nNothing.\n";
+    md += recent.length ? recent.map((a) => `\n- ${a.at}: ${a.by} ${a.did} ${String(a.path).startsWith("copy:") ? `ad copy #${String(a.path).slice(5)}` : a.path}${a.detail && a.did !== "comment" ? ` (${a.detail})` : ""}`).join("") + "\n" : "\nNothing.\n";
   }
   return { md, json: out };
 }
@@ -517,7 +549,7 @@ async function buildFeed(env: Env) {
 /** Writes the feed if anything changed since the last one (or always, when forced). */
 async function writeFeed(env: Env, force = false) {
   const sig = await env.DB.prepare(
-    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) AS s",
+    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) || '-' || (SELECT IFNULL(MAX(updated_at),0) || COUNT(*) FROM copy_items) || '-' || (SELECT COUNT(*) FROM copy_campaigns) AS s",
   ).first<{ s: string }>();
   const last = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'feed_sig'").first<{ value: string }>();
   if (!force && last && sig && last.value === sig.s) return { written: false };
@@ -534,6 +566,37 @@ async function writeFeed(env: Env, force = false) {
   await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('feed_sig', ?)").bind(sig?.s ?? "").run();
   await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('feed_last', ?)").bind(String(now())).run();
   return { written: true, at: now(), bytes: md.length };
+}
+
+// ---------------------------------------------------------------------------
+// Ad copy
+// ---------------------------------------------------------------------------
+
+const COPY_KINDS = ["tagline", "headline", "primary", "cta", "caption", "other"];
+
+async function copyList(env: Env, user: User, c: Client) {
+  const [items, links, camps, comments] = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM copy_items WHERE client_slug = ? ORDER BY created_at DESC, id DESC").bind(c.slug),
+    env.DB.prepare("SELECT l.copy_id, l.campaign_id FROM copy_campaigns l JOIN copy_items i ON i.id = l.copy_id WHERE i.client_slug = ?").bind(c.slug),
+    env.DB.prepare("SELECT id, name FROM campaigns WHERE client_slug = ? ORDER BY created_at DESC").bind(c.slug),
+    env.DB.prepare("SELECT id, path, email, body, resolved, created_at FROM comments WHERE client_slug = ? AND path LIKE 'copy:%' ORDER BY created_at").bind(c.slug),
+  ]);
+  const byCopy = new Map<number, number[]>();
+  for (const l of links.results as { copy_id: number; campaign_id: number }[]) byCopy.set(l.copy_id, [...(byCopy.get(l.copy_id) ?? []), l.campaign_id]);
+  const cmts = new Map<string, unknown[]>();
+  for (const m of comments.results as Record<string, any>[]) {
+    cmts.set(m.path, [...(cmts.get(m.path) ?? []), { id: m.id, email: m.email, body: m.body, resolved: !!m.resolved, created_at: m.created_at, mine: m.email === user.email }]);
+  }
+  return {
+    client: { slug: c.slug, name: c.name },
+    campaigns: camps.results,
+    kinds: COPY_KINDS,
+    items: (items.results as Record<string, any>[]).map((r) => ({
+      id: r.id, kind: r.kind, text: r.text, note: r.note, status: r.status, statusBy: r.status_by, statusAt: r.status_at,
+      version: r.version, history: JSON.parse(r.history || "[]"), hidden: !!r.hidden, createdAt: r.created_at, updatedAt: r.updated_at,
+      campaigns: byCopy.get(r.id) ?? [], comments: cmts.get(`copy:${r.id}`) ?? [],
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +894,112 @@ async function route(req: Request, env: Env): Promise<Response> {
       .run();
     if (!r.meta.changes) throw new HttpError(404, "You are not on that client's list.");
     return json({ ok: true, on: !!body.on });
+  }
+
+  // ---- ad copy (taglines, headlines, primary text, CTAs) --------------------
+  const cm = path.match(/^\/api\/c\/([^/]+)\/copy(?:\/(\d+)(?:\/(status|edit|hide|comments|campaign|delete))?)?$/);
+  if (cm) {
+    const [, slugRaw, idStr, sub] = cm;
+    const c = await requireClient(env, user, decodeURIComponent(slugRaw));
+    if (!idStr && method === "GET") return json(await copyList(env, user, c));
+    if (!idStr && method === "POST") {
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can add copy.");
+      const body = await readBody(req);
+      const kind = COPY_KINDS.includes(String(body.kind)) ? String(body.kind) : "other";
+      const raw = String(body.text ?? "").replace(/\r/g, "").trim();
+      if (!raw) throw new HttpError(400, "Type the copy first.");
+      const texts = body.lines ? raw.split("\n").map((t) => t.trim()).filter(Boolean) : [raw];
+      if (texts.length > 50) throw new HttpError(400, "That is a lot of lines. Add 50 or fewer at a time.");
+      if (texts.some((t) => t.length > 3000)) throw new HttpError(400, "One of those is too long (3,000 characters max).");
+      const note = String(body.note ?? "").trim().slice(0, 1000) || null;
+      const camps = (Array.isArray(body.campaigns) ? body.campaigns : []).map(Number).filter((n) => Number.isInteger(n)).slice(0, 10);
+      const valid = camps.length
+        ? new Set((await env.DB.prepare(`SELECT id FROM campaigns WHERE client_slug = ? AND id IN (${camps.map(() => "?").join(",")})`).bind(c.slug, ...camps).all<{ id: number }>()).results.map((r) => r.id))
+        : new Set<number>();
+      for (const t of texts) {
+        const r = await env.DB.prepare(
+          "INSERT INTO copy_items (client_slug, kind, text, note, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        ).bind(c.slug, kind, t, note, user.email, now(), now()).first<{ id: number }>();
+        if (valid.size) {
+          await env.DB.batch([...valid].map((cid) =>
+            env.DB.prepare("INSERT OR IGNORE INTO copy_campaigns (copy_id, campaign_id, added_by, added_at) VALUES (?, ?, ?, ?)").bind(r!.id, cid, user.email, now())));
+        }
+      }
+      return json(await copyList(env, user, c));
+    }
+    if (idStr) {
+      const item = await env.DB.prepare("SELECT * FROM copy_items WHERE id = ? AND client_slug = ?").bind(Number(idStr), c.slug).first<Record<string, any>>();
+      if (!item) throw new HttpError(404, "That copy is gone.");
+      const cpath = `copy:${item.id}`;
+      const snippet = String(item.text).replace(/\s+/g, " ").slice(0, 120);
+      if (sub === "status" && method === "POST") {
+        const status = String((await readBody(req)).status ?? "");
+        if (!["pending", "approved", "changes"].includes(status)) throw new HttpError(400, "Bad status.");
+        await env.DB.prepare("UPDATE copy_items SET status = ?, status_by = ?, status_at = ? WHERE id = ?").bind(status, user.email, now(), item.id).run();
+        await logActivity(env, c.slug, cpath, user.email, status, snippet);
+        return json(await copyList(env, user, c));
+      }
+      if (sub === "edit" && method === "POST") {
+        // New wording keeps the old one in history and goes back to Awaiting review.
+        if (!user.admin) throw new HttpError(403, "Only Genvyd can edit copy.");
+        const body = await readBody(req);
+        const text = String(body.text ?? "").replace(/\r/g, "").trim();
+        if (!text) throw new HttpError(400, "Copy is empty.");
+        if (text.length > 3000) throw new HttpError(400, "That is too long (3,000 characters max).");
+        const kind = COPY_KINDS.includes(String(body.kind)) ? String(body.kind) : item.kind;
+        const note = body.note === undefined ? item.note : String(body.note ?? "").trim().slice(0, 1000) || null;
+        if (text === item.text) {
+          await env.DB.prepare("UPDATE copy_items SET kind = ?, note = ?, updated_at = ? WHERE id = ?").bind(kind, note, now(), item.id).run();
+        } else {
+          const history = JSON.parse(item.history || "[]");
+          history.push({ text: item.text, version: item.version, status: item.status, at: item.updated_at });
+          await env.DB.prepare(
+            "UPDATE copy_items SET text = ?, kind = ?, note = ?, version = version + 1, history = ?, status = 'pending', status_by = NULL, status_at = NULL, updated_at = ? WHERE id = ?",
+          ).bind(text, kind, note, JSON.stringify(history.slice(-20)), now(), item.id).run();
+        }
+        return json(await copyList(env, user, c));
+      }
+      if (sub === "hide" && method === "POST") {
+        const hide = (await readBody(req)).hidden !== false;
+        await env.DB.prepare("UPDATE copy_items SET hidden = ? WHERE id = ?").bind(hide ? 1 : 0, item.id).run();
+        await logActivity(env, c.slug, cpath, user.email, hide ? "hidden" : "unhidden", snippet);
+        return json(await copyList(env, user, c));
+      }
+      if (sub === "comments" && method === "POST") {
+        const text = String((await readBody(req)).body ?? "").trim();
+        if (!text) throw new HttpError(400, "Comment is empty.");
+        if (text.length > 4000) throw new HttpError(400, "Comment is too long (4,000 characters max).");
+        await env.DB.prepare("INSERT INTO comments (client_slug, path, email, body, timecode, created_at) VALUES (?, ?, ?, ?, NULL, ?)")
+          .bind(c.slug, cpath, user.email, text, now()).run();
+        await logActivity(env, c.slug, cpath, user.email, "comment", text.slice(0, 280));
+        return json(await copyList(env, user, c));
+      }
+      if (sub === "campaign" && method === "POST") {
+        // Anyone on the client can put copy in a campaign, like ads.
+        const body = await readBody(req);
+        const camp = await env.DB.prepare("SELECT id, name FROM campaigns WHERE id = ? AND client_slug = ?").bind(Number(body.campaign), c.slug).first<{ id: number; name: string }>();
+        if (!camp) throw new HttpError(404, "No such campaign.");
+        if (body.on === false) {
+          await env.DB.prepare("DELETE FROM copy_campaigns WHERE copy_id = ? AND campaign_id = ?").bind(item.id, camp.id).run();
+          await logActivity(env, c.slug, cpath, user.email, "campaign_remove", camp.name);
+        } else {
+          await env.DB.prepare("INSERT OR IGNORE INTO copy_campaigns (copy_id, campaign_id, added_by, added_at) VALUES (?, ?, ?, ?)").bind(item.id, camp.id, user.email, now()).run();
+          await logActivity(env, c.slug, cpath, user.email, "campaign_add", camp.name);
+        }
+        return json(await copyList(env, user, c));
+      }
+      if (sub === "delete" && method === "POST") {
+        if (!user.admin) throw new HttpError(403, "Only Genvyd can delete copy.");
+        if (!item.hidden) throw new HttpError(409, "Hide it first. Only hidden copy can be deleted.");
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM copy_items WHERE id = ?").bind(item.id),
+          env.DB.prepare("DELETE FROM copy_campaigns WHERE copy_id = ?").bind(item.id),
+          env.DB.prepare("DELETE FROM comments WHERE client_slug = ? AND path = ?").bind(c.slug, cpath),
+        ]);
+        return json(await copyList(env, user, c));
+      }
+    }
+    throw new HttpError(405, "Method not allowed.");
   }
 
   // ---- favorites and campaigns ------------------------------------------
@@ -1545,6 +1714,7 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "
 
 function itemLink(env: Env, slug: string, path: string) {
   const base = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
+  if (path.startsWith("copy:")) return `${base}/#/c/${encodeURIComponent(slug)}/copy`;
   return `${base}/#/c/${encodeURIComponent(slug)}/i/${encodeURIComponent(path)}`;
 }
 
@@ -1619,9 +1789,9 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
       html += `<p style="margin:14px 0 6px;font-weight:bold;color:${kind === "changes" ? "#b26a00" : kind === "approved" ? "#127a3f" : "#111"}">${LABEL[kind]}</p><ul style="margin:0;padding-left:18px">`;
       text += `  ${LABEL[kind]}:\n`;
       for (const r of list) {
-        const file = r.path.split("/").pop() || r.path;
+        const file = r.path.startsWith("copy:") ? (kind === "comment" ? "Ad copy" : `Ad copy "${r.detail ?? ""}"`) : r.path.split("/").pop() || r.path;
         const link = itemLink(env, slug, r.path);
-        const extra = kind === "comment" && r.detail ? `: "${r.detail}"` : kind === "campaign_add" && r.detail ? ` (${r.detail})` : "";
+        const extra = kind === "comment" && r.detail ? `: "${r.detail}"` : kind === "campaign_add" && r.detail && !r.path.startsWith("copy:") ? ` (${r.detail})` : "";
         html += `<li style="margin:4px 0"><a href="${esc(link)}" style="color:#d4141a">${esc(file)}</a> <span style="color:#555">by ${esc(r.email)}${esc(extra)}</span></li>`;
         text += `   - ${file} by ${r.email}${extra}\n     ${link}\n`;
       }

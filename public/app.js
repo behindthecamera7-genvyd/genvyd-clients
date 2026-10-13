@@ -61,6 +61,9 @@
   const who = (email) => (state.me && email === state.me.email ? "You" : email);
   const STATUS_LABEL = { pending: "Awaiting review", approved: "Approved", changes: "Changes requested" };
   const parentOf = (p) => p.split("/").slice(0, -1).join("/");
+  // Comments and activity can point at an ad file or at a line of ad copy ("copy:12").
+  const itemHref = (slug, p) => (String(p).startsWith("copy:") ? `#/c/${enc(slug)}/copy` : `#/c/${enc(slug)}/i/${enc(p)}`);
+  const itemLabel = (p, detail) => (String(p).startsWith("copy:") ? `ad copy${detail ? ` "${String(detail).slice(0, 60)}"` : ""}` : baseName(p));
   const baseName = (p) => p.split("/").pop();
 
   function errorCard(err) {
@@ -86,6 +89,7 @@
       tab("projects", "Projects", `#/c/${enc(slug)}`),
       tab("favorites", "♥ Favorites", `#/c/${enc(slug)}/favorites`),
       tab("campaigns", "Campaigns", `#/c/${enc(slug)}/campaigns`),
+      tab("copy", "Ad copy", `#/c/${enc(slug)}/copy`),
     );
   }
 
@@ -163,11 +167,11 @@
         h("div", { class: "mono muted" }, `${cm.clientName} · ${fmtDate(cm.created_at)}`),
         h("div", {},
           h("span", { style: "color:var(--bone)" }, cm.email), " on ",
-          h("a", { href: `#/c/${enc(cm.client_slug)}/i/${enc(cm.path)}` }, baseName(cm.path)),
+          h("a", { href: itemHref(cm.client_slug, cm.path) }, itemLabel(cm.path)),
         ),
         h("div", { class: "detail" }, cm.timecode != null ? h("span", { class: "tc" }, fmtTime(cm.timecode)) : null, cm.body),
         h("div", { class: "comment-tools" },
-          h("a", { class: "linkish", href: `#/c/${enc(cm.client_slug)}/i/${enc(cm.path)}` }, "Open"),
+          h("a", { class: "linkish", href: itemHref(cm.client_slug, cm.path) }, "Open"),
           h("button", {
             class: "linkish",
             onclick: async () => {
@@ -203,7 +207,7 @@
         h("div", { class: "mono muted" }, `${a.client_name || a.client_slug} · ${fmtDate(a.created_at)}${a.created_at > lastSeen ? " · NEW" : ""}`),
         h("div", {},
           h("span", { style: "color:var(--bone)" }, a.email), ` ${KIND[a.kind] || a.kind} `,
-          h("a", { href: `#/c/${enc(a.client_slug)}/i/${enc(a.path)}` }, baseName(a.path)),
+          h("a", { href: itemHref(a.client_slug, a.path) }, itemLabel(a.path, a.kind !== "comment" && !String(a.kind).startsWith("campaign") ? a.detail : null)),
           a.kind.startsWith("campaign") && a.detail ? ` (${a.detail})` : "",
         ),
         a.kind === "comment" && a.detail ? h("div", { class: "detail" }, a.detail) : null,
@@ -1480,6 +1484,159 @@
     );
   }
 
+  // ---- Ad copy: taglines, headlines, primary text, CTAs for approval -----------
+  const COPY_KIND_LABEL = { tagline: "Tagline", headline: "Headline", primary: "Primary text", cta: "Call to action", caption: "Caption", other: "Other" };
+  const COPY_KIND_HINT = {
+    tagline: "Short brand line", headline: "Bold line under the ad (about 40 characters)", primary: "Main text above the ad",
+    cta: "Button or closing line", caption: "Post or video caption", other: "Anything else",
+  };
+  async function viewCopy(slug, keep) {
+    if (!keep) show(h("p", { class: "muted" }, "Loading…"));
+    let d;
+    try { d = await api("GET", `/api/c/${enc(slug)}/copy`); } catch (err) { show(errorCard(err)); return; }
+    const st = viewCopy.state[slug] || (viewCopy.state[slug] = { kind: "all", status: "all", hidden: false, open: new Set() });
+    const campName = new Map(d.campaigns.map((c) => [c.id, c.name]));
+    const refresh = (data) => { d = data; render(); };
+    const call = async (method, url, body) => { try { refresh(await api(method, url, body)); return true; } catch (err) { toast(err.message); return false; } };
+    const base = `/api/c/${enc(slug)}/copy`;
+
+    // Admin: add copy. One line, or many options at once ("each line is its own option").
+    let adder = null;
+    if (state.me.admin) {
+      const kindSel = h("select", { class: "mini-select" }, d.kinds.map((k) => h("option", { value: k }, COPY_KIND_LABEL[k] || k)));
+      const text = h("textarea", { class: "copy-input", rows: 3, maxlength: "3000", placeholder: "Type the copy. To offer several options, put each on its own line and tick the box below." });
+      const lines = h("input", { type: "checkbox" });
+      const note = h("input", { class: "menu-input", maxlength: "1000", placeholder: "Note for the client (optional), e.g. for the golf ads" });
+      const campBoxes = d.campaigns.map((cp) => ({ cp, box: h("input", { type: "checkbox" }) }));
+      const add = h("button", { class: "btn small primary", type: "button", onclick: async () => {
+        if (!text.value.trim()) return text.focus();
+        add.disabled = true;
+        const ok = await call("POST", base, { kind: kindSel.value, text: text.value, lines: lines.checked, note: note.value, campaigns: campBoxes.filter((x) => x.box.checked).map((x) => x.cp.id) });
+        add.disabled = false;
+        if (ok) { text.value = ""; note.value = ""; toast("Added. The client can review it now."); }
+      } }, "Add copy");
+      adder = h("div", { class: "card pad copy-adder" },
+        h("h2", { style: "margin:0 0 12px" }, "Add copy for review"),
+        h("div", { class: "copy-row" }, kindSel, h("span", { class: "muted", style: "font-size:13px" }, "Tagline, headline, primary text, call to action or caption")),
+        text,
+        h("label", { class: "check", style: "margin:8px 0" }, lines, "Each line is its own option (she can approve them one by one)"),
+        note,
+        campBoxes.length ? h("div", { class: "copy-row", style: "flex-wrap:wrap;margin-top:10px" }, h("span", { class: "mono muted" }, "CAMPAIGNS"), campBoxes.map((x) => h("label", { class: "check" }, x.box, x.cp.name))) : null,
+        h("div", { style: "margin-top:12px" }, add),
+      );
+    }
+
+    const listHolder = h("div");
+    function render() {
+      const hiddenCount = d.items.filter((x) => x.hidden).length;
+      if (st.hidden && !hiddenCount) st.hidden = false;
+      const visible = d.items.filter((x) => x.hidden === st.hidden);
+      const shown = visible.filter((x) => (st.kind === "all" || x.kind === st.kind) && (st.status === "all" || x.status === st.status));
+      const kindsUsed = d.kinds.filter((k) => visible.some((x) => x.kind === k));
+      const approved = visible.filter((x) => x.status === "approved");
+
+      const copyApproved = approved.length
+        ? h("button", { class: "btn small primary", type: "button", title: "Copy every approved line, grouped by type, to paste into Ads Manager", onclick: async () => {
+            const groups = d.kinds.map((k) => [k, approved.filter((x) => x.kind === k)]).filter(([, l]) => l.length);
+            const out = groups.map(([k, l]) => `${(COPY_KIND_LABEL[k] || k).toUpperCase()}\n${l.map((x) => x.text).join("\n\n")}`).join("\n\n\n");
+            try { await navigator.clipboard.writeText(out); toast(`Copied ${approved.length} approved line${approved.length === 1 ? "" : "s"}.`); }
+            catch { toast("Your browser blocked copying. Long-press a line to copy it instead."); }
+          } }, `Copy all approved (${approved.length})`)
+        : null;
+      const toolbar = h("div", { class: "toolbar" },
+        h("div", { class: "seg" },
+          [["all", "All"], ...kindsUsed.map((k) => [k, COPY_KIND_LABEL[k] || k])].map(([k, l]) =>
+            h("button", { class: "seg-btn" + (st.kind === k ? " active" : ""), onclick: () => { st.kind = k; render(); } }, `${l} ${visible.filter((x) => k === "all" || x.kind === k).length}`))),
+        h("div", { class: "toolbar-right" },
+          h("select", { class: "mini-select", "aria-label": "Status", onchange: (e) => { st.status = e.target.value; render(); } },
+            [["all", "Any status"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"]].map(([v, l]) => h("option", { value: v, selected: st.status === v }, l))),
+          hiddenCount ? h("button", { class: "btn small" + (st.hidden ? " on-warn" : ""), type: "button", onclick: () => { st.hidden = !st.hidden; render(); } }, st.hidden ? "← Back" : `Hidden (${hiddenCount})`) : null,
+          st.hidden ? null : copyApproved,
+        ),
+      );
+
+      const card = (x) => {
+        const open = st.open.has(x.id);
+        const openCount = x.comments.filter((m) => !m.resolved && !m.mine).length;
+        const box = h("textarea", { placeholder: "What should change? Or say what you like about it.", maxlength: "4000", rows: 2 });
+        const post = h("button", { class: "btn small primary", type: "button", onclick: async () => {
+          if (!box.value.trim()) return box.focus();
+          post.disabled = true;
+          if (!(await call("POST", `${base}/${x.id}/comments`, { body: box.value }))) post.disabled = false;
+        } }, "Post");
+        const thread = open
+          ? h("div", { class: "copy-thread" },
+              x.comments.length
+                ? x.comments.map((m) => h("div", { class: "comment" + (m.resolved ? " resolved" : "") },
+                    h("div", { class: "comment-head" }, h("span", { class: "mono", style: "color:var(--bone)" }, who(m.email)), h("span", { class: "mono muted" }, fmtDate(m.created_at))),
+                    h("div", { class: "comment-body" }, m.body),
+                    (m.mine || state.me.admin) ? h("div", { class: "comment-tools" },
+                      state.me.admin ? h("button", { class: "linkish", onclick: async () => { try { await api("POST", `/api/c/${enc(slug)}/comments/${m.id}/resolve`); refresh(await api("GET", base)); } catch (err) { toast(err.message); } } }, m.resolved ? "Reopen" : "Mark done") : null,
+                      h("button", { class: "linkish", onclick: async () => { if (!confirm("Delete this comment?")) return; try { await api("DELETE", `/api/c/${enc(slug)}/comments/${m.id}`); refresh(await api("GET", base)); } catch (err) { toast(err.message); } } }, "Delete")) : null))
+                : h("p", { class: "muted", style: "margin:0" }, "No comments yet."),
+              x.history.length ? h("div", { class: "copy-history" }, h("div", { class: "mono muted" }, "EARLIER WORDINGS"), x.history.slice().reverse().map((hh) => h("div", { class: "copy-old" }, `v${hh.version}: ${hh.text}`))) : null,
+              h("div", { class: "composer" }, box, h("div", { class: "composer-row" }, h("span"), post)))
+          : null;
+        const editBtn = state.me.admin
+          ? h("button", { class: "linkish", type: "button", onclick: async () => {
+              const t = prompt("New wording (the old one is kept in history and it goes back to Awaiting review):", x.text);
+              if (t == null || !t.trim() || t.trim() === x.text) return;
+              if (await call("POST", `${base}/${x.id}/edit`, { text: t })) toast(`Saved as v${x.version + 1}.`);
+            } }, "Edit")
+          : null;
+        return h("div", { class: "card copy-card" + (x.status === "approved" ? " is-approved" : x.status === "changes" ? " is-changes" : "") },
+          h("div", { class: "copy-head" },
+            h("span", { class: "tag" }, COPY_KIND_LABEL[x.kind] || x.kind),
+            x.version > 1 ? h("span", { class: "mono muted" }, `v${x.version}`) : null,
+            h("span", { class: `pill ${x.status}` }, STATUS_LABEL[x.status]),
+            h("span", { style: "flex:1" }),
+            h("button", { class: "linkish", type: "button", title: "Copy this text", onclick: async () => { try { await navigator.clipboard.writeText(x.text); toast("Copied."); } catch { toast("Long-press the text to copy it."); } } }, "Copy text"),
+            editBtn,
+          ),
+          h("div", { class: "copy-text" }, x.text),
+          x.note ? h("div", { class: "muted copy-note" }, x.note) : null,
+          d.campaigns.length && !x.hidden
+            ? h("div", { class: "filters", style: "margin-top:12px" },
+                d.campaigns.map((cp) => {
+                  const on = x.campaigns.includes(cp.id);
+                  return h("button", { class: "chip small-chip" + (on ? " active" : ""), type: "button", title: on ? "In this campaign. Tap to take it out." : "Use in this campaign",
+                    onclick: () => call("POST", `${base}/${x.id}/campaign`, { campaign: cp.id, on: !on }) }, `${on ? "✓ " : "+ "}${cp.name}`);
+                }))
+            : null,
+          h("div", { class: "copy-actions" },
+            x.hidden
+              ? [h("button", { class: "btn small", type: "button", onclick: () => call("POST", `${base}/${x.id}/hide`, { hidden: false }) }, "Unhide"),
+                 state.me.admin ? h("button", { class: "btn small danger", type: "button", onclick: () => confirm("Delete this copy for good? Its comments go too.") && call("POST", `${base}/${x.id}/delete`) }, "Delete") : null]
+              : [h("button", { class: "btn small" + (x.status === "approved" ? " on-ok" : ""), type: "button", onclick: () => call("POST", `${base}/${x.id}/status`, { status: x.status === "approved" ? "pending" : "approved" }) }, x.status === "approved" ? "✓ Approved" : "Approve"),
+                 h("button", { class: "btn small" + (x.status === "changes" ? " on-warn" : ""), type: "button", onclick: () => { call("POST", `${base}/${x.id}/status`, { status: x.status === "changes" ? "pending" : "changes" }); if (x.status !== "changes") st.open.add(x.id); } }, x.status === "changes" ? "Changes requested" : "Request changes"),
+                 h("button", { class: "btn small", type: "button", onclick: () => { open ? st.open.delete(x.id) : st.open.add(x.id); render(); } }, `💬 ${x.comments.length}${openCount && state.me.admin ? ` · ${openCount} open` : ""}`),
+                 h("span", { style: "flex:1" }),
+                 h("button", { class: "linkish hide-link", type: "button", onclick: () => call("POST", `${base}/${x.id}/hide`, { hidden: true }).then((ok) => ok && toast("Hidden. Find it under Hidden to bring it back.")) }, "⊘ Hide")],
+          ),
+          x.statusBy && x.status !== "pending" ? h("div", { class: "status-note muted" }, `${STATUS_LABEL[x.status]} by ${who(x.statusBy)}, ${fmtDate(x.statusAt)}`) : null,
+          thread,
+        );
+      };
+
+      const body = shown.length
+        ? h("div", { class: "copy-list" }, shown.map(card))
+        : h("div", { class: "card empty muted" }, d.items.length ? "Nothing matches these filters." : state.me.admin ? "No copy yet. Add taglines, headlines or ad text above and the client can approve them here." : "No ad copy to review yet.");
+      fill(listHolder, toolbar,
+        st.hidden ? h("div", { class: "card hidden-note" }, h("div", {}, h("strong", {}, "Hidden copy. "), "Only shown here. Unhide to bring a line back.")) : null,
+        body);
+    }
+    render();
+    show(
+      crumbs(d.client, "", "Ad copy"),
+      clientTabs(slug, "copy"),
+      h("div", { class: "page-head" }, h("h1", {}, "Ad copy"),
+        h("p", { class: "muted", style: "margin:6px 0 0;max-width:640px" }, state.me.admin ? "Taglines, headlines and ad text for the client to approve." : "Approve the wording you like, ask for changes, or hide what you don't want.")),
+      adder,
+      listHolder,
+    );
+  }
+  viewCopy.state = {};
+
   async function viewFavorites(slug) {
     show(h("p", { class: "muted" }, "Loading…"));
     let data;
@@ -1558,6 +1715,7 @@
       return;
     }
     const cp = data.campaign;
+    const campCopy = h("div", { class: "camp-copy" });
     const adminTools = state.me.admin
       ? h("div", { class: "actions" },
           h("button", {
@@ -1610,7 +1768,28 @@
         ? mediaBrowser(data.items, { tileFn: campTile, slug, zipName: `${data.client.name} - ${cp.name}` })
         : h("div", { class: "card empty" }, h("h2", {}, "No ads picked yet"),
             h("p", { class: "muted" }, "Open any ad and choose this campaign under “Use in campaign”.")),
+      campCopy,
     );
+    // The copy picked for this campaign, under the ads.
+    api("GET", `/api/c/${enc(slug)}/copy`).then((d) => {
+      const mine = d.items.filter((x) => !x.hidden && x.campaigns.includes(cp.id));
+      const approved = mine.filter((x) => x.status === "approved");
+      fill(campCopy,
+        h("div", { class: "section-label mono muted" }, `AD COPY · ${mine.length}`),
+        mine.length
+          ? h("div", { class: "copy-list" },
+              mine.map((x) => h("a", { class: "card copy-card" + (x.status === "approved" ? " is-approved" : x.status === "changes" ? " is-changes" : ""), href: `#/c/${enc(slug)}/copy`, style: "display:block;color:inherit" },
+                h("div", { class: "copy-head" }, h("span", { class: "tag" }, COPY_KIND_LABEL[x.kind] || x.kind), h("span", { class: `pill ${x.status}` }, STATUS_LABEL[x.status])),
+                h("div", { class: "copy-text" }, x.text))),
+              approved.length
+                ? h("div", {}, h("button", { class: "btn small primary", type: "button", onclick: async () => {
+                    const out = approved.map((x) => `${(COPY_KIND_LABEL[x.kind] || x.kind).toUpperCase()}: ${x.text}`).join("\n\n");
+                    try { await navigator.clipboard.writeText(out); toast(`Copied ${approved.length} approved line${approved.length === 1 ? "" : "s"}.`); } catch { toast("Your browser blocked copying."); }
+                  } }, `Copy approved copy (${approved.length})`))
+                : null)
+          : h("div", { class: "card empty muted" }, "No copy in this campaign yet. On the Ad copy tab, tap this campaign's name under a line to add it."),
+      );
+    }).catch(() => {});
   }
 
   async function viewAdmin() {
@@ -1864,7 +2043,7 @@
             h("div", { class: "mono muted" }, `${a.client_name || a.client_slug} · ${fmtDate(a.created_at)}`),
             h("div", {},
               h("span", { style: "color:var(--bone)" }, a.email), ` ${KIND[a.kind] || a.kind} `,
-              h("a", { href: `#/c/${enc(a.client_slug)}/i/${enc(a.path)}` }, baseName(a.path)),
+              h("a", { href: itemHref(a.client_slug, a.path) }, itemLabel(a.path, a.kind !== "comment" && !String(a.kind).startsWith("campaign") ? a.detail : null)),
             ),
             a.detail ? h("div", { class: "detail" }, a.detail) : null,
           ),
@@ -1903,6 +2082,7 @@
     const name = ((state.me && state.me.clients) || []).find((c) => c.slug === slug)?.name || "projects";
     if (parts[2] === "f" && parts[3]) return baseName(decodeURIComponent(parts.slice(3).join("/")));
     if (parts[2] === "favorites") return "Favorites";
+    if (parts[2] === "copy") return "Ad copy";
     if (parts[2] === "campaigns") return "Campaigns";
     if (parts[2] === "campaign") return "the campaign";
     return name;
@@ -1945,6 +2125,7 @@
         const slug = decodeURIComponent(parts[1]);
         if (parts[2] === "i" && parts[3]) return viewItem(slug, decodeURIComponent(parts.slice(3).join("/")));
         if (parts[2] === "favorites") return viewFavorites(slug);
+        if (parts[2] === "copy") return viewCopy(slug);
         if (parts[2] === "campaigns") return viewCampaigns(slug);
         if (parts[2] === "campaign" && /^\d+$/.test(parts[3] || "")) return viewCampaign(slug, parts[3]);
         if (parts[2] === "f" && parts[3]) return viewFolder(slug, decodeURIComponent(parts.slice(3).join("/")));
