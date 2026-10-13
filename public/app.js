@@ -214,9 +214,36 @@
       ),
     );
 
+    // Clients first: what each one is waiting on, one tap to open.
+    const clientCards = state.me.clients.map((c) => {
+      const n = {
+        changes: dash.changes.filter((x) => x.clientSlug === c.slug).length,
+        comments: dash.openComments.filter((x) => x.client_slug === c.slug).length,
+        approved: dash.approved.filter((x) => x.clientSlug === c.slug).length,
+        fresh: fresh.filter((a) => a.client_slug === c.slug).length,
+      };
+      const chip = (num, label, tone) => num ? h("span", { class: "cc-chip " + tone }, `${num} ${label}`) : null;
+      const waiting = [chip(n.fresh, "new", "hot"), chip(n.changes, n.changes === 1 ? "change request" : "change requests", "warn"), chip(n.comments, n.comments === 1 ? "comment" : "comments", ""), chip(n.approved, "approved", "ok")].filter(Boolean);
+      return h("div", { class: "card client-card" },
+        h("a", { class: "cc-main", href: `#/c/${enc(c.slug)}` },
+          h("div", { class: "folder-icon", html: ICON_FOLDER }),
+          h("div", { style: "flex:1;min-width:0" },
+            h("h3", { style: "margin:0 0 6px" }, c.name),
+            waiting.length ? h("div", { class: "cc-chips" }, waiting) : h("div", { class: "mono muted" }, "Nothing waiting")),
+          h("span", { class: "btn small primary" }, "Open")),
+        h("div", { class: "cc-links" },
+          h("a", { href: `#/c/${enc(c.slug)}` }, "Projects"),
+          h("a", { href: `#/c/${enc(c.slug)}/campaigns` }, "Campaigns"),
+          h("a", { href: `#/c/${enc(c.slug)}/copy` }, "Ad copy"),
+          h("a", { href: `#/c/${enc(c.slug)}/favorites` }, "Favorites")),
+      );
+    });
+
     show(
-      h("div", { class: "page-head" }, h("h1", {}, "Studio dashboard"), h("a", { class: "btn small", href: "#/admin" }, "Clients and logins")),
-      h("div", { class: "stats" },
+      h("div", { class: "page-head" }, h("h1", {}, "Studio dashboard"), h("a", { class: "btn small", href: "#/admin" }, "Admin: clients, logins, backups")),
+      h("div", { class: "dash-h mono muted", style: "font-size:12px;margin:0 0 12px" }, "YOUR CLIENTS"),
+      h("div", { class: "grid client-grid" }, clientCards.length ? clientCards : h("div", { class: "card empty muted" }, "No clients yet. Add one on the Admin page.")),
+      h("div", { class: "stats", style: "margin-top:28px" },
         stat(fresh.length, "NEW SINCE LAST VISIT", "dash-activity", fresh.length ? "hot" : ""),
         stat(dash.changes.length, "CHANGES REQUESTED", "dash-changes", dash.changes.length ? "warn" : ""),
         stat(dash.openComments.length, "UNANSWERED COMMENTS", "dash-comments", ""),
@@ -240,15 +267,6 @@
           h("div", { class: "card", id: "dash-activity", style: "margin-top:20px" },
             h("div", { class: "pad", style: "padding-bottom:8px" }, h("h2", {}, "Latest from clients")),
             h("div", { class: "feed" }, feed.length ? feed : h("div", { class: "feed-item muted" }, "No client activity yet.")),
-          ),
-        ),
-      ),
-      h("h2", { class: "dash-h", style: "margin-top:40px" }, "Clients"),
-      h("div", { class: "grid" },
-        state.me.clients.map((c) =>
-          h("a", { class: "card folder-card", href: `#/c/${enc(c.slug)}` },
-            h("div", { class: "folder-icon", html: ICON_FOLDER }),
-            h("div", {}, h("h3", {}, c.name), h("div", { class: "mono muted" }, "Open")),
           ),
         ),
       ),
@@ -2113,13 +2131,45 @@
     }
   }
 
+  // ---- top bar: logo always goes home; admin gets Dashboard, a client menu and Admin ----
+  function setupNav() {
+    document.getElementById("nav-email").textContent = state.me.email;
+    const admin = state.me.admin;
+    document.getElementById("nav-admin").hidden = !admin;
+    document.getElementById("nav-dash").hidden = !admin;
+    const sel = document.getElementById("nav-clients");
+    const clients = state.me.clients || [];
+    if (admin || clients.length > 1) {
+      sel.hidden = false;
+      fill(sel, h("option", { value: "" }, admin ? "Clients" : "My projects"), clients.map((c) => h("option", { value: c.slug }, c.name)));
+      sel.onchange = () => { if (sel.value) location.hash = `#/c/${enc(sel.value)}`; };
+    }
+    // Tapping the logo on the page you're already on still refreshes it and goes to the top.
+    document.querySelector(".brand").addEventListener("click", (e) => {
+      const here = location.hash.replace(/^#/, "") || "/";
+      if (here === "/") { e.preventDefault(); window.scrollTo({ top: 0, behavior: "smooth" }); router(); }
+    });
+  }
+  function markNav(hash, parts) {
+    const dash = document.getElementById("nav-dash");
+    const adminLink = document.getElementById("nav-admin");
+    const sel = document.getElementById("nav-clients");
+    dash.classList.toggle("active", hash === "/" || hash === "");
+    adminLink.classList.toggle("active", parts[0] === "admin");
+    if (!sel.hidden) {
+      const slug = parts[0] === "c" ? decodeURIComponent(parts[1] || "") : "";
+      sel.value = (state.me.clients || []).some((c) => c.slug === slug) ? slug : "";
+      sel.classList.toggle("active", !!sel.value);
+    }
+  }
+
   async function route(hash, parts) {
     {
       if (!state.me) {
         state.me = await api("GET", "/api/me");
-        document.getElementById("nav-email").textContent = state.me.email;
-        document.getElementById("nav-admin").hidden = !state.me.admin;
+        setupNav();
       }
+      markNav(hash, parts);
       if (parts[0] === "admin") return viewAdmin();
       if (parts[0] === "c" && parts[1]) {
         const slug = decodeURIComponent(parts[1]);

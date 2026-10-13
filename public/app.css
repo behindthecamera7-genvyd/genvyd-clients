@@ -417,3 +417,33 @@ label.check input { width: auto; }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs .tab { white-space: nowrap; flex: none; }
 @media (max-width: 640px) { .tabs { gap: 2px; } .tabs .tab { padding-left: 8px; padding-right: 8px; font-size: 14px; } }
+
+/* Top bar buttons and client menu */
+.nav-btn { padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line); color: var(--bone); }
+.nav-btn:hover { border-color: rgba(255, 255, 255, 0.3); color: var(--bone); }
+.nav-btn.active { background: var(--bone); color: #000; border-color: var(--bone); }
+.nav-select { height: 34px; max-width: 170px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--bone); padding: 0 12px; font: 500 14px var(--sans); cursor: pointer; }
+.nav-select.active { border-color: var(--accent); }
+@media (max-width: 720px) {
+  .topbar { flex-wrap: wrap; gap: 10px; }
+  .topnav { flex-wrap: wrap; justify-content: flex-end; }
+  .nav-btn { padding: 0 12px; min-height: 36px; margin: 0; }
+  .nav-select { max-width: 130px; height: 36px; }
+}
+
+/* Dashboard client cards */
+.client-grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.client-card { padding: 0; overflow: hidden; border: 1px solid var(--line); }
+.cc-main { display: flex; align-items: center; gap: 14px; padding: 18px 20px; color: inherit; }
+.cc-main:hover { background: var(--surface-2); color: inherit; }
+.cc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cc-chip { font: 500 12px var(--mono); padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--ash); }
+.cc-chip.hot { background: var(--accent); border-color: var(--accent); color: #fff; }
+.cc-chip.warn { color: var(--warn); border-color: rgba(255, 176, 32, 0.5); }
+.cc-chip.ok { color: var(--ok); border-color: rgba(61, 220, 132, 0.45); }
+.cc-links { display: flex; flex-wrap: wrap; border-top: 1px solid var(--line); }
+.cc-links a { flex: 1; text-align: center; padding: 11px 6px; font-size: 13px; color: var(--smoke); }
+.cc-links a + a { border-left: 1px solid var(--line); }
+.cc-links a:hover { color: var(--bone); background: var(--surface-2); }
+.topnav a { white-space: nowrap; }
+.client-grid { align-items: start; }
