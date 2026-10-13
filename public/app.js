@@ -197,7 +197,7 @@
     }
     renderApproved(null);
 
-    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to" };
+    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "hid", unhidden: "unhid", deleted: "deleted" };
     const feed = fromClients.slice(0, 15).map((a) =>
       h("div", { class: "feed-item" + (a.created_at > lastSeen ? " fresh" : "") },
         h("div", { class: "mono muted" }, `${a.client_name || a.client_slug} · ${fmtDate(a.created_at)}${a.created_at > lastSeen ? " · NEW" : ""}`),
@@ -476,6 +476,7 @@
         comments: all.reduce((n, x) => n + (x.comments || 0), 0),
         openComments: all.reduce((n, x) => n + (x.openComments || 0), 0),
         seen: all.every((x) => x.seen !== false),
+        hidden: g.every((e) => e.it.hidden),
         tags: [...new Set(all.flatMap((x) => x.tags || []))],
         campaigns: [...new Set(all.flatMap((x) => x.campaigns || []))],
         mtime: latest ? new Date(latest).toISOString() : all[0].mtime,
@@ -519,8 +520,17 @@
 
   function mediaBrowser(items, { tileFn, emptyText, slug, zipName }) {
     const prefs = loadPrefs();
-    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null, seen: "all", fit: prefs.fit || "fit" };
+    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null, seen: "all", fit: prefs.fit || "fit", hidden: false };
     const root = h("div", { class: "browser" });
+    // Tiles report hides, unhides and deletes so the grid updates in place.
+    root.addEventListener("gv-change", (e) => {
+      const { paths, hidden, deleted } = e.detail;
+      const set = new Set(paths);
+      if (deleted) { for (let i = items.length - 1; i >= 0; i--) if (set.has(items[i].path)) items.splice(i, 1); }
+      else items.forEach((it) => { if (set.has(it.path)) it.hidden = hidden; });
+      state.listCache.clear();
+      render();
+    });
     items.forEach((it, i) => (it._i = i));
 
     const kindOfItem = kindOf;
@@ -544,7 +554,10 @@
       savePrefs({ type: st.type, sort: st.sort, fit: st.fit });
       // Fit = whole image with black bars; Fill = cropped to fill the box.
       root.classList.toggle("thumbs-fit", st.fit === "fit");
-      const ads = groupAds(items);
+      const grouped = groupAds(items);
+      const hiddenAds = grouped.filter((a) => a.hidden);
+      if (st.hidden && !hiddenAds.length) st.hidden = false;
+      const ads = grouped.filter((a) => !!a.hidden === st.hidden);
       const base = ads.filter((it) =>
         (st.status === "all" || it.status === st.status) &&
         (!st.tag || (it.tags || []).includes(st.tag)) &&
@@ -601,9 +614,40 @@
         : null;
 
       const shown = sorted(base.filter((it) => st.type === "all" || kindOfItem(it) === st.type));
+      // Hidden ads: out of the way, one tap to see them, Unhide to bring one back.
+      const hiddenBtn = hiddenAds.length
+        ? h("button", { class: "btn small" + (st.hidden ? " on-warn" : ""), type: "button", title: "Ads you or the client hid", onclick: () => { st.hidden = !st.hidden; render(); } },
+            st.hidden ? "← Back to all ads" : `Hidden (${hiddenAds.length})`)
+        : null;
+      const hiddenNote = st.hidden
+        ? h("div", { class: "card hidden-note" },
+            h("div", {},
+              h("strong", {}, `${hiddenAds.length} hidden ad${hiddenAds.length === 1 ? "" : "s"}. `),
+              state.me.admin
+                ? "Only shown here. Unhide one from its ... menu, or delete them. Deleting moves the files to the \"_Deleted files\" folder on the Synology."
+                : "Only shown here. Tap ... on one and pick Unhide to bring it back."),
+            state.me.admin
+              ? h("button", { class: "btn small danger", type: "button", onclick: () => deleteHidden(hiddenAds) }, `Delete all ${hiddenAds.length}`)
+              : null)
+        : null;
+      async function deleteHidden(list) {
+        const paths = list.flatMap((a) => a._paths || [a.path]).map((p) => ({ p, s: (list.find((a) => (a._paths || [a.path]).includes(p)) || {}).clientSlug || slug }));
+        if (!confirm(`Delete ${list.length} hidden ad${list.length === 1 ? "" : "s"} (${paths.length} file${paths.length === 1 ? "" : "s"})?\n\nThe files move to "_Deleted files" on the Synology, and their comments and approvals are removed from the portal.`)) return;
+        const done = [];
+        for (let i = 0; i < paths.length; i++) {
+          toast(`Deleting ${i + 1} of ${paths.length}…`);
+          try { await api("POST", `/api/c/${enc(paths[i].s)}/delete`, { path: paths[i].p }); done.push(paths[i].p); }
+          catch (err) { toast(err.message); break; }
+        }
+        if (done.length) {
+          root.dispatchEvent(new CustomEvent("gv-change", { detail: { paths: done, deleted: true } }));
+          toast(`Deleted ${done.length} file${done.length === 1 ? "" : "s"}.`);
+        }
+      }
+
       // Download everything on screen right now (all sizes of each ad, newest versions).
       const files = shown.flatMap((a) => (a._sizes ? a._sizes.map((v) => v.item) : [a]));
-      const dlAll = files.length > 1
+      const dlAll = files.length > 1 && !st.hidden
         ? h("button", {
             class: "btn small primary dl-all", type: "button",
             title: "Download everything shown here, with the filters you have set",
@@ -613,7 +657,7 @@
       const grid = (list) => h("div", { class: "grid" }, list.map(tileFn));
       let body;
       if (!shown.length) {
-        body = h("div", { class: "card empty muted" }, items.length ? "Nothing matches these filters." : emptyText || "Nothing here yet.");
+        body = h("div", { class: "card empty muted" }, ads.length ? "Nothing matches these filters." : grouped.length ? "Everything here is hidden. Tap Hidden to see it." : emptyText || "Nothing here yet.");
       } else if (st.type === "all") {
         const groups = [["video", "VIDEOS"], ["image", "PHOTOS"], ["other", "OTHER FILES"]]
           .map(([k, label]) => [label, shown.filter((it) => kindOfItem(it) === k)])
@@ -624,7 +668,7 @@
       }
 
       fill(root, 
-        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, fitSeg, markAll, dlAll)), tagRow, body].filter(Boolean),
+        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, fitSeg, markAll, hiddenBtn, dlAll)), hiddenNote, tagRow, body].filter(Boolean),
       );
     }
     render();
@@ -1003,6 +1047,30 @@
     }
     loadCamps();
 
+    // Hide covers every size and version of the ad.
+    const allPaths = it._paths && it._paths.length ? it._paths : [it.path];
+    const others = allPaths.filter((p) => p !== it.path);
+    const announce = (detail) => anchor.dispatchEvent(new CustomEvent("gv-change", { bubbles: true, detail }));
+    const hideBtn = h("button", { class: "menu-item", type: "button", onclick: async () => {
+      try {
+        await api("POST", `/api/c/${enc(cs)}/hide`, { path: it.path, also: others, hidden: !it.hidden });
+        toast(it.hidden ? "Back in the list." : "Hidden. Find it under Hidden to bring it back.");
+        closeTileMenu();
+        announce({ paths: allPaths, hidden: !it.hidden });
+      } catch (err) { toast(err.message); }
+    } }, h("span", { class: "mi-icon" }, it.hidden ? "↺" : "⊘"), it.hidden ? "Unhide (put it back)" : "Hide this ad (I don't want it)");
+    const delBtn = state.me.admin && it.hidden
+      ? h("button", { class: "menu-item danger-item", type: "button", onclick: async () => {
+          if (!confirm(`Delete "${it.name}"${others.length ? ` and its ${others.length} other size/version file${others.length === 1 ? "" : "s"}` : ""}?\n\nThe file moves to "_Deleted files" on the Synology, and its comments and approvals are removed from the portal.`)) return;
+          try {
+            for (const p of allPaths) await api("POST", `/api/c/${enc(cs)}/delete`, { path: p });
+            toast("Deleted. The file is in _Deleted files on the Synology.");
+            closeTileMenu();
+            announce({ paths: allPaths, deleted: true });
+          } catch (err) { toast(err.message); }
+        } }, h("span", { class: "mi-icon" }, "🗑"), "Delete (admin)")
+      : null;
+
     const panel = h("div", { class: "tile-menu", role: "menu" },
       h("div", { class: "menu-head" },
         h("div", { class: "menu-title", title: it.name }, it.name),
@@ -1016,6 +1084,9 @@
       okBtn,
       h("a", { class: "menu-item", href: refs.href, onclick: closeTileMenu }, h("span", { class: "mi-icon", html: ICON_EXPAND }), "Open full size and comments"),
       h("button", { class: "menu-item", type: "button", onclick: () => { closeTileMenu(); saveFile(refs.src, it.name); } }, h("span", { class: "mi-icon" }, "↓"), "Save or share"),
+      h("div", { class: "menu-sep" }),
+      hideBtn,
+      delBtn,
     );
     const layer = h("div", { class: "menu-layer", onclick: (e) => { if (e.target === layer) closeTileMenu(); } }, panel);
     layer._esc = (e) => { if (e.key === "Escape") closeTileMenu(); };
@@ -1112,6 +1183,35 @@
             }, v.n === fam.latestVer ? `v${v.n} · newest` : `v${v.n}`))))
       : null;
     const latestPath = (fam.versions.find((v) => v.n === fam.latestVer) || {}).path;
+    // Hide (and admin Delete) work on the whole ad: every size and version.
+    const myAd = ads.find((a) => a.path === path || (a._paths || []).includes(path));
+    const adPaths = myAd && myAd._paths ? myAd._paths : [path];
+    const isHidden = !!(myAd ? myAd.hidden : it.hidden);
+    async function setHidden(hide) {
+      try {
+        await api("POST", `/api/c/${enc(slug)}/hide`, { path, also: adPaths.filter((p) => p !== path), hidden: hide });
+        state.listCache.clear();
+        toast(hide ? "Hidden. Find it under Hidden in the folder to bring it back." : "Back in the list.");
+        if (hide) location.hash = (state.backTo && state.backTo.slug === slug ? state.backTo.hash : `#/c/${enc(slug)}/f/${enc(dir)}`);
+        else viewItem(slug, path);
+      } catch (err) { toast(err.message); }
+    }
+    async function deleteAd() {
+      if (!confirm(`Delete this ad (${adPaths.length} file${adPaths.length === 1 ? "" : "s"})?\n\nThe files move to "_Deleted files" on the Synology, and comments and approvals are removed from the portal.`)) return;
+      try {
+        for (const p of adPaths) await api("POST", `/api/c/${enc(slug)}/delete`, { path: p });
+        state.listCache.clear();
+        toast("Deleted. The file is in _Deleted files on the Synology.");
+        location.hash = (state.backTo && state.backTo.slug === slug ? state.backTo.hash : `#/c/${enc(slug)}/f/${enc(dir)}`);
+      } catch (err) { toast(err.message); }
+    }
+    const hiddenNotice = isHidden
+      ? h("div", { class: "card hidden-note" },
+          h("div", {}, h("strong", {}, "This ad is hidden. "), "It does not show in the lists."),
+          h("div", { class: "actions" },
+            h("button", { class: "btn small", type: "button", onclick: () => setHidden(false) }, "Unhide"),
+            state.me.admin ? h("button", { class: "btn small danger", type: "button", onclick: deleteAd }, "Delete") : null))
+      : null;
     const oldNotice = fam.versions.length > 1 && fam.ver < fam.latestVer
       ? h("div", { class: "card old-notice" },
           h("div", {}, h("strong", {}, `You are looking at an older version (v${fam.ver}).`), " Comments on it are kept here for reference."),
@@ -1322,6 +1422,7 @@
         statusBtns,
         statusNote,
         sizesNote,
+        isHidden ? null : h("button", { class: "linkish hide-link", type: "button", title: "Take it out of the lists. You can bring it back.", onclick: () => setHidden(true) }, "⊘ Hide this ad (I don't want it)"),
         tagBox,
         campBox,
         h("div", { class: "mono muted" }, `COMMENTS (${d.comments.length})`, also.length ? ` · ON THE ${thisSize} SIZE` : ""),
@@ -1373,6 +1474,7 @@
         h("a", { class: "btn back-btn", href: back.hash }, h("span", { "aria-hidden": "true" }, "←"), `Back to ${back.label}`),
         crumbs(list.client, dir, it.name),
       ),
+      hiddenNotice,
       oldNotice,
       h("div", { class: "viewer" }, h("div", {}, stage, verSeg, navBar), side),
     );
@@ -1735,7 +1837,7 @@
     }
     loadBackups();
 
-    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to" };
+    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "hid", unhidden: "unhid", deleted: "deleted" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
           h("div", { class: "feed-item" },

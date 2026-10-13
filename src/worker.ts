@@ -326,10 +326,11 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
 // ---------------------------------------------------------------------------
 
 const BACKUP_DIR = "_Portal backups";
+const DELETED_DIR = "_Deleted files";
 const BACKUP_CRON = "17 10 * * *"; // 3:17 AM Phoenix
 const BACKUP_TABLES = [
   "clients", "members", "item_status", "likes", "comments", "activity",
-  "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views",
+  "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views", "hidden",
 ];
 const BACKUP_NAME_RE = /^portal-backup-\d{4}-\d{2}-\d{2}-\d{4}(-[a-z-]{1,20})?\.json$/;
 const SYSTEM_USER: User = { email: "backup@portal", admin: true };
@@ -468,7 +469,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
 
   // Pull all social data for this folder in one go.
   const like = prefix.replace(/[%_\\]/g, (m) => "\\" + m) + "%";
-  const [statusRows, likeRows, commentRows, tagRows] = await env.DB.batch([
+  const [statusRows, likeRows, commentRows, tagRows, hiddenRows] = await env.DB.batch([
     env.DB.prepare("SELECT path, status FROM item_status WHERE client_slug = ? AND path LIKE ? ESCAPE '\\'").bind(c.slug, like),
     env.DB.prepare(
       "SELECT path, COUNT(*) AS n, SUM(CASE WHEN email = ? THEN 1 ELSE 0 END) AS mine FROM likes WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' GROUP BY path",
@@ -477,7 +478,9 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
       "SELECT path, COUNT(*) AS n, SUM(CASE WHEN resolved = 0 THEN 1 ELSE 0 END) AS open FROM comments WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' GROUP BY path",
     ).bind(c.slug, like),
     env.DB.prepare("SELECT path, tag FROM item_tags WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' ORDER BY tag").bind(c.slug, like),
+    env.DB.prepare("SELECT path FROM hidden WHERE client_slug = ? AND path LIKE ? ESCAPE '\\'").bind(c.slug, like),
   ]);
+  const hidden = new Set((hiddenRows.results as { path: string }[]).map((r) => r.path));
   // Unviewed files under this folder (any depth), for "NEW" badges and folder counts.
   const [unseenRows, knownRows] = await env.DB.batch([
     env.DB.prepare(
@@ -503,8 +506,8 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
   const isVid = (p: string) => /\.(mp4|mov|m4v|webm)$/i.test(p);
   for (const f of folders as { path: string; newCount?: number; fileCount?: number; previews?: { path: string; kind: string }[] }[]) {
     const pre = f.path + "/";
-    f.newCount = [...unseen].filter((p) => p.startsWith(pre)).length;
-    const inside = known.filter((p) => p.startsWith(pre) && !/(^|\/)[.@#]/.test(p.slice(pre.length))).sort();
+    f.newCount = [...unseen].filter((p) => p.startsWith(pre) && !hidden.has(p)).length;
+    const inside = known.filter((p) => p.startsWith(pre) && !hidden.has(p) && !/(^|\/)[.@#]/.test(p.slice(pre.length))).sort();
     f.fileCount = inside.length;
     f.previews = [...inside.filter(isImg), ...inside.filter(isVid)]
       .slice(0, 3)
@@ -531,6 +534,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
         openComments: comments.get(p)?.open ?? 0,
         tags: tags.get(p) ?? [],
         seen: !unseen.has(p),
+        hidden: hidden.has(p),
       };
     })
     .sort((a, b) => (b.mtime ? Date.parse(b.mtime) : 0) - (a.mtime ? Date.parse(a.mtime) : 0));
@@ -559,10 +563,12 @@ async function itemsChunk(env: Env, user: User, c: Client, paths: string[]) {
     ).bind(c.slug, ...paths),
     env.DB.prepare(`SELECT path, tag FROM item_tags WHERE client_slug = ? AND path IN (${marks}) ORDER BY tag`).bind(c.slug, ...paths),
   ]);
-  const viewRows = await env.DB.prepare(`SELECT path FROM views WHERE client_slug = ? AND email = ? AND path IN (${marks})`)
-    .bind(c.slug, user.email, ...paths)
-    .all<{ path: string }>();
-  const viewed = new Set(viewRows.results.map((r) => r.path));
+  const [viewRows, hiddenRows] = await env.DB.batch([
+    env.DB.prepare(`SELECT path FROM views WHERE client_slug = ? AND email = ? AND path IN (${marks})`).bind(c.slug, user.email, ...paths),
+    env.DB.prepare(`SELECT path FROM hidden WHERE client_slug = ? AND path IN (${marks})`).bind(c.slug, ...paths),
+  ]);
+  const viewed = new Set((viewRows.results as { path: string }[]).map((r) => r.path));
+  const hidden = new Set((hiddenRows.results as { path: string }[]).map((r) => r.path));
   const tags = groupTags(tagRows.results as { path: string; tag: string }[]);
   const status = new Map((statusRows.results as { path: string; status: string }[]).map((r) => [r.path, r.status]));
   const likes = new Map((likeRows.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
@@ -583,6 +589,7 @@ async function itemsChunk(env: Env, user: User, c: Client, paths: string[]) {
       openComments: comments.get(p)?.open ?? 0,
       tags: tags.get(p) ?? [],
       seen: viewed.has(p),
+      hidden: hidden.has(p),
     };
   });
 }
@@ -820,7 +827,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import|view)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import|view|hide|delete)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
@@ -1028,6 +1035,51 @@ async function route(req: Request, env: Env): Promise<Response> {
       if (!existing) await logActivity(env, c.slug, p, user.email, "like", null);
       return json(await itemDetail(env, user, c, p));
     }
+    if (action === "hide" && method === "POST") {
+      // Anyone on the client (and Genvyd) can hide or unhide an ad. Covers every size and
+      // version sent in `also`. Nothing on the Synology changes.
+      const body = await readBody(req);
+      const p = cleanPath(String(body.path ?? "")).join("/");
+      const paths = [p, ...alsoPaths(body, p)];
+      const hide = body.hidden !== false;
+      await env.DB.batch(paths.map((q) =>
+        hide
+          ? env.DB.prepare("INSERT OR IGNORE INTO hidden (client_slug, path, hidden_by, hidden_at) VALUES (?, ?, ?, ?)").bind(c.slug, q, user.email, now())
+          : env.DB.prepare("DELETE FROM hidden WHERE client_slug = ? AND path = ?").bind(c.slug, q)));
+      await logActivity(env, c.slug, p, user.email, hide ? "hidden" : "unhidden", null);
+      return json({ ok: true, hidden: hide, count: paths.length });
+    }
+    if (action === "delete" && method === "POST") {
+      // Genvyd only, and only for ads that are already hidden. The file is moved into
+      // "_Deleted files/<client>/<folders>" on the Synology (nothing is erased; empty that
+      // folder in Finder), and the portal forgets it.
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can delete files.");
+      const body = await readBody(req);
+      const segs = cleanPath(String(body.path ?? ""));
+      const p = segs.join("/");
+      const isHidden = await env.DB.prepare("SELECT 1 FROM hidden WHERE client_slug = ? AND path = ?").bind(c.slug, p).first();
+      if (!isHidden) throw new HttpError(409, "Hide this ad first. Only hidden ads can be deleted.");
+      const dest = [DELETED_DIR, c.folder, ...segs.slice(0, -1)];
+      for (let i = 1; i <= dest.length; i++) {
+        const r = await nasWrite(env, user, "MKCOL", dest.slice(0, i));
+        if (![201, 405].includes(r.status)) throw new HttpError(502, `The Synology answered ${r.status} when making the deleted-files folder.`);
+      }
+      const name = await freeName(env, dest, segs[segs.length - 1]);
+      const res = await nasWrite(env, user, "MOVE", [c.folder, ...segs], { destination: [...dest, name] });
+      if (res.status === 404) {
+        // Already gone from the Synology (moved in Finder): just forget it.
+      } else if (res.status !== 201 && res.status !== 204) {
+        throw new HttpError(502, `The Synology answered ${res.status} to the delete.`);
+      }
+      await env.DB.batch(
+        ["item_status", "likes", "comments", "item_tags", "files", "views", "hidden"].map((t) =>
+          env.DB.prepare(`DELETE FROM ${t} WHERE client_slug = ? AND path = ?`).bind(c.slug, p)).concat([
+          env.DB.prepare("DELETE FROM campaign_items WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)").bind(p, c.slug),
+        ]),
+      );
+      await logActivity(env, c.slug, p, user.email, "deleted", [DELETED_DIR, c.folder, ...segs.slice(0, -1), name].join("/"));
+      return json({ ok: true, movedTo: [...dest, name].join("/") });
+    }
     if (action === "status" && method === "POST") {
       const body = await readBody(req);
       const p = cleanPath(String(body.path ?? "")).join("/");
@@ -1125,8 +1177,8 @@ async function route(req: Request, env: Env): Promise<Response> {
       const adminMarks = admins.map(() => "?").join(",") || "''";
 
       const [changes, approved, openComments, picks] = await env.DB.batch([
-        env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status WHERE status = 'changes' ORDER BY updated_at DESC LIMIT 200"),
-        env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status WHERE status = 'approved' ORDER BY updated_at DESC LIMIT 300"),
+        env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status s WHERE status = 'changes' AND NOT EXISTS (SELECT 1 FROM hidden h WHERE h.client_slug = s.client_slug AND h.path = s.path) ORDER BY updated_at DESC LIMIT 200"),
+        env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status s WHERE status = 'approved' AND NOT EXISTS (SELECT 1 FROM hidden h WHERE h.client_slug = s.client_slug AND h.path = s.path) ORDER BY updated_at DESC LIMIT 300"),
         env.DB.prepare(
           `SELECT id, client_slug, path, email, body, timecode, created_at FROM comments WHERE resolved = 0 AND email NOT IN (${adminMarks}) ORDER BY created_at DESC LIMIT 100`,
         ).bind(...admins),
@@ -1216,7 +1268,7 @@ async function route(req: Request, env: Env): Promise<Response> {
         if (!res.ok) return json({ folders: [], error: `Synology answered ${res.status}.` });
         const entries = (await res.json()) as NasEntry[];
         return json({
-          folders: entries.filter((e) => e.type === "directory" && !/^[.@#]/.test(e.name) && e.name !== BACKUP_DIR).map((e) => e.name),
+          folders: entries.filter((e) => e.type === "directory" && !/^[.@#]/.test(e.name) && e.name !== BACKUP_DIR && e.name !== DELETED_DIR).map((e) => e.name),
         });
       } catch {
         return json({ folders: [], error: "Could not reach the Synology." });
@@ -1364,7 +1416,7 @@ async function sendWelcome(env: Env, slug: string, email: string): Promise<{ sen
 // ---------------------------------------------------------------------------
 
 type ActivityRow = { id: number; client_slug: string; path: string; email: string; kind: string; detail: string | null; created_at: number };
-const DIGEST_KINDS = ["approved", "changes", "comment", "campaign_add", "like"];
+const DIGEST_KINDS = ["approved", "changes", "comment", "campaign_add", "like", "hidden"];
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
@@ -1418,6 +1470,7 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
     count("comment") && `${count("comment")} comment${count("comment") === 1 ? "" : "s"}`,
     count("campaign_add") && `${count("campaign_add")} campaign pick${count("campaign_add") === 1 ? "" : "s"}`,
     count("like") && `${count("like")} favorite${count("like") === 1 ? "" : "s"}`,
+    count("hidden") && `${count("hidden")} hidden`,
   ].filter(Boolean);
   const clientList = [...new Set(rows.map((r) => names.get(r.client_slug) || r.client_slug))];
   const subject = `${clientList.join(", ")}: ${bits.join(", ")}`;
@@ -1428,8 +1481,9 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
     approved: "Approved",
     campaign_add: "Added to campaigns",
     like: "Favorited",
+    hidden: "Hidden (they don't want these)",
   };
-  const order = ["changes", "comment", "approved", "campaign_add", "like"];
+  const order = ["changes", "comment", "approved", "campaign_add", "like", "hidden"];
   let html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:620px">`;
   let text = "";
   for (const slug of [...new Set(rows.map((r) => r.client_slug))]) {

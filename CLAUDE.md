@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at. All additive.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden. All additive.
 
 ## Roles
 
@@ -103,6 +103,16 @@ start fresh). Files that clash (same size and version) are left apart. Approve, 
 campaign picks send `also` (the other sizes) so the server applies them to every size,
 logging activity once. Comments and tags stay per file. Previous/Next skip sibling sizes.
 
+## Hide and delete
+
+Anyone on a client can Hide an ad ("..." menu or the ad page): a row in `hidden` (migration
+0007), shared by the whole client, covering every size and version (`also`). Hidden ads drop
+out of every list, folder previews and the dashboard; "Hidden (N)" in the toolbar shows them
+with Unhide. Hides go in the email digest. Admin only: Delete a hidden ad (`POST
+/api/c/:slug/delete`, refuses anything not hidden) MOVEs the file to
+`_Deleted files/<client folder>/<subfolders>/` on the Synology (Worker-built destination,
+`freeName`, never erased) and removes its D1 rows. Anthony empties that folder in Finder.
+
 ## Backups
 
 Portal data: `writeBackup()` exports every D1 table to JSON on the Synology in
@@ -120,7 +130,7 @@ protected by Snapshot Replication and Hyper Backup per `synology/BACKUP_SETUP.md
 - The portal's only writes to the Synology are creating folders (MKCOL), adding new
   files up to 100 MB (PUT, never overwriting; `freeName` picks "x (2).ext") and renaming
   files in place (MOVE, same folder, Destination built by the Worker, `Overwrite: F`,
-  original extension kept). Admin only. A rename moves every D1 row keyed by the old
+  original extension kept), plus admin Delete, which MOVEs a hidden file into `_Deleted files/`. Admin only. A rename moves every D1 row keyed by the old
   path (status, likes, comments, tags, activity, campaign picks) to the new path.
   nginx allows GET, HEAD, PUT, MKCOL and MOVE; DELETE is disabled there.
   Every Synology write goes through `nasWrite()` in worker.ts, which refuses non-admin

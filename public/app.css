@@ -384,3 +384,12 @@ label.check input { width: auto; }
 .backup-list { margin-top: 16px; border-top: 1px solid var(--line); }
 .backup-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .backup-name { color: var(--bone); font-family: var(--mono); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Hidden ads and delete */
+.hidden-note { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; padding: 14px 18px; margin: 0 0 16px; color: var(--ash); }
+.hidden-note strong { color: var(--bone); }
+.btn.danger { border-color: rgba(255, 42, 42, 0.6); color: var(--accent); }
+.btn.danger:hover { background: var(--accent); color: #fff; }
+.menu-item.danger-item { color: var(--accent); }
+.hide-link { align-self: flex-start; color: var(--smoke); font-size: 13px; }
+.hide-link:hover { color: var(--accent); }
