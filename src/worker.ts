@@ -421,6 +421,122 @@ async function restoreBackup(env: Env, name: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Claude feed: a plain report of what clients said, written to the Synology so
+// Claude (in a chat linked to Anthony's Mac, where the share is mounted) can read
+// it and open the actual files. Rewritten every 30 minutes when something changed,
+// or from Admin. The only files the portal overwrites, and only in this folder.
+// ---------------------------------------------------------------------------
+
+const FEED_DIR = "_Claude feed";
+const FEED_CRON = "7,37 * * * *";
+const MAC_SHARE = "/Volumes/GenvydClients";
+
+function azTime(ms: number) {
+  const d = new Date(ms - 7 * 3600 * 1000);
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  let hr = d.getUTCHours();
+  const ap = hr >= 12 ? "PM" : "AM";
+  hr = hr % 12 || 12;
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${hr}:${String(d.getUTCMinutes()).padStart(2, "0")} ${ap}`;
+}
+const tc = (t: number | null) => (t == null ? "" : `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")} `);
+
+async function buildFeed(env: Env) {
+  const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+  const isAdmin = (e: string) => admins.includes(e.toLowerCase());
+  const weekAgo = now() - 7 * 86400 * 1000;
+  const [clientsR, statusR, commentsR, campsR, hiddenR, actR] = await env.DB.batch([
+    env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
+    env.DB.prepare("SELECT client_slug, path, status, updated_by, updated_at FROM item_status WHERE status IN ('approved','changes') ORDER BY updated_at DESC"),
+    env.DB.prepare("SELECT id, client_slug, path, email, body, timecode, resolved, created_at FROM comments ORDER BY created_at"),
+    env.DB.prepare("SELECT c.id, c.client_slug, c.name, c.notes, i.path FROM campaigns c LEFT JOIN campaign_items i ON i.campaign_id = c.id ORDER BY c.created_at DESC, i.added_at"),
+    env.DB.prepare("SELECT client_slug, path, hidden_by, hidden_at FROM hidden ORDER BY hidden_at DESC"),
+    env.DB.prepare("SELECT client_slug, path, email, kind, detail, created_at FROM activity WHERE created_at > ? ORDER BY created_at DESC LIMIT 300").bind(weekAgo),
+  ]);
+  type Row = Record<string, any>;
+  const clients = clientsR.results as Row[];
+  const status = statusR.results as Row[];
+  const comments = commentsR.results as Row[];
+  const camps = campsR.results as Row[];
+  const hidden = hiddenR.results as Row[];
+  const acts = (actR.results as Row[]).filter((a) => !isAdmin(a.email));
+  const hiddenSet = new Set(hidden.map((r) => `${r.client_slug}|${r.path}`));
+  const portal = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
+
+  const out: Record<string, unknown> = { generated_at: now(), generated_at_phoenix: azTime(now()), mac_share: MAC_SHARE, clients: [] };
+  let md = `# Client feedback from clients.genvyd.com\n\nUpdated ${azTime(now())} (Phoenix). Written by the portal every 30 minutes when something changes.\n` +
+    `Files are on the Synology share, mounted on Anthony's Mac at ${MAC_SHARE}. Comments marked OPEN have not been answered or marked done.\n` +
+    `Timecodes (m:ss) are where the client paused the video when commenting.\n`;
+
+  for (const c of clients) {
+    const key = (p: string) => `${c.slug}|${p}`;
+    const fileInfo = (p: string) => ({ path: p, mac_path: `${MAC_SHARE}/${c.folder}/${p}`, link: `${portal}/#/c/${encodeURIComponent(c.slug)}/i/${encodeURIComponent(p)}` });
+    const commentsOn = (p: string) => comments.filter((m) => m.client_slug === c.slug && m.path === p).map((m) => ({
+      by: m.email, from: isAdmin(m.email) ? "Genvyd" : "client", at: azTime(m.created_at), timecode: m.timecode, text: m.body, open: !m.resolved && !isAdmin(m.email),
+    }));
+    const mine = status.filter((r) => r.client_slug === c.slug && !hiddenSet.has(key(r.path)));
+    const changes = mine.filter((r) => r.status === "changes").map((r) => ({ ...fileInfo(r.path), requested_by: r.updated_by, at: azTime(r.updated_at), comments: commentsOn(r.path) }));
+    const changePaths = new Set(changes.map((x) => x.path));
+    const campsByPath = new Map<string, string[]>();
+    const campaigns: { name: string; notes: string | null; files: string[] }[] = [];
+    for (const r of camps.filter((r) => r.client_slug === c.slug)) {
+      let cp = campaigns.find((x) => x.name === r.name);
+      if (!cp) { cp = { name: r.name, notes: r.notes, files: [] }; campaigns.push(cp); }
+      if (r.path && !hiddenSet.has(key(r.path))) {
+        cp.files.push(r.path);
+        campsByPath.set(r.path, [...(campsByPath.get(r.path) ?? []), r.name]);
+      }
+    }
+    const approved = mine.filter((r) => r.status === "approved").map((r) => ({ ...fileInfo(r.path), approved_by: r.updated_by, at: azTime(r.updated_at), campaigns: campsByPath.get(r.path) ?? [], comments: commentsOn(r.path) }));
+    const openElsewhere = [...new Set(comments.filter((m) => m.client_slug === c.slug && !m.resolved && !isAdmin(m.email) && !changePaths.has(m.path) && !hiddenSet.has(key(m.path))).map((m) => m.path))]
+      .map((p) => ({ ...fileInfo(p), comments: commentsOn(p) }));
+    const hid = hidden.filter((r) => r.client_slug === c.slug).map((r) => ({ ...fileInfo(r.path), hidden_by: r.hidden_by, at: azTime(r.hidden_at) }));
+    const recent = acts.filter((a) => a.client_slug === c.slug).slice(0, 60).map((a) => ({ at: azTime(a.created_at), by: a.email, did: a.kind, path: a.path, detail: a.detail }));
+    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, changes_requested: changes, open_comments: openElsewhere, approved, campaigns, hidden: hid, recent_activity: recent });
+
+    const cm = (list: ReturnType<typeof commentsOn>) =>
+      list.map((m) => `    - ${m.open ? "OPEN " : ""}${m.from === "Genvyd" ? "Genvyd" : m.by} (${m.at}): ${tc(m.timecode)}${m.text.replace(/\s+/g, " ")}`).join("\n");
+    const file = (f: { path: string; mac_path: string; link: string }) => `**${f.path}**\n  - Mac: \`${f.mac_path}\`\n  - Portal: ${f.link}`;
+    md += `\n---\n\n## ${c.name}\n\nSynology folder: \`${c.folder}\` (Mac: \`${MAC_SHARE}/${c.folder}\`)\n`;
+    md += `\n### Changes requested (${changes.length})\n`;
+    md += changes.length ? changes.map((f) => `\n- ${file(f)}\n  - Requested by ${f.requested_by}, ${f.at}${f.comments.length ? "\n  - Comments:\n" + cm(f.comments) : "\n  - No comment left. Ask what to change."}`).join("\n") + "\n" : "\nNone.\n";
+    md += `\n### Unanswered comments on other ads (${openElsewhere.length})\n`;
+    md += openElsewhere.length ? openElsewhere.map((f) => `\n- ${file(f)}\n  - Comments:\n${cm(f.comments)}`).join("\n") + "\n" : "\nNone.\n";
+    md += `\n### Approved (${approved.length})\n`;
+    md += approved.length ? approved.map((f) => `\n- ${file(f)}\n  - Approved by ${f.approved_by}, ${f.at}${f.campaigns.length ? `\n  - In campaigns: ${f.campaigns.join(", ")}` : ""}${f.comments.length ? "\n  - Comments:\n" + cm(f.comments) : ""}`).join("\n") + "\n" : "\nNone yet.\n";
+    md += `\n### Campaigns (${campaigns.length})\n`;
+    md += campaigns.length ? campaigns.map((cp) => `\n- **${cp.name}**${cp.notes ? ` (${cp.notes.replace(/\s+/g, " ")})` : ""}: ${cp.files.length ? cp.files.join(", ") : "empty"}`).join("\n") + "\n" : "\nNone.\n";
+    md += `\n### Hidden by the client, they don't want these (${hid.length})\n`;
+    md += hid.length ? hid.map((f) => `\n- ${f.path} (hidden by ${f.hidden_by}, ${f.at})`).join("") + "\n" : "\nNone.\n";
+    md += `\n### Client activity, last 7 days\n`;
+    md += recent.length ? recent.map((a) => `\n- ${a.at}: ${a.by} ${a.did} ${a.path}${a.detail && a.did !== "comment" ? ` (${a.detail})` : ""}`).join("") + "\n" : "\nNothing.\n";
+  }
+  return { md, json: out };
+}
+
+/** Writes the feed if anything changed since the last one (or always, when forced). */
+async function writeFeed(env: Env, force = false) {
+  const sig = await env.DB.prepare(
+    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) AS s",
+  ).first<{ s: string }>();
+  const last = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'feed_sig'").first<{ value: string }>();
+  if (!force && last && sig && last.value === sig.s) return { written: false };
+  const { md, json: data } = await buildFeed(env);
+  const mk = await nasWrite(env, SYSTEM_USER, "MKCOL", [FEED_DIR]);
+  if (![201, 405].includes(mk.status)) throw new HttpError(502, `The Synology answered ${mk.status} when making the feed folder.`);
+  for (const [name, body, type] of [
+    ["client-feedback.md", md, "text/markdown; charset=utf-8"],
+    ["client-feedback.json", JSON.stringify(data, null, 1), "application/json"],
+  ] as const) {
+    const res = await nasWrite(env, SYSTEM_USER, "PUT", [FEED_DIR, name], { body, contentType: type });
+    if (![200, 201, 204].includes(res.status)) throw new HttpError(502, `The Synology answered ${res.status} to the feed.`);
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('feed_sig', ?)").bind(sig?.s ?? "").run();
+  await env.DB.prepare("INSERT OR REPLACE INTO notify_state (key, value) VALUES ('feed_last', ?)").bind(String(now())).run();
+  return { written: true, at: now(), bytes: md.length };
+}
+
+// ---------------------------------------------------------------------------
 // New / viewed tracking
 // ---------------------------------------------------------------------------
 
@@ -1237,6 +1353,13 @@ async function route(req: Request, env: Env): Promise<Response> {
       return json({ clients: clients.results, members: members.results, activity: activity.results });
     }
 
+    if (path === "/api/admin/feed" && method === "POST") {
+      return json({ ok: true, folder: FEED_DIR, ...(await writeFeed(env, true)) });
+    }
+    if (path === "/api/admin/feed" && method === "GET") {
+      const last = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'feed_last'").first<{ value: string }>();
+      return json({ folder: FEED_DIR, last: last ? Number(last.value) : null });
+    }
     if (path === "/api/admin/backups" && method === "GET") {
       const last = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'backup_last'").first<{ value: string }>();
       let list: Awaited<ReturnType<typeof listBackups>> = [];
@@ -1268,7 +1391,7 @@ async function route(req: Request, env: Env): Promise<Response> {
         if (!res.ok) return json({ folders: [], error: `Synology answered ${res.status}.` });
         const entries = (await res.json()) as NasEntry[];
         return json({
-          folders: entries.filter((e) => e.type === "directory" && !/^[.@#]/.test(e.name) && e.name !== BACKUP_DIR && e.name !== DELETED_DIR).map((e) => e.name),
+          folders: entries.filter((e) => e.type === "directory" && !/^[.@#]/.test(e.name) && ![BACKUP_DIR, DELETED_DIR, FEED_DIR].includes(e.name)).map((e) => e.name),
         });
       } catch {
         return json({ folders: [], error: "Could not reach the Synology." });
@@ -1678,6 +1801,10 @@ async function runClientAlerts(env: Env) {
 
 export default {
   async scheduled(ctrl: ScheduledController, env: Env, ctx: ExecutionContext) {
+    if (ctrl.cron === FEED_CRON) {
+      ctx.waitUntil(writeFeed(env).catch((err) => console.error("feed failed", err)));
+      return;
+    }
     if (ctrl.cron === BACKUP_CRON) {
       ctx.waitUntil(writeBackup(env, "nightly").then((i) => console.log("backup saved", i.name)).catch((err) => console.error("backup failed", err)));
       return;

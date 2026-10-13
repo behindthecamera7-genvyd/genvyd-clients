@@ -50,8 +50,9 @@
   },
 
   // Every 15 minutes: digest and new-work alerts. 10:17 UTC (3:17 AM Phoenix): nightly
-  // backup of the portal's data to the Synology. Keep BACKUP_CRON in worker.ts in step.
-  "triggers": { "crons": ["*/15 * * * *", "17 10 * * *"] }
+  // backup of the portal's data to the Synology. :07 and :37: the Claude feed (only
+  // rewritten when something changed). Keep BACKUP_CRON and FEED_CRON in worker.ts in step.
+  "triggers": { "crons": ["*/15 * * * *", "17 10 * * *", "7,37 * * * *"] }
 
   // Secrets (set in the Cloudflare dashboard, never in this file):
   //   MEDIA_CLIENT_ID      Access service token client ID for the NAS hostname

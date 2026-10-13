@@ -1837,6 +1837,26 @@
     }
     loadBackups();
 
+    // Claude feed: a report on the Synology that Claude can read in a chat linked to the Mac.
+    const feedCard = h("div", { class: "card pad", style: "margin-bottom:20px" }, h("h2", {}, "Claude feed"));
+    async function loadFeed() {
+      let f = { last: null, folder: "_Claude feed" };
+      try { f = await api("GET", "/api/admin/feed"); } catch { /* shown as not yet */ }
+      const btn = h("button", { class: "btn small", type: "button", onclick: async () => {
+        btn.disabled = true; btn.textContent = "Updating…";
+        try { await api("POST", "/api/admin/feed"); toast("Claude feed updated."); loadFeed(); }
+        catch (err) { toast(err.message); btn.disabled = false; btn.textContent = "Update now"; }
+      } }, "Update now");
+      fill(feedCard,
+        h("h2", { style: "margin-bottom:8px" }, "Claude feed"),
+        h("p", { class: "muted", style: "margin:0 0 12px" },
+          `Every 30 minutes, when something changed, the portal writes what clients approved, the changes they asked for (with every comment and timecode), unanswered comments, campaigns and hidden ads to "${f.folder}/client-feedback.md" on your Synology. In a Claude chat linked to your Mac, ask "check the client feedback" and Claude reads it and can open the files.`),
+        h("p", { style: "margin:0 0 12px" }, f.last ? h("span", {}, "Last updated: ", h("strong", { style: "color:var(--bone)" }, fmtDate(f.last))) : h("span", { class: "muted" }, "Not written yet.")),
+        btn,
+      );
+    }
+    loadFeed();
+
     const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "hid", unhidden: "unhid", deleted: "deleted" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
@@ -1860,6 +1880,7 @@
           importCard,
           emailCard,
           backupCard,
+          feedCard,
           h("div", { class: "card" },
             clientBlocks.length ? clientBlocks : h("div", { class: "pad muted" }, "No clients yet."),
           ),

@@ -113,6 +113,16 @@ with Unhide. Hides go in the email digest. Admin only: Delete a hidden ad (`POST
 `_Deleted files/<client folder>/<subfolders>/` on the Synology (Worker-built destination,
 `freeName`, never erased) and removes its D1 rows. Anthony empties that folder in Finder.
 
+## Claude feed
+
+`writeFeed()` writes `_Claude feed/client-feedback.md` (and `.json`) on the Synology: per
+client, changes requested with every comment and timecode, unanswered comments, approved ads
+with campaigns, campaigns, hidden ads, last 7 days of client activity, each file with its Mac
+path (`/Volumes/GenvydClients/<folder>/<path>`) and portal link. Cron `7,37 * * * *`, only
+when a signature (activity id, comment counts, hidden, campaign picks) changed; Admin >
+Claude feed > Update now forces it. These two files are the only ones the portal overwrites.
+A Claude chat linked to the Mac reads them ("check the client feedback") and can open files.
+
 ## Backups
 
 Portal data: `writeBackup()` exports every D1 table to JSON on the Synology in
