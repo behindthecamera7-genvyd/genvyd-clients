@@ -32,6 +32,12 @@ Mark done) and approved work (filter by client; sort by Most favorited / In most
 campaigns). Data from `GET /api/admin/dashboard` plus `/api/admin/overview`. Clients
 never see it (403, and their home goes straight to their projects).
 
+Top bar (`setupNav()` / `markNav()`): the logo always goes home (on the dashboard it
+refreshes and scrolls to top, since the hash does not change). Admin also gets Dashboard, a
+Clients menu that jumps into any client, and Admin, with the current one highlighted. The
+dashboard opens with client cards showing what each is waiting on (new, change requests,
+comments, approved) plus quick links to Projects, Campaigns, Ad copy and Favorites.
+
 ## Email digest
 
 Cron every 15 min (`scheduled()` in worker.ts, `runDigest`): emails client activity
