@@ -234,7 +234,10 @@ async function nasWrite(
     // Rename only: the destination is built by the Worker, never taken from the browser,
     // and Overwrite: F makes nginx refuse to replace an existing file.
     if (!init.destination) throw new HttpError(400, "Missing new name.");
-    extra["Destination"] = `${base}/${init.destination.map(encodeURIComponent).join("/")}`;
+    // Sent as a path, not a full URL: nginx refuses a full-URL Destination whose host differs
+    // from the Host it received, and the tunnel can change that host (live renames got a 400).
+    const prefix = new URL(base).pathname.replace(/\/+$/, "");
+    extra["Destination"] = `${prefix}/${init.destination.map(encodeURIComponent).join("/")}`;
     extra["Overwrite"] = "F";
   }
   return fetch(url, { method, headers: originHeaders(env, extra), body: init.body ?? undefined });
