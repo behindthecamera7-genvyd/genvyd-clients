@@ -178,7 +178,9 @@
         h("div", { class: "stat-n" }, String(n)), h("div", { class: "mono muted" }, label));
 
     // Unanswered client comments, newest first, with one-click "Mark done".
-    const commentRows = dash.openComments.map((cm) => {
+    const commentRows = dash.openComments.map((cm) => makeRow(cm));
+    function makeRow(cm) {
+      const replyHolder = h("div");
       const row = h("div", { class: "feed-item" },
         h("div", { class: "mono muted" }, `${cm.clientName} · ${fmtDate(cm.created_at)}`),
         h("div", {},
@@ -186,7 +188,27 @@
           h("a", { href: itemHref(cm.client_slug, cm.path) }, itemLabel(cm.path)),
         ),
         h("div", { class: "detail" }, cm.timecode != null ? h("span", { class: "tc" }, fmtTime(cm.timecode)) : null, cm.body),
+        (cm.replies || []).map((r) => h("div", { class: "detail dash-reply" }, h("span", { class: "mono muted" }, `↳ ${who(r.email)}, ${fmtDate(r.created_at)}: `), r.body)),
+        replyHolder,
         h("div", { class: "comment-tools" },
+          String(cm.path).startsWith("copy:") ? null : h("button", { class: "btn small", type: "button", onclick: () => {
+            if (replyHolder.firstChild) { fill(replyHolder); return; }
+            const tb = h("textarea", { class: "reply-box", placeholder: `Reply to ${cm.email}…`, maxlength: "4000", rows: 2 });
+            const go = async (andResolve) => {
+              if (!tb.value.trim()) return tb.focus();
+              try {
+                await api("POST", `/api/c/${enc(cm.client_slug)}/comments`, { path: cm.path, body: tb.value.trim(), parentId: cm.id, resolve: andResolve });
+                if (andResolve) { row.remove(); toast("Replied and marked done."); return; }
+                cm.replies = [...(cm.replies || []), { email: state.me.email, body: tb.value.trim(), created_at: Date.now() }];
+                const fresh = makeRow(cm); row.replaceWith(fresh); toast("Replied.");
+              } catch (err) { toast(err.message); }
+            };
+            fill(replyHolder, h("div", { class: "reply-composer" }, tb, h("div", { class: "composer-row" }, h("span"),
+              h("div", { class: "actions" },
+                h("button", { class: "btn small", type: "button", onclick: () => go(true) }, "Reply + mark done"),
+                h("button", { class: "btn small primary", type: "button", onclick: () => go(false) }, "Post reply")))));
+            tb.focus();
+          } }, "↩ Reply"),
           h("button", {
             class: "btn small", type: "button",
             onclick: async () => {
@@ -205,7 +227,7 @@
         ),
       );
       return row;
-    });
+    }
 
     // Approved work, filterable by client, with the usual sort and type tabs.
     const clientsWithApproved = [...new Map(dash.approved.map((it) => [it.clientSlug, it.clientName])).entries()];
@@ -1042,6 +1064,205 @@
   }
 
   // The "..." menu on a tile: add to or take out of campaigns (or start a new one),
+  // ---- Rename (admin only) -------------------------------------------------------
+  // Renames the file on the Synology and moves its approvals, comments, favorites, campaign
+  // spots, trash status and history with it (server side, all or nothing). Offers the whole
+  // stack (every version and size) and matching thumbnails, and warns when a name would
+  // break the stacking rules in "_Claude feed/file-naming-rules.md".
+  const SEP = "[\\s_\\-.]+";
+  const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Splits a file name into the ad name (base), its size, placement words and version.
+  function nameParts(name) {
+    let rest = stemOf(name);
+    let size = null, sizeLit = null;
+    const m = rest.match(SIZE_RE);
+    if (m) { size = `${Number(m[1])}:${Number(m[2])}`; sizeLit = m[0].replace(/^[\s_\-.(\[]+/, ""); rest = rest.replace(m[0], " "); }
+    let ver = 1, verLit = null;
+    const v = rest.match(VER_RE);
+    if (v) { ver = Number(v[1]) || 1; verLit = v[0].replace(/^[\s_\-.(\[]+/, ""); rest = rest.replace(v[0], " "); }
+    else { const d = rest.match(DUP_RE); if (d) { ver = Number(d[1]) || 1; verLit = d[0].trim(); rest = rest.replace(DUP_RE, ""); } }
+    const placements = rest.match(PLACEMENT_RE) || [];
+    const base = rest.replace(PLACEMENT_RE, " ").replace(/\s{2,}/g, " ").replace(/^[\s_\-.]+|[\s_\-.]+$/g, "").trim();
+    return { base, size, sizeLit, ver, verLit, placements, ext: extOf(name) };
+  }
+  // The same file renamed to a new ad name, keeping its size, placement words and version.
+  const stackName = (name, newBase) => {
+    const p = nameParts(name);
+    return [newBase.trim(), p.sizeLit, ...p.placements, p.ver > 1 ? `v${p.ver}` : null].filter(Boolean).join(" ") + p.ext;
+  };
+  // Thumbnails that belong to a video: "<video name> thumbnail ...". Returns [{ item, rest }].
+  function thumbsOf(items, video) {
+    const base = nameParts(video.name).base;
+    const toks = base.split(/[\s_\-.]+/).filter(Boolean);
+    if (!toks.length) return [];
+    const re = new RegExp("^" + toks.map(escRe).join(SEP) + "(?=" + SEP + "thumb)", "i");
+    return items.filter((i) => i.kind === "image" && parentOf(i.path) === parentOf(video.path) && re.test(i.name))
+      .map((i) => ({ item: i, rest: i.name.slice(i.name.match(re)[0].length) }));
+  }
+  function renameWarnings(items, plan) {
+    const warn = [];
+    const renamed = new Map(plan.map((r) => [r.path, r.name]));
+    const after = items.map((i) => (renamed.has(i.path) ? { ...i, name: renamed.get(i.path), path: parentOf(i.path) ? parentOf(i.path) + "/" + renamed.get(i.path) : renamed.get(i.path), _was: i.path } : i));
+    const keyBefore = new Map(items.map((i) => [i.path, adInfo(i).key]));
+    const keyAfter = new Map(after.map((i) => [i._was || i.path, adInfo(i).key]));
+    const nameOf = new Map(items.map((i) => [i.path, i.name]));
+    for (const r of plan) {
+      const oldName = nameOf.get(r.path) || baseName(r.path);
+      const o = nameParts(oldName), n = nameParts(r.name);
+      // Stops stacking with versions or sizes that are not renamed with it.
+      const fam = items.filter((i) => i.path !== r.path && keyBefore.get(i.path) === keyBefore.get(r.path));
+      const lost = fam.filter((i) => keyAfter.get(i.path) !== keyAfter.get(r.path));
+      if (lost.length) warn.push(`"${r.name}" will stop stacking with ${lost.length} other version${lost.length === 1 ? "" : "s"} or size${lost.length === 1 ? "" : "s"} (${lost.slice(0, 3).map((i) => i.name).join(", ")}${lost.length > 3 ? "…" : ""}). Rename all versions and sizes together instead.`);
+      const joins = after.filter((i) => !renamed.has(i._was || i.path) && !fam.some((f) => f.path === i.path) && adInfo(i).key === keyAfter.get(r.path));
+      if (joins.length) warn.push(`"${r.name}" will stack with ${joins.map((i) => `"${i.name}"`).join(", ")}, which is already in this folder.`);
+      if (o.size && !n.size) warn.push(`"${r.name}" drops the size (${o.sizeLit}) from the name, so it won't line up with the other sizes. Keep it as two numbers with an x, like 9x16.`);
+      if (o.size && n.size && o.size !== n.size) warn.push(`"${r.name}" changes the size from ${o.sizeLit} to ${n.sizeLit}.`);
+      if (o.ver > 1 && n.ver !== o.ver) warn.push(`"${r.name}" ${n.ver > 1 ? `changes the version from v${o.ver} to v${n.ver}` : `drops the version mark (${o.verLit}), so it would count as v1`}.`);
+      if (/\b(final|fixed|edit|edited|revised)\b/i.test(n.base) && !/\b(final|fixed|edit|edited|revised)\b/i.test(o.base)) warn.push(`"${r.name}" adds a word like "final", "fixed", "edit" or "revised". Later versions must repeat it exactly or they won't stack. Leave it out if you can.`);
+      if (!n.size && /\b\d{3,4}p\b/i.test(n.base)) warn.push(`"${r.name}": "1080p" is not a size. Use 9x16, 4x5, 1x1 or 16x9 if it has one.`);
+    }
+    // Two files that would claim the same size and version don't stack.
+    const groups = new Map();
+    for (const i of after) { const k = adInfo(i).key; groups.set(k, [...(groups.get(k) || []), i]); }
+    for (const g of groups.values()) {
+      if (!g.some((i) => renamed.has(i._was || i.path)) || g.length < 2) continue;
+      const seen = new Map();
+      for (const i of g) { const a = adInfo(i); const k = `${a.ver}|${a.size}`; if (seen.has(k)) warn.push(`"${seen.get(k)}" and "${i.name}" would both be the same size and version, so neither will stack.`); else seen.set(k, i.name); }
+    }
+    return [...new Set(warn)];
+  }
+
+  async function openRename(slug, it, opts = {}) {
+    closeTileMenu();
+    const dir = parentOf(it.path);
+    let list = state.listCache.get(`${slug}|${dir}`);
+    try { if (!list) { list = await api("GET", `/api/c/${enc(slug)}/list?dir=${enc(dir)}`); state.listCache.set(`${slug}|${dir}`, list); } }
+    catch (err) { toast(err.message); return; }
+    const items = list.items;
+    const me = items.find((i) => i.path === it.path) || it;
+    const myKey = adInfo(me).key;
+    const family = items.filter((i) => adInfo(i).key === myKey).sort((a, b) => a.name.localeCompare(b.name));
+    const st = { whole: family.length > 1, thumbs: true };
+    const ext = extOf(me.name);
+
+    const input = h("input", { class: "menu-input rename-input", maxlength: "120", spellcheck: "false", autocomplete: "off" });
+    const extChip = h("span", { class: "mono rename-ext", title: "The file type stays the same" }, ext || "");
+    const label = h("div", { class: "menu-label mono muted" });
+    const modeBox = h("div");
+    const preview = h("div", { class: "rename-preview" });
+    const warnBox = h("div");
+    const errBox = h("div");
+    const save = h("button", { class: "btn small primary", type: "button" }, "Rename");
+    const close = () => { layer.remove(); document.removeEventListener("keydown", esc); };
+    const esc = (e) => { if (e.key === "Escape") close(); };
+
+    const setMode = (whole) => {
+      st.whole = whole;
+      input.value = whole ? nameParts(me.name).base : stemOf(me.name);
+      label.textContent = whole ? "NEW AD NAME (SIZES AND VERSIONS ARE ADDED FOR EACH FILE)" : "NEW NAME";
+      extChip.hidden = whole || !ext;
+      update();
+    };
+    function plan() {
+      const typed = input.value.trim().replace(new RegExp(escRe(ext) + "$", "i"), "").trim();
+      if (!typed) return { list: [], thumbs: [] };
+      const main = st.whole
+        ? family.map((f) => ({ path: f.path, name: stackName(f.name, typed) }))
+        : [{ path: me.path, name: typed + ext }];
+      // Thumbnails of any video being renamed: same words after the old ad name.
+      const newBase = st.whole ? typed : nameParts(typed + ext).base || typed;
+      const thumbs = [];
+      for (const f of (st.whole ? family : [me])) {
+        if (f.kind !== "video") continue;
+        for (const t of thumbsOf(items, f)) {
+          if (main.some((m) => m.path === t.item.path) || thumbs.some((x) => x.path === t.item.path)) continue;
+          thumbs.push({ path: t.item.path, from: t.item.name, name: newBase + t.rest });
+        }
+      }
+      return { list: main.filter((r) => r.name !== baseName(r.path)), thumbs };
+    }
+    function update() {
+      const p = plan();
+      const all = [...p.list, ...(st.thumbs ? p.thumbs.filter((t) => t.name !== t.from) : [])];
+      const moving = new Set(all.map((r) => r.path.toLowerCase()));
+      const taken = all.filter((r) => items.some((i) => i.name.toLowerCase() === r.name.toLowerCase() && !moving.has(i.path.toLowerCase())));
+      const dupes = all.filter((r, i) => all.findIndex((x) => x.name.toLowerCase() === r.name.toLowerCase()) !== i);
+      fill(preview,
+        p.list.length || p.thumbs.length ? h("div", { class: "menu-label mono muted" }, "WILL BECOME") : null,
+        p.list.map((r) => h("div", { class: "rename-row" }, h("span", { class: "muted" }, baseName(r.path)), h("span", { class: "rename-arrow" }, "→"), h("span", {}, r.name))),
+        p.thumbs.length
+          ? h("label", { class: "check rename-thumbs" },
+              h("input", { type: "checkbox", checked: st.thumbs, onchange: (e) => { st.thumbs = e.target.checked; update(); } }),
+              `Also rename ${p.thumbs.length === 1 ? "its thumbnail" : `its ${p.thumbs.length} thumbnails`} to match`)
+          : null,
+        st.thumbs ? p.thumbs.map((t) => h("div", { class: "rename-row" }, h("span", { class: "muted" }, t.from), h("span", { class: "rename-arrow" }, "→"), h("span", {}, t.name))) : null,
+      );
+      const errs = [
+        ...taken.map((r) => `There is already a file called "${r.name}" in this folder.`),
+        ...[...new Set(dupes.map((r) => r.name))].map((n) => `Two files would both be called "${n}".`),
+      ];
+      fill(errBox, errs.length ? h("div", { class: "rename-msg is-error" }, errs.map((e) => h("div", {}, e))) : null);
+      const warns = all.length ? renameWarnings(items, all) : [];
+      fill(warnBox, warns.length
+        ? h("div", { class: "rename-msg is-warn" }, h("strong", {}, "Check the naming rules"), warns.map((w) => h("div", {}, w)))
+        : null);
+      save.disabled = !all.length || errs.length > 0;
+      save.textContent = all.length > 1 ? `Rename ${all.length} files` : "Rename";
+      save._plan = all;
+    }
+    input.addEventListener("input", update);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !save.disabled) { e.preventDefault(); save.click(); } });
+
+    if (family.length > 1) {
+      fill(modeBox, h("div", { class: "seg rename-seg" },
+        h("button", { class: "seg-btn", type: "button", onclick: (e) => { modeBox.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === e.currentTarget)); setMode(true); } }, `All versions and sizes (${family.length})`),
+        h("button", { class: "seg-btn", type: "button", onclick: (e) => { modeBox.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === e.currentTarget)); setMode(false); } }, "Just this file")));
+      modeBox.querySelector(".seg-btn").classList.add("active");
+    }
+
+    save.onclick = async () => {
+      const all = save._plan || [];
+      if (!all.length) return;
+      save.disabled = true;
+      save.textContent = "Renaming…";
+      try {
+        const r = await api("POST", `/api/c/${enc(slug)}/rename`, { renames: all.map((x) => ({ path: x.path, name: x.name })) });
+        state.listCache.clear();
+        close();
+        toast(r.renamed.length === 1 ? `Renamed to ${r.renamed[0].name}.` : `Renamed ${r.renamed.length} files.`);
+        const mine = r.renamed.find((x) => x.from === it.path) || r.renamed[0];
+        if (opts.onDone) opts.onDone(r, mine);
+      } catch (err) {
+        fill(errBox, h("div", { class: "rename-msg is-error" }, err.message));
+        save.disabled = false;
+        save.textContent = "Rename";
+      }
+    };
+
+    const panel = h("div", { class: "tile-menu save-sheet rename-sheet", role: "dialog", "aria-label": "Rename" },
+      h("div", { class: "menu-head" },
+        h("div", { class: "menu-title" }, "Rename"),
+        h("button", { class: "menu-x", type: "button", "aria-label": "Close", onclick: close }, "×"),
+      ),
+      h("div", { class: "menu-label mono muted" }, "CURRENT NAME"),
+      h("div", { class: "rename-current" }, me.name),
+      modeBox,
+      label,
+      h("div", { class: "rename-field" }, input, extChip),
+      errBox,
+      preview,
+      warnBox,
+      h("p", { class: "muted rename-note" }, "Approvals, comments, favorites, campaigns and trash move with the file. The client is not notified."),
+      h("div", { class: "save-actions" }, h("button", { class: "btn small", type: "button", onclick: close }, "Cancel"), save),
+    );
+    const layer = h("div", { class: "menu-layer save-layer", onclick: (e) => { if (e.target === layer) close(); } }, panel);
+    document.addEventListener("keydown", esc);
+    document.body.append(layer);
+    setMode(st.whole);
+    input.focus();
+    input.select();
+  }
+
   // favorite, approve, open, download. Works on every size of the ad at once.
   let openMenu = null;
   function closeTileMenu() {
@@ -1182,6 +1403,9 @@
       noBtn,
       h("a", { class: "menu-item", href: refs.href, onclick: closeTileMenu }, h("span", { class: "mi-icon", html: ICON_EXPAND }), "Open full size and comments"),
       h("button", { class: "menu-item", type: "button", onclick: () => { closeTileMenu(); saveFile(refs.src, it.name); } }, h("span", { class: "mi-icon" }, "↓"), "Save or share"),
+      state.me.admin ? h("button", { class: "menu-item", type: "button", onclick: () => openRename(cs, it, {
+        onDone: () => anchor.dispatchEvent(new CustomEvent("gv-renamed", { bubbles: true })),
+      }) }, h("span", { class: "mi-icon" }, "✎"), "Rename (admin)") : null,
       h("div", { class: "menu-sep" }),
       hideBtn,
       delBtn,
@@ -1226,6 +1450,11 @@
     }
     state.listCache.set(`${slug}|${dir}`, list);
     if (!list.items.some((i) => i.path === path)) {
+      // An old link to a file renamed in the portal: open it under its new name.
+      try {
+        const w = await api("GET", `/api/c/${enc(slug)}/where?path=${enc(path)}`);
+        if (w.path) { location.replace(`#/c/${enc(slug)}/i/${enc(w.path)}`); return; }
+      } catch { /* fall through */ }
       // A link from ad copy can name the ad without its size or extension: open the ad it means.
       const k = copyKey(path);
       const match = groupAds(list.items).find((a) => copyKey(a.path) === k);
@@ -1497,6 +1726,7 @@
     }
     loadCampaigns();
 
+    let replyTo = null;
     function renderSide(d) {
       const statusBtns = h("div", { class: "actions" },
         h("button", {
@@ -1527,29 +1757,56 @@
         ? h("div", { class: "status-note muted" }, `Approve, Favorite and campaign picks cover all ${sizes.length} sizes.`)
         : null;
 
+      // Comments as threads: each comment, then Genvyd's replies under it.
+      const roots = d.comments.filter((c) => !c.parent_id || !d.comments.some((x) => x.id === c.parent_id));
+      const repliesTo = (c) => d.comments.filter((x) => x.parent_id === c.id);
+      const commentEl = (c, isReply) =>
+        h("div", { class: "comment" + (c.resolved ? " resolved" : "") + (isReply ? " reply" : "") },
+          h("div", { class: "comment-head" },
+            h("span", { class: "mono", style: "color:var(--bone)" }, (isReply ? "↳ " : "") + (c.genvyd && !c.mine && !state.me.admin ? "Genvyd" : who(c.email))),
+            h("span", { class: "mono muted" }, fmtDate(c.created_at)),
+          ),
+          h("div", { class: "comment-body" },
+            !isReply && c.timecode != null && video
+              ? h("button", { class: "tc", onclick: () => { video.currentTime = c.timecode; video.play(); } }, fmtTime(c.timecode))
+              : !isReply && c.timecode != null ? h("span", { class: "tc" }, fmtTime(c.timecode)) : null,
+            c.body,
+          ),
+          (c.mine || state.me.admin)
+            ? h("div", { class: "comment-tools" },
+                state.me.admin && !isReply ? h("button", { class: "linkish", onclick: () => { replyTo = replyTo === c.id ? null : c.id; renderSide(d); } }, "↩ Reply") : null,
+                state.me.admin && !isReply ? h("button", { class: "linkish", onclick: () => resolve(c.id) }, c.resolved ? "Reopen" : "✓ Mark done") : null,
+                state.me.admin && !isReply && !c.resolved && !c.mine && !isHidden ? h("button", { class: "linkish no-link", onclick: () => doneAndTrash(c.id) }, "🗑 Mark done + move to trash") : null,
+                h("button", { class: "linkish", onclick: () => removeComment(c.id, !isReply && repliesTo(c).length) }, "Delete"),
+              )
+            : null,
+        );
+      const replyComposer = (c) => {
+        const tb = h("textarea", { class: "reply-box", placeholder: `Reply to ${who(c.email)}…`, maxlength: "4000", rows: 2 });
+        const go = async (andResolve) => {
+          if (!tb.value.trim()) return tb.focus();
+          try {
+            const r = await api("POST", `/api/c/${enc(slug)}/comments`, { path, body: tb.value.trim(), parentId: c.id, resolve: andResolve });
+            replyTo = null;
+            renderSide(r);
+            state.listCache.delete(`${slug}|${dir}`);
+            toast(andResolve ? "Replied and marked done." : "Replied.");
+          } catch (err) { toast(err.message); }
+        };
+        setTimeout(() => tb.focus(), 0);
+        return h("div", { class: "reply-composer" }, tb,
+          h("div", { class: "composer-row" },
+            h("button", { class: "linkish", type: "button", onclick: () => { replyTo = null; renderSide(d); } }, "Cancel"),
+            h("div", { class: "actions" },
+              c.resolved ? null : h("button", { class: "btn small", type: "button", onclick: () => go(true) }, "Reply + mark done"),
+              h("button", { class: "btn small primary", type: "button", onclick: () => go(false) }, "Post reply"))));
+      };
       const list = h("div", { class: "comments" },
-        d.comments.length
-          ? d.comments.map((c) =>
-              h("div", { class: "comment" + (c.resolved ? " resolved" : "") },
-                h("div", { class: "comment-head" },
-                  h("span", { class: "mono", style: "color:var(--bone)" }, who(c.email)),
-                  h("span", { class: "mono muted" }, fmtDate(c.created_at)),
-                ),
-                h("div", { class: "comment-body" },
-                  c.timecode != null && video
-                    ? h("button", { class: "tc", onclick: () => { video.currentTime = c.timecode; video.play(); } }, fmtTime(c.timecode))
-                    : c.timecode != null ? h("span", { class: "tc" }, fmtTime(c.timecode)) : null,
-                  c.body,
-                ),
-                (c.mine || state.me.admin)
-                  ? h("div", { class: "comment-tools" },
-                      state.me.admin ? h("button", { class: "linkish", onclick: () => resolve(c.id) }, c.resolved ? "Reopen" : "✓ Mark done") : null,
-                      state.me.admin && !c.resolved && !c.mine && !isHidden ? h("button", { class: "linkish no-link", onclick: () => doneAndTrash(c.id) }, "🗑 Mark done + move to trash") : null,
-                      h("button", { class: "linkish", onclick: () => removeComment(c.id) }, "Delete"),
-                    )
-                  : null,
-              ),
-            )
+        roots.length
+          ? roots.map((c) => h("div", { class: "thread" },
+              commentEl(c, false),
+              repliesTo(c).map((r) => commentEl(r, true)),
+              state.me.admin && replyTo === c.id ? replyComposer(c) : null))
           : h("p", { class: "muted", style: "margin:0" }, "No comments yet."),
       );
 
@@ -1608,17 +1865,8 @@
       list.scrollTop = list.scrollHeight;
     }
 
-    async function renameFile() {
-      const dot = it.name.lastIndexOf(".");
-      const stem = dot > 0 ? it.name.slice(0, dot) : it.name;
-      const name = prompt(`New name for this file (the ${dot > 0 ? it.name.slice(dot) : ""} ending is kept):`, stem);
-      if (!name || !name.trim() || name.trim() === stem) return;
-      try {
-        const r = await api("POST", `/api/c/${enc(slug)}/rename`, { path, name });
-        state.listCache.delete(`${slug}|${dir}`);
-        toast(`Renamed to ${r.name}.`);
-        location.replace(`#/c/${enc(slug)}/i/${enc(r.path)}`);
-      } catch (err) { toast(err.message); }
+    function renameFile() {
+      openRename(slug, it, { onDone: (r, mine) => location.replace(`#/c/${enc(slug)}/i/${enc(mine.to)}`) });
     }
 
     async function act(p) {
@@ -1639,8 +1887,8 @@
         location.hash = (state.backTo && state.backTo.slug === slug ? state.backTo.hash : `#/c/${enc(slug)}/f/${enc(dir)}`);
       } catch (err) { toast(err.message); }
     };
-    const removeComment = (id) => {
-      if (confirm("Delete this comment?")) act(api("DELETE", `/api/c/${enc(slug)}/comments/${id}`));
+    const removeComment = (id, replies) => {
+      if (confirm(replies ? `Delete this comment and its ${replies} repl${replies === 1 ? "y" : "ies"}?` : "Delete this comment?")) act(api("DELETE", `/api/c/${enc(slug)}/comments/${id}`));
     };
 
     renderSide(detail);
@@ -2563,5 +2811,7 @@
   const ICON_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
 
   window.addEventListener("hashchange", router);
+  // After a rename from a tile's menu, redraw the page with the new names.
+  document.addEventListener("gv-renamed", () => router());
   router();
 })();

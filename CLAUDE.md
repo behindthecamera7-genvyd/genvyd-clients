@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports. All keep existing data.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id. All keep existing data.
 
 ## Roles
 
@@ -108,6 +108,41 @@ an older-version notice. Admin "New version" on the ad page uploads "<name> vN.e
 start fresh). Files that clash (same size and version) are left apart. Approve, Favorite and
 campaign picks send `also` (the other sizes) so the server applies them to every size,
 logging activity once. Comments and tags stay per file. Previous/Next skip sibling sizes.
+
+## Rename (admin)
+
+"Rename (admin)" in the tile "..." menu and Rename on the ad page open `openRename()` in
+app.js: current name, new name with the extension locked, a choice of "All versions and sizes"
+(the whole stack from `adInfo()`; each file keeps its size, placement words and version via
+`stackName()`) or "Just this file", and matching thumbnails ("<video name> thumbnail ...",
+`thumbsOf()`) renamed along with a video. Names already taken in the folder block the save;
+`renameWarnings()` warns per `_Claude feed/file-naming-rules.md` (stops stacking, joins
+another ad, size or version dropped, "final"/"edit" words, "1080p" as a size, size+version clash).
+
+`POST /api/c/:slug/rename` takes `{ renames: [{ path, name }] }` (old `{ path, name }` still
+works). All or nothing: HEAD checks every source and target, MOVEs one by one and MOVEs back
+any already done if one fails, then one D1 batch moves every row in `RENAME_TABLES`
+(item_status, likes, comments and replies, item_tags, activity, files, views, hidden) plus
+campaign_items (added_at kept, so campaign order holds) and typed-in copy; if that batch fails
+the files are moved back. Afterwards it counts rows left under the old names (`leftBehind`,
+should be empty) and rewrites the Claude feed. Each file logs an admin activity row
+"Renamed X to Y" (never emailed; `files.notified` moves with the file, so no new-work alert).
+
+Stable IDs (migration 0011): `file_ids` gives every file a permanent id (filled from `files`
+and `item_status`, kept up to date by `registerFiles()`); a rename moves the id to the new
+path and records `file_renames(old_path -> file_id)`. `GET /api/c/:slug/where?path=` returns
+where an old path lives now, and `viewItem()` redirects old links through it. The other tables
+stay keyed by path (decided with Anthony): an id cannot survive a Finder rename anyway, so
+renames should go through the portal.
+
+## Comment replies
+
+`comments.parent_id` (migration 0011). Admin "↩ Reply" on a comment (ad page and dashboard)
+posts `{ path, body, parentId, resolve? }`; "Reply + mark done" also resolves the comment.
+Replies always attach to the first comment of the thread, have no timecode, and are deleted
+with it. Clients see replies under the comment, labelled "Genvyd" (`genvyd` flag from
+`itemDetail()`), and cannot reply. The dashboard lists open comments with their replies; the
+Claude feed nests them as "Reply from Genvyd" and marks answered comments "OPEN (Genvyd replied)".
 
 ## Hide and delete
 
@@ -208,7 +243,7 @@ protected by Snapshot Replication and Hyper Backup per `synology/BACKUP_SETUP.md
 - The portal's only writes to the Synology are creating folders (MKCOL), adding new
   files up to 100 MB (PUT, never overwriting; `freeName` picks "x (2).ext") and renaming
   files in place (MOVE, same folder, Destination built by the Worker, `Overwrite: F`,
-  original extension kept), plus admin Delete, which MOVEs a hidden file into `_Deleted files/`. Admin only. A rename moves every D1 row keyed by the old
+  original extension kept, several at once all or nothing; see Rename), plus admin Delete, which MOVEs a hidden file into `_Deleted files/`. Admin only. A rename moves every D1 row keyed by the old
   path (status, likes, comments, tags, activity, campaign picks) to the new path.
   nginx allows GET, HEAD, PUT, MKCOL and MOVE; DELETE is disabled there.
   Every Synology write goes through `nasWrite()` in worker.ts, which refuses non-admin

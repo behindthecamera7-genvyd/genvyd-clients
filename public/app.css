@@ -508,3 +508,28 @@ label.check input { width: auto; }
 .tile-copy-line .mono { font-size: 11px; }
 .tile-copy-line.is-approved { color: var(--bone); }
 .loose-copy { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 20px; color: inherit; text-decoration: none; }
+
+/* Rename dialog (admin) */
+.rename-sheet { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+.rename-current { color: var(--bone); word-break: break-word; margin: 2px 0 12px; }
+.rename-seg { margin: 4px 0 12px; flex-wrap: wrap; }
+.rename-field { display: flex; align-items: center; gap: 8px; margin: 4px 0 10px; }
+.rename-field .rename-input { flex: 1; min-width: 0; height: 42px; box-sizing: border-box; }
+.rename-ext { padding: 10px 12px; border-radius: 12px; background: var(--surface-2); color: var(--smoke); white-space: nowrap; }
+.rename-preview { display: grid; gap: 6px; margin: 6px 0 10px; }
+.rename-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; font-size: 13px; align-items: start; word-break: break-word; }
+.rename-arrow { color: var(--smoke); }
+.rename-thumbs { margin-top: 6px; }
+.rename-msg { border-radius: 12px; padding: 10px 12px; font-size: 13px; display: grid; gap: 6px; margin: 4px 0 10px; }
+.rename-msg.is-warn { border: 1px solid rgba(255, 176, 32, 0.5); background: rgba(255, 176, 32, 0.08); color: var(--bone); }
+.rename-msg.is-warn strong { color: var(--warn); }
+.rename-msg.is-error { border: 1px solid rgba(255, 77, 79, 0.6); background: rgba(255, 77, 79, 0.1); color: var(--bone); }
+.rename-note { font-size: 12px; margin: 4px 0 12px; }
+@media (max-width: 640px) { .rename-row { grid-template-columns: 1fr; gap: 0; } .rename-arrow { display: none; } .rename-row span:last-child::before { content: "→ "; color: var(--smoke); } }
+
+/* Comment threads */
+.thread + .thread { margin-top: 2px; }
+.comment.reply { margin-left: 22px; border-left: 2px solid var(--line); padding-left: 12px; }
+.reply-composer { margin: 8px 0 4px 22px; display: grid; gap: 8px; }
+.reply-box { width: 100%; box-sizing: border-box; border-radius: 12px; border: 1px solid var(--line); background: var(--void); color: var(--bone); padding: 10px 12px; font: 14px/1.45 var(--sans); resize: vertical; }
+.dash-reply { margin-left: 14px; border-left: 2px solid var(--line); padding-left: 10px; }

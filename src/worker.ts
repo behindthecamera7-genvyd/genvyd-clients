@@ -331,7 +331,7 @@ const BACKUP_CRON = "17 10 * * *"; // 3:17 AM Phoenix
 const BACKUP_TABLES = [
   "clients", "members", "item_status", "likes", "comments", "activity",
   "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views", "hidden",
-  "copy_items", "copy_campaigns", "copy_imports",
+  "copy_items", "copy_campaigns", "copy_imports", "file_ids", "file_renames",
 ];
 const BACKUP_NAME_RE = /^portal-backup-\d{4}-\d{2}-\d{2}-\d{4}(-[a-z-]{1,20})?\.json$/;
 const SYSTEM_USER: User = { email: "backup@portal", admin: true };
@@ -449,7 +449,7 @@ async function buildFeed(env: Env) {
   const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR] = await env.DB.batch([
     env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
     env.DB.prepare("SELECT client_slug, path, status, updated_by, updated_at FROM item_status WHERE status IN ('approved','changes','rejected') ORDER BY updated_at DESC"),
-    env.DB.prepare("SELECT id, client_slug, path, email, body, timecode, resolved, created_at FROM comments ORDER BY created_at"),
+    env.DB.prepare("SELECT id, parent_id, client_slug, path, email, body, timecode, resolved, created_at FROM comments ORDER BY created_at"),
     env.DB.prepare("SELECT c.id, c.client_slug, c.name, c.notes, i.path FROM campaigns c LEFT JOIN campaign_items i ON i.campaign_id = c.id ORDER BY c.created_at DESC, i.added_at"),
     env.DB.prepare("SELECT client_slug, path, hidden_by, hidden_at FROM hidden ORDER BY hidden_at DESC"),
     env.DB.prepare("SELECT client_slug, path, email, kind, detail, created_at FROM activity WHERE created_at > ? ORDER BY created_at DESC LIMIT 300").bind(weekAgo),
@@ -477,9 +477,17 @@ async function buildFeed(env: Env) {
   for (const c of clients) {
     const key = (p: string) => `${c.slug}|${p}`;
     const fileInfo = (p: string) => ({ path: p, mac_path: `${MAC_SHARE}/${c.folder}/${p}`, link: `${portal}/#/c/${encodeURIComponent(c.slug)}/i/${encodeURIComponent(p)}` });
-    const commentsOn = (p: string) => comments.filter((m) => m.client_slug === c.slug && m.path === p).map((m) => ({
-      by: m.email, from: isAdmin(m.email) ? "Genvyd" : "client", at: azTime(m.created_at), timecode: m.timecode, text: m.body, open: !m.resolved && !isAdmin(m.email),
-    }));
+    // Each comment with its replies right after it (replies carry reply_to).
+    const commentsOn = (p: string) => {
+      const here = comments.filter((m) => m.client_slug === c.slug && m.path === p);
+      const one = (m: Row) => ({
+        id: m.id as number, reply_to: (m.parent_id as number | null) ?? null, by: m.email, from: isAdmin(m.email) ? "Genvyd" : "client",
+        at: azTime(m.created_at), timecode: m.timecode, text: m.body, open: !m.parent_id && !m.resolved && !isAdmin(m.email),
+        answered: !m.parent_id && here.some((r) => r.parent_id === m.id && isAdmin(r.email)),
+      });
+      return here.filter((m) => !m.parent_id || !here.some((r) => r.id === m.parent_id))
+        .flatMap((m) => [one(m), ...here.filter((r) => r.parent_id === m.id).map(one)]);
+    };
     const mine = status.filter((r) => r.client_slug === c.slug && !hiddenSet.has(key(r.path)));
     const changes = mine.filter((r) => r.status === "changes").map((r) => ({ ...fileInfo(r.path), requested_by: r.updated_by, at: azTime(r.updated_at), comments: commentsOn(r.path) }));
     const changePaths = new Set(changes.map((x) => x.path));
@@ -512,7 +520,9 @@ async function buildFeed(env: Env) {
     (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
 
     const cm = (list: ReturnType<typeof commentsOn>) =>
-      list.map((m) => `    - ${m.open ? "OPEN " : ""}${m.from === "Genvyd" ? "Genvyd" : m.by} (${m.at}): ${tc(m.timecode)}${m.text.replace(/\s+/g, " ")}`).join("\n");
+      list.map((m) => m.reply_to
+        ? `      - Reply from ${m.from === "Genvyd" ? "Genvyd" : m.by} (${m.at}): ${m.text.replace(/\s+/g, " ")}`
+        : `    - ${m.open ? (m.answered ? "OPEN (Genvyd replied) " : "OPEN ") : ""}${m.from === "Genvyd" ? "Genvyd" : m.by} (${m.at}): ${tc(m.timecode)}${m.text.replace(/\s+/g, " ")}`).join("\n");
     const file = (f: { path: string; mac_path: string; link: string }) => `**${f.path}**\n  - Mac: \`${f.mac_path}\`\n  - Portal: ${f.link}`;
     md += `\n---\n\n## ${c.name}\n\nSynology folder: \`${c.folder}\` (Mac: \`${MAC_SHARE}/${c.folder}\`)\n`;
     md += `\n### Changes requested (${changes.length})\n`;
@@ -579,6 +589,9 @@ async function writeFeed(env: Env, force = false) {
 // ---------------------------------------------------------------------------
 // Ad copy
 // ---------------------------------------------------------------------------
+
+// Every table that stores a file by its path (besides campaign_items, scoped by campaign).
+const RENAME_TABLES = ["item_status", "likes", "comments", "item_tags", "activity", "files", "views", "hidden"];
 
 const COPY_KINDS = ["tagline", "headline", "primary", "cta", "caption", "other"];
 
@@ -751,7 +764,9 @@ async function registerFiles(env: Env, slug: string, paths: string[]) {
     await env.DB.batch(
       paths.slice(i, i + 50).map((p) =>
         env.DB.prepare("INSERT OR IGNORE INTO files (client_slug, path, first_seen, notified) VALUES (?, ?, ?, ?)").bind(slug, p, t, notified),
-      ),
+      ).concat(paths.slice(i, i + 50).map((p) =>
+        env.DB.prepare("INSERT OR IGNORE INTO file_ids (client_slug, path, created_at) VALUES (?, ?, ?)").bind(slug, p, t),
+      )),
     );
   }
 }
@@ -932,11 +947,12 @@ function cleanTag(raw: unknown): string {
 
 async function itemDetail(env: Env, user: User, c: Client, path: string) {
   const p = cleanPath(path).join("/");
+  const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   const [s, l, cm, tg] = await env.DB.batch([
     env.DB.prepare("SELECT status, updated_by, updated_at FROM item_status WHERE client_slug = ? AND path = ?").bind(c.slug, p),
     env.DB.prepare("SELECT email FROM likes WHERE client_slug = ? AND path = ? ORDER BY created_at").bind(c.slug, p),
     env.DB.prepare(
-      "SELECT id, email, body, timecode, resolved, created_at FROM comments WHERE client_slug = ? AND path = ? ORDER BY created_at",
+      "SELECT id, parent_id, email, body, timecode, resolved, created_at FROM comments WHERE client_slug = ? AND path = ? ORDER BY created_at",
     ).bind(c.slug, p),
     env.DB.prepare("SELECT tag FROM item_tags WHERE client_slug = ? AND path = ? ORDER BY tag").bind(c.slug, p),
   ]);
@@ -955,6 +971,7 @@ async function itemDetail(env: Env, user: User, c: Client, path: string) {
       ...r,
       resolved: !!r.resolved,
       mine: r.email === user.email,
+      genvyd: admins.includes(String(r.email).toLowerCase()),
     })),
   };
 }
@@ -1257,7 +1274,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import|view|hide|delete)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import|view|hide|delete|where)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
@@ -1373,48 +1390,125 @@ async function route(req: Request, env: Env): Promise<Response> {
       }
       return json({ ok: true, path, renamed: name !== wanted ? name : null });
     }
+    if (action === "where" && method === "GET") {
+      // Old links: where does a file that was renamed in the portal live now?
+      const p = cleanPath(url.searchParams.get("path") ?? "").join("/");
+      const r = await env.DB.prepare(
+        "SELECT f.path FROM file_renames r JOIN file_ids f ON f.id = r.file_id WHERE r.client_slug = ? AND r.old_path = ?",
+      ).bind(c.slug, p).first<{ path: string }>();
+      return json({ path: r && r.path !== p ? r.path : null });
+    }
     if (action === "rename" && method === "POST") {
+      // Admin only. Renames one file or several together (every size and version of an ad,
+      // plus its thumbnails). All or nothing: if any Synology rename or the database update
+      // fails, every file already renamed is put back and nothing in the database changes.
       if (!user.admin) throw new HttpError(403, "Only Genvyd can rename files.");
       const body = await readBody(req);
-      const segs = cleanPath(String(body.path ?? ""));
-      const oldName = segs[segs.length - 1];
-      const dir = segs.slice(0, -1);
-      // Keep the file type: "Hero cut" for "Hero ad v3.mp4" becomes "Hero cut.mp4".
-      const dot = oldName.lastIndexOf(".");
-      const ext = dot > 0 ? oldName.slice(dot) : "";
-      let newName = folderName(body.name);
-      if (ext && !newName.toLowerCase().endsWith(ext.toLowerCase())) newName += ext;
-      if (newName === oldName) return json({ ok: true, path: segs.join("/") });
-
-      const oldPath = segs.join("/");
-      const newPath = [...dir, newName].join("/");
-      const head = await fetch(originUrl(env, c.folder, [...dir, newName]), { method: "HEAD", headers: originHeaders(env) });
-      if (head.status !== 404) throw new HttpError(409, `There is already a file called "${newName}" in this folder.`);
-
-      const res = await nasWrite(env, user, "MOVE", [c.folder, ...segs], { destination: [c.folder, ...dir, newName] });
-      if (res.status === 412) throw new HttpError(409, `There is already a file called "${newName}" in this folder.`);
-      if (res.status === 404) throw new HttpError(404, "That file is no longer on the Synology.");
-      if (res.status === 403 || res.status === 405) {
-        throw new HttpError(502, "The Synology refused the rename. Update nginx.conf on the Synology (see synology/SYNOLOGY_UPDATE.md).");
+      const asked = Array.isArray(body.renames) ? (body.renames as Record<string, unknown>[]) : [{ path: body.path, name: body.name }];
+      if (!asked.length) throw new HttpError(400, "Nothing to rename.");
+      if (asked.length > 30) throw new HttpError(400, "That is a lot of files. Rename 30 or fewer at a time.");
+      const plan = asked.map((r) => {
+        const segs = cleanPath(String(r.path ?? ""));
+        const oldName = segs[segs.length - 1];
+        const dir = segs.slice(0, -1);
+        // The file type never changes: whatever is typed, the original extension is kept.
+        const dot = oldName.lastIndexOf(".");
+        const ext = dot > 0 ? oldName.slice(dot) : "";
+        let stem = folderName(r.name);
+        if (ext && stem.toLowerCase().endsWith(ext.toLowerCase())) stem = stem.slice(0, -ext.length).trim();
+        if (!stem) throw new HttpError(400, "The new name is empty.");
+        const newName = stem + ext;
+        return { dir, oldName, newName, oldPath: segs.join("/"), newPath: [...dir, newName].join("/") };
+      }).filter((p) => p.oldName !== p.newName);
+      if (!plan.length) return json({ ok: true, renamed: [] });
+      const lower = (x: string) => x.toLowerCase();
+      const sources = new Set(plan.map((p) => lower(p.oldPath)));
+      const targets = new Set<string>();
+      for (const p of plan) {
+        if (sources.has(lower(p.newPath))) throw new HttpError(409, `"${p.newName}" is one of the files being renamed. Rename in two steps.`);
+        if (targets.has(lower(p.newPath))) throw new HttpError(409, `Two files would both be called "${p.newName}".`);
+        targets.add(lower(p.newPath));
       }
-      if (res.status !== 201 && res.status !== 204) throw new HttpError(502, `The Synology answered ${res.status} to the rename.`);
+      // Every file must be there, and every new name must be free in its folder.
+      for (const p of plan) {
+        const src = await fetch(originUrl(env, c.folder, [...p.dir, p.oldName]), { method: "HEAD", headers: originHeaders(env) });
+        if (src.status === 404) throw new HttpError(404, `"${p.oldName}" is no longer on the Synology.`);
+        const dst = await fetch(originUrl(env, c.folder, [...p.dir, p.newName]), { method: "HEAD", headers: originHeaders(env) });
+        if (dst.status !== 404) throw new HttpError(409, `There is already a file called "${p.newName}" in this folder. Nothing was renamed.`);
+      }
 
-      // Carry favorites, approvals, comments, tags, campaign picks and history over to the new name.
-      const tables = ["item_status", "likes", "comments", "item_tags", "activity", "files", "views"];
-      await env.DB.batch([
-        ...tables.map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE client_slug = ? AND path = ?`).bind(c.slug, newPath)),
-        env.DB.prepare(
-          "DELETE FROM campaign_items WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)",
-        ).bind(newPath, c.slug),
-        ...tables.map((t) => env.DB.prepare(`UPDATE ${t} SET path = ? WHERE client_slug = ? AND path = ?`).bind(newPath, c.slug, oldPath)),
-        env.DB.prepare(
-          "UPDATE campaign_items SET path = ? WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)",
-        ).bind(newPath, oldPath, c.slug),
-        // Copy typed in for this exact file follows it (copy files match by name, so rename those in Finder too).
-        env.DB.prepare("UPDATE copy_items SET ad_path = ? WHERE client_slug = ? AND ad_path = ? AND source IS NULL").bind(newPath, c.slug, oldPath),
-      ]);
-      await logActivity(env, c.slug, newPath, user.email, "renamed", oldName);
-      return json({ ok: true, path: newPath, name: newName });
+      const done: typeof plan = [];
+      const putBack = async () => {
+        for (const p of done.slice().reverse()) {
+          try { await nasWrite(env, user, "MOVE", [c.folder, ...p.dir, p.newName], { destination: [c.folder, ...p.dir, p.oldName] }); }
+          catch (err) { console.error("rename rollback failed", p.newPath, err); }
+        }
+      };
+      for (const p of plan) {
+        let res: Response;
+        try { res = await nasWrite(env, user, "MOVE", [c.folder, ...p.dir, p.oldName], { destination: [c.folder, ...p.dir, p.newName] }); }
+        catch (err) { await putBack(); throw err; }
+        if (res.status !== 201 && res.status !== 204) {
+          await putBack();
+          if (res.status === 412) throw new HttpError(409, `There is already a file called "${p.newName}" in this folder. Nothing was renamed.`);
+          if (res.status === 403 || res.status === 405) throw new HttpError(502, "The Synology refused the rename. Update nginx.conf on the Synology (see synology/SYNOLOGY_UPDATE.md).");
+          throw new HttpError(502, `The Synology answered ${res.status} to the rename of "${p.oldName}". Nothing was renamed.`);
+        }
+        done.push(p);
+      }
+
+      // Move everything attached to each old name onto the new one, in one database
+      // transaction: approvals, comments and replies, favorites, tags, trash, views, campaign
+      // spots (added_at is kept, so the order in a campaign stays), activity, typed-in copy.
+      const t = now();
+      const stmts: D1PreparedStatement[] = [];
+      for (const p of plan) {
+        for (const tb of RENAME_TABLES) {
+          stmts.push(env.DB.prepare(`DELETE FROM ${tb} WHERE client_slug = ? AND path = ?`).bind(c.slug, p.newPath));
+          stmts.push(env.DB.prepare(`UPDATE ${tb} SET path = ? WHERE client_slug = ? AND path = ?`).bind(p.newPath, c.slug, p.oldPath));
+        }
+        stmts.push(env.DB.prepare("DELETE FROM campaign_items WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)").bind(p.newPath, c.slug));
+        stmts.push(env.DB.prepare("UPDATE campaign_items SET path = ? WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)").bind(p.newPath, p.oldPath, c.slug));
+        stmts.push(env.DB.prepare("UPDATE copy_items SET ad_path = ? WHERE client_slug = ? AND ad_path = ? AND source IS NULL").bind(p.newPath, c.slug, p.oldPath));
+        // The stable ID follows the file; the old name is remembered so old links redirect.
+        stmts.push(env.DB.prepare("DELETE FROM file_ids WHERE client_slug = ? AND path = ?").bind(c.slug, p.newPath));
+        stmts.push(env.DB.prepare("INSERT OR IGNORE INTO file_ids (client_slug, path, created_at) VALUES (?, ?, ?)").bind(c.slug, p.oldPath, t));
+        stmts.push(env.DB.prepare("UPDATE file_ids SET path = ? WHERE client_slug = ? AND path = ?").bind(p.newPath, c.slug, p.oldPath));
+        stmts.push(env.DB.prepare("DELETE FROM file_renames WHERE client_slug = ? AND old_path = ?").bind(c.slug, p.newPath));
+        stmts.push(env.DB.prepare("UPDATE file_renames SET new_path = ? WHERE client_slug = ? AND new_path = ?").bind(p.newPath, c.slug, p.oldPath));
+        stmts.push(env.DB.prepare(
+          "INSERT OR REPLACE INTO file_renames (client_slug, old_path, file_id, new_path, renamed_by, renamed_at) SELECT ?, ?, id, ?, ?, ? FROM file_ids WHERE client_slug = ? AND path = ?",
+        ).bind(c.slug, p.oldPath, p.newPath, user.email, t, c.slug, p.newPath));
+        // Admin activity: shows on the dashboard and in the Claude feed, never emailed to clients.
+        stmts.push(env.DB.prepare("INSERT INTO activity (client_slug, path, email, kind, detail, created_at) VALUES (?, ?, ?, 'renamed', ?, ?)")
+          .bind(c.slug, p.newPath, user.email, `Renamed ${p.oldName} to ${p.newName}`, t));
+      }
+      const countSql = (paths: string[]) => [
+        ...RENAME_TABLES.map((tb) => env.DB.prepare(`SELECT '${tb}' AS t, COUNT(*) AS n FROM ${tb} WHERE client_slug = ? AND path IN (${paths.map(() => "?").join(",")})`).bind(c.slug, ...paths)),
+        env.DB.prepare(`SELECT 'campaign_items' AS t, COUNT(*) AS n FROM campaign_items WHERE path IN (${paths.map(() => "?").join(",")}) AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)`).bind(...paths, c.slug),
+      ];
+      const tally = (rs: D1Result[]) => Object.fromEntries(rs.map((r) => { const x = r.results[0] as { t: string; n: number }; return [x.t, x.n]; }));
+      let before: Record<string, number>;
+      try {
+        before = tally(await env.DB.batch(countSql(plan.map((p) => p.oldPath))));
+        await env.DB.batch(stmts);
+      } catch (err) {
+        await putBack();
+        console.error("rename db update failed", err);
+        throw new HttpError(500, "The database update failed, so the files were put back under their old names. Nothing changed.");
+      }
+      // Check: nothing left behind under the old names.
+      const left = tally(await env.DB.batch(countSql(plan.map((p) => p.oldPath))));
+      const strays = Object.entries(left).filter(([, n]) => n > 0);
+      if (strays.length) console.error("rename left rows behind", strays);
+      try { await writeFeed(env); } catch { /* the 30 minute run picks it up */ }
+      return json({
+        ok: true,
+        renamed: plan.map((p) => ({ from: p.oldPath, to: p.newPath, name: p.newName })),
+        moved: before,
+        leftBehind: Object.fromEntries(strays),
+        path: plan[0].newPath, name: plan[0].newName,
+      });
     }
     if (action === "tags" && method === "GET") {
       // Every tag used for this client, for suggestions and filters.
@@ -1534,6 +1628,20 @@ async function route(req: Request, env: Env): Promise<Response> {
       const text = String(body.body ?? "").trim();
       if (!text) throw new HttpError(400, "Comment is empty.");
       if (text.length > 4000) throw new HttpError(400, "Comment is too long (4,000 characters max).");
+      // A reply (Genvyd only) joins the thread of the comment it answers.
+      if (body.parentId != null) {
+        if (!user.admin) throw new HttpError(403, "Only Genvyd can reply to comments.");
+        const parent = await env.DB.prepare("SELECT id, parent_id, path FROM comments WHERE id = ? AND client_slug = ?")
+          .bind(Number(body.parentId), c.slug).first<{ id: number; parent_id: number | null; path: string }>();
+        if (!parent) throw new HttpError(404, "That comment is gone.");
+        const root = parent.parent_id ?? parent.id;
+        const stmts = [env.DB.prepare("INSERT INTO comments (client_slug, path, email, body, timecode, parent_id, created_at) VALUES (?, ?, ?, ?, NULL, ?, ?)")
+          .bind(c.slug, parent.path, user.email, text, root, now())];
+        if (body.resolve === true) stmts.push(env.DB.prepare("UPDATE comments SET resolved = 1 WHERE id = ?").bind(root));
+        await env.DB.batch(stmts);
+        await logActivity(env, c.slug, parent.path, user.email, "comment", text.slice(0, 280));
+        return json(await itemDetail(env, user, c, parent.path));
+      }
       const tc = typeof body.timecode === "number" && isFinite(body.timecode) && body.timecode >= 0 ? body.timecode : null;
       await env.DB.prepare(
         "INSERT INTO comments (client_slug, path, email, body, timecode, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1555,7 +1663,11 @@ async function route(req: Request, env: Env): Promise<Response> {
       }
       if (!sub && method === "DELETE") {
         if (!user.admin && row.email !== user.email) throw new HttpError(403, "You can only delete your own comments.");
-        await env.DB.prepare("DELETE FROM comments WHERE id = ?").bind(row.id).run();
+        // Deleting the first comment of a thread takes its replies with it.
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM comments WHERE id = ?").bind(row.id),
+          env.DB.prepare("DELETE FROM comments WHERE parent_id = ? AND client_slug = ?").bind(row.id, c.slug),
+        ]);
         return json(await itemDetail(env, user, c, row.path));
       }
     }
@@ -1612,7 +1724,9 @@ async function route(req: Request, env: Env): Promise<Response> {
         env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status s WHERE status = 'changes' AND NOT EXISTS (SELECT 1 FROM hidden h WHERE h.client_slug = s.client_slug AND h.path = s.path) ORDER BY updated_at DESC LIMIT 200"),
         env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status s WHERE status = 'approved' AND NOT EXISTS (SELECT 1 FROM hidden h WHERE h.client_slug = s.client_slug AND h.path = s.path) ORDER BY updated_at DESC LIMIT 300"),
         env.DB.prepare(
-          `SELECT id, client_slug, path, email, body, timecode, created_at FROM comments WHERE resolved = 0 AND email NOT IN (${adminMarks}) ORDER BY created_at DESC LIMIT 100`,
+          `SELECT id, client_slug, path, email, body, timecode, created_at, ` +
+            `(SELECT json_group_array(json_object('email', r.email, 'body', r.body, 'created_at', r.created_at)) FROM (SELECT * FROM comments r WHERE r.parent_id = comments.id ORDER BY r.created_at) r) AS replies ` +
+            `FROM comments WHERE resolved = 0 AND parent_id IS NULL AND email NOT IN (${adminMarks}) ORDER BY created_at DESC LIMIT 100`,
         ).bind(...admins),
         env.DB.prepare(
           "SELECT c.client_slug, i.path, c.name FROM campaign_items i JOIN campaigns c ON c.id = i.campaign_id ORDER BY c.name",
@@ -1653,7 +1767,7 @@ async function route(req: Request, env: Env): Promise<Response> {
         approved: await cards(approved.results as never),
         openComments: (openComments.results as { client_slug: string }[])
           .filter((r) => byClient.has(r.client_slug))
-          .map((r) => ({ ...r, clientName: byClient.get(r.client_slug)!.name })),
+          .map((r) => ({ ...r, replies: JSON.parse(String((r as { replies?: string }).replies || "[]")), clientName: byClient.get(r.client_slug)!.name })),
       });
     }
 
