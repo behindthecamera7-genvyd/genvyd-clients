@@ -493,3 +493,18 @@ label.check input { width: auto; }
   padding: 12px 14px; border: 1px solid var(--no); background: rgba(255, 77, 79, 0.12); color: var(--bone);
 }
 .no-banner strong { color: var(--no); }
+/* Ad copy under the ad (ad page) and under each tile */
+.ad-copy { margin-top: 18px; }
+.ad-copy:empty { display: none; }
+.ad-copy-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.ad-copy-head h2 { margin: 0; font-size: 20px; }
+.ad-copy .copy-adder { margin-bottom: 14px; }
+.ad-copy .copy-text { font-size: 17px; }
+.copy-for { display: inline-block; margin-top: 10px; font-size: 12px; color: var(--smoke); text-decoration: none; }
+.copy-for:hover { color: var(--bone); }
+.tile-copy { margin: 8px 0 2px; padding: 8px 10px; border-radius: 12px; background: var(--surface-2); display: grid; gap: 4px; }
+.tile-copy-head { font-size: 11px; color: var(--bone); letter-spacing: .04em; }
+.tile-copy-line { font-size: 13px; line-height: 1.35; color: var(--ash); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+.tile-copy-line .mono { font-size: 11px; }
+.tile-copy-line.is-approved { color: var(--bone); }
+.loose-copy { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 20px; color: inherit; text-decoration: none; }

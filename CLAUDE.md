@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status. All keep existing data.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports. All keep existing data.
 
 ## Roles
 
@@ -135,15 +135,37 @@ reports "Said no", the Claude feed has a "Said no, do not use" section per clien
 
 ## Ad copy
 
-The "Ad copy" tab (`viewCopy()`, routes `/api/c/:slug/copy[/:id/(status|edit|hide|comments|campaign|delete)]`)
-holds taglines, headlines, primary text, CTAs and captions for approval. Admin adds copy (one
-line, or "each line is its own option" for up to 50) with an optional note and campaigns;
-admin Edit keeps earlier wordings in `history`, bumps `version` and resets to Awaiting review.
-Clients Approve / Request changes / comment / Hide and put copy in campaigns; only admin
-adds, edits and deletes (hidden only). Comments live in `comments` with path `copy:<id>` so
-the dashboard, resolve and digest work (`itemHref()` / `itemLink()` send those to the Copy
-tab). Campaign pages list their copy with "Copy approved copy". "Copy all approved" puts
-every approved line on the clipboard grouped by type, for Ads Manager. It is in the Claude feed.
+Copy (taglines, headlines, primary text, CTAs, captions) belongs to an ad: `copy_items.ad_path`
+(migration 0010). It shows under the preview on the ad page (`renderCopy()` in `viewItem`,
+cards from `copyCard()`), and as a short "AD COPY" block under each tile (`tileCopy()`, data
+from `copy` in the folder listing). `copyKey()` matches copy to every size and version of an
+ad, the same way `groupAds()` folds them, so copy carries over to v2, v3. Routes:
+`/api/c/:slug/copy[/:id/(status|edit|hide|comments|campaign|delete)]`; POST takes `adPath`.
+Clients Approve / Request changes / comment / Hide and put copy in campaigns; only admin adds,
+edits and deletes (hidden only). Edit keeps earlier wordings in `history`, bumps `version`,
+resets to Awaiting review. Comments use path `copy:<id>`. A link to an ad path that is not a
+file (a copy file's name without extension) opens the matching ad.
+
+On the **Ad review** tab each final ad card shows its copy right under the screenshots
+(`copyFor()` in `viewCopy`, with "+ Add copy" for admin, saving `adPath` "Final ads/<Ad name>").
+A final ad takes copy whose `copyKey()` matches its folder and name, or failing that any copy
+with the same ad name (so one copy file next to the video ad covers its screenshots too). In
+`Final ads/`, `copyKey()` ignores the " - <Placement>" part. What is not shown under an ad is
+listed below as "Other ad copy".
+
+Copy files (how Claude and Muse import copy): save `<ad name>.copy.txt` (or `.copy.md`) in the
+same folder as the ad. The name is the ad's name with or without size, version and extension
+("Ponytail cap motion ad.copy.txt" covers the 9x16 and 4x5 and every version; in `Final ads/`
+it is "<Ad name>.copy.txt", e.g. "Golf Polo.copy.txt", no placement). One option per
+labelled line: `Headline:`, `Primary text:`, `Tagline:`, `CTA:`, `Caption:`, `Other:`; lines
+without a label continue the line above (long primary text, hashtags); `Note:` adds a note to
+the line above; `# headings` are ignored. `syncCopyFiles()` reads new or changed files when the
+folder is opened (4 per listing) and on the 15 minute scan (2 per run); `copy_imports` keeps
+size|mtime so unchanged files are not read again. `importCopyFile()`: unchanged lines keep
+their approvals; a rewritten line replaces the one it rewrites (changes requested first),
+keeping history and going back to Awaiting review; removed lines go unless approved or
+commented. Copy files never show as files and never trigger NEW alerts. The Claude feed lists
+each line with "For ad" and "From copy file" Mac paths.
 
 ## Ad review: final ads
 

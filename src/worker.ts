@@ -331,7 +331,7 @@ const BACKUP_CRON = "17 10 * * *"; // 3:17 AM Phoenix
 const BACKUP_TABLES = [
   "clients", "members", "item_status", "likes", "comments", "activity",
   "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views", "hidden",
-  "copy_items", "copy_campaigns",
+  "copy_items", "copy_campaigns", "copy_imports",
 ];
 const BACKUP_NAME_RE = /^portal-backup-\d{4}-\d{2}-\d{2}-\d{4}(-[a-z-]{1,20})?\.json$/;
 const SYSTEM_USER: User = { email: "backup@portal", admin: true };
@@ -505,6 +505,8 @@ async function buildFeed(env: Env) {
       id: r.id, type: KIND_LABEL[r.kind] || r.kind, text: r.text, note: r.note, status: r.status, status_by: r.status_by,
       at: r.status_at ? azTime(r.status_at) : null, version: r.version, hidden: !!r.hidden,
       campaigns: copyCamps.get(r.id) ?? [], comments: commentsOn(`copy:${r.id}`),
+      for_ad: r.ad_path ? fileInfo(r.ad_path) : null,
+      copy_file: r.source ? `${MAC_SHARE}/${c.folder}/${r.source}` : null,
       earlier_wordings: (JSON.parse(r.history || "[]") as { text: string }[]).map((h) => h.text),
     }));
     (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
@@ -525,6 +527,8 @@ async function buildFeed(env: Env) {
     const copyLine = (x: (typeof copy)[number]) =>
       `\n- ${x.type} #${x.id}${x.version > 1 ? ` (v${x.version})` : ""}: "${x.text.replace(/\s+/g, " ")}"` +
       (x.status !== "pending" && x.status_by ? `\n  - ${x.status === "approved" ? "Approved" : "Changes requested"} by ${x.status_by}, ${x.at}` : "") +
+      (x.for_ad ? `\n  - For ad: \`${x.for_ad.mac_path}\` (any size or version)` : "\n  - Not tied to an ad") +
+      (x.copy_file ? `\n  - From copy file: \`${x.copy_file}\` (change the wording there)` : "") +
       (x.campaigns.length ? `\n  - In campaigns: ${x.campaigns.join(", ")}` : "") +
       (x.note ? `\n  - Note: ${x.note.replace(/\s+/g, " ")}` : "") +
       (x.comments.length ? "\n  - Comments:\n" + cm(x.comments) : "") +
@@ -578,6 +582,132 @@ async function writeFeed(env: Env, force = false) {
 
 const COPY_KINDS = ["tagline", "headline", "primary", "cta", "caption", "other"];
 
+// Copy files: Claude or Muse saves "<ad name>.copy.txt" next to the ad on the Synology,
+// one line per option:
+//   Headline: Built for the back nine
+//   Primary text: Our ponytail cap...
+//     (lines without a label carry on the one above, so primary text can run long)
+//   Note: shown under the line above
+// The portal reads them when the folder is opened (and on the 15 minute scan), never shows
+// them as files, and only reads one again when it changes.
+const COPY_FILE = /\.copy\.(txt|md)$/i;
+const COPY_LABELS: [RegExp, string][] = [
+  [/^tag ?lines?$/, "tagline"],
+  [/^(headlines?|titles?)$/, "headline"],
+  [/^(primary( text)?|primary copy|body( text)?|ad text|text|description)$/, "primary"],
+  [/^(cta|ctas|call to action|button( text)?)$/, "cta"],
+  [/^(captions?|post caption|video caption)$/, "caption"],
+  [/^other$/, "other"],
+];
+
+function parseCopyFile(text: string) {
+  type Line = { kind: string; text: string; note: string | null };
+  const out: Line[] = [];
+  let cur: Line | null = null;
+  let inNote = false;
+  for (const raw of text.replace(/\r/g, "").replace(/^\uFEFF/, "").split("\n")) {
+    // Markdown headings ("# Ponytail cap") and rules are for people; hashtags ("#golf") are not headings.
+    if (/^\s*#{1,6}\s/.test(raw) || /^\s*(-{3,}|\*{3,})\s*$/.test(raw)) { if (cur) inNote = false; continue; }
+    const m = raw.match(/^\s*(?:[-*]\s+)?\**\s*([A-Za-z][A-Za-z ]{0,24}?)\s*(?:\d{1,2}|\(\d{1,2}\)|option \d{1,2})?\s*\**\s*:\s*\**\s*(.*)$/i);
+    const label = m ? m[1].trim().toLowerCase() : "";
+    const kind = m ? COPY_LABELS.find(([re]) => re.test(label))?.[1] : undefined;
+    if (m && kind) {
+      cur = { kind, text: m[2], note: null };
+      out.push(cur);
+      inNote = false;
+    } else if (m && /^notes?$/.test(label) && cur) {
+      cur.note = m[2].trim();
+      inNote = true;
+    } else if (cur) {
+      if (inNote) { if (raw.trim()) cur.note = `${cur.note ?? ""}\n${raw.trim()}`.trim(); else inNote = false; }
+      else cur.text += "\n" + raw;
+    }
+  }
+  const seen = new Set<string>();
+  return out
+    .map((l) => ({ ...l, text: l.text.replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 3000), note: l.note ? l.note.slice(0, 1000) : null }))
+    .filter((l) => l.text && !seen.has(l.kind + "|" + l.text) && seen.add(l.kind + "|" + l.text))
+    .slice(0, 50);
+}
+
+/**
+ * Brings one copy file into the portal. Lines already there are left alone (with their
+ * approvals). A changed line replaces the one it most likely rewrites (changes requested
+ * first), keeping the old wording in history and going back to Awaiting review. Lines taken
+ * out of the file go too, unless the client already approved or commented on them.
+ */
+async function importCopyFile(env: Env, slug: string, filePath: string, content: string) {
+  const adPath = filePath.replace(COPY_FILE, "");
+  const want = parseCopyFile(content);
+  const have = (await env.DB.prepare(
+    "SELECT i.id, i.kind, i.text, i.note, i.status, i.version, i.history, i.hidden, i.updated_at, " +
+      "(SELECT COUNT(*) FROM comments m WHERE m.client_slug = i.client_slug AND m.path = 'copy:' || i.id) AS ncomments " +
+      "FROM copy_items i WHERE i.client_slug = ? AND i.source = ? ORDER BY i.id",
+  ).bind(slug, filePath).all<Record<string, any>>()).results;
+  const rank: Record<string, number> = { changes: 0, pending: 1, approved: 2 };
+  const stmts: D1PreparedStatement[] = [];
+  const t = now();
+  for (const kind of COPY_KINDS) {
+    const w = want.filter((x) => x.kind === kind);
+    const hv = have.filter((x) => x.kind === kind);
+    for (const x of w) {
+      const same = hv.find((y) => y.text === x.text);
+      if (same && x.note !== null && x.note !== same.note) stmts.push(env.DB.prepare("UPDATE copy_items SET note = ? WHERE id = ?").bind(x.note, same.id));
+    }
+    const fresh = w.filter((x) => !hv.some((y) => y.text === x.text));
+    const stale = hv.filter((y) => !w.some((x) => x.text === y.text) && !y.hidden).sort((a, b) => rank[a.status] - rank[b.status] || a.id - b.id);
+    fresh.forEach((x, i) => {
+      const old = stale[i];
+      if (old) {
+        const history = JSON.parse(old.history || "[]");
+        history.push({ text: old.text, version: old.version, status: old.status, at: old.updated_at });
+        stmts.push(env.DB.prepare(
+          "UPDATE copy_items SET text = ?, note = ?, ad_path = ?, version = version + 1, history = ?, status = 'pending', status_by = NULL, status_at = NULL, updated_at = ? WHERE id = ?",
+        ).bind(x.text, x.note ?? old.note, adPath, JSON.stringify(history.slice(-20)), t, old.id));
+      } else {
+        stmts.push(env.DB.prepare(
+          "INSERT INTO copy_items (client_slug, kind, text, note, ad_path, source, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'copy file', ?, ?)",
+        ).bind(slug, kind, x.text, x.note, adPath, filePath, t, t));
+      }
+    });
+    for (const old of stale.slice(fresh.length)) {
+      if (old.status === "pending" && !old.ncomments) {
+        stmts.push(env.DB.prepare("DELETE FROM copy_items WHERE id = ?").bind(old.id));
+        stmts.push(env.DB.prepare("DELETE FROM copy_campaigns WHERE copy_id = ?").bind(old.id));
+      }
+    }
+  }
+  if (stmts.length) await env.DB.batch(stmts.slice(0, 200));
+  return { lines: want.length, changes: stmts.length };
+}
+
+/** Reads copy files that are new or changed since last time (at most `limit` per call). */
+async function syncCopyFiles(env: Env, c: Client, files: { path: string; size?: number; mtime?: string }[], limit: number) {
+  if (!files.length || limit < 1) return 0;
+  const list = files.slice(0, 90);
+  const known = new Map(
+    (await env.DB.prepare(`SELECT path, sig FROM copy_imports WHERE client_slug = ? AND path IN (${list.map(() => "?").join(",")})`)
+      .bind(c.slug, ...list.map((f) => f.path)).all<{ path: string; sig: string }>()).results.map((r) => [r.path, r.sig]),
+  );
+  let done = 0;
+  for (const f of list) {
+    const sig = `${f.size ?? ""}|${f.mtime ?? ""}`;
+    if (known.get(f.path) === sig) continue;
+    if (done >= limit) break;
+    done++;
+    try {
+      const res = await fetch(originUrl(env, c.folder, f.path.split("/")), { headers: originHeaders(env) });
+      if (!res.ok) continue;
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength > 200_000) continue; // not a copy file
+      const r = await importCopyFile(env, c.slug, f.path, new TextDecoder().decode(buf));
+      await env.DB.prepare("INSERT OR REPLACE INTO copy_imports (client_slug, path, sig, lines, imported_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(c.slug, f.path, sig, r.lines, now()).run();
+    } catch { /* try again next time */ }
+  }
+  return done;
+}
+
 async function copyList(env: Env, user: User, c: Client) {
   const [items, links, camps, comments] = await env.DB.batch([
     env.DB.prepare("SELECT * FROM copy_items WHERE client_slug = ? ORDER BY created_at DESC, id DESC").bind(c.slug),
@@ -598,6 +728,7 @@ async function copyList(env: Env, user: User, c: Client) {
     items: (items.results as Record<string, any>[]).map((r) => ({
       id: r.id, kind: r.kind, text: r.text, note: r.note, status: r.status, statusBy: r.status_by, statusAt: r.status_at,
       version: r.version, history: JSON.parse(r.history || "[]"), hidden: !!r.hidden, createdAt: r.created_at, updatedAt: r.updated_at,
+      adPath: r.ad_path ?? null, source: r.source ?? null,
       campaigns: byCopy.get(r.id) ?? [], comments: cmts.get(`copy:${r.id}`) ?? [],
     })),
   };
@@ -646,13 +777,16 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
     .map((e) => ({ name: e.name, path: prefix + e.name, mtime: e.mtime ?? null }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  const files = entries.filter((e) => e.type === "file");
+  // Copy files (".copy.txt") are read into the ad's copy, not shown as files.
+  const copyFiles = entries.filter((e) => e.type === "file" && COPY_FILE.test(e.name));
+  await syncCopyFiles(env, c, copyFiles.map((f) => ({ path: prefix + f.name, size: f.size, mtime: f.mtime })), 4);
+  const files = entries.filter((e) => e.type === "file" && !COPY_FILE.test(e.name));
   const paths = files.map((f) => prefix + f.name);
   await registerFiles(env, c.slug, paths);
 
   // Pull all social data for this folder in one go.
   const like = prefix.replace(/[%_\\]/g, (m) => "\\" + m) + "%";
-  const [statusRows, likeRows, commentRows, tagRows, hiddenRows] = await env.DB.batch([
+  const [statusRows, likeRows, commentRows, tagRows, hiddenRows, copyAll] = await env.DB.batch([
     env.DB.prepare("SELECT path, status FROM item_status WHERE client_slug = ? AND path LIKE ? ESCAPE '\\'").bind(c.slug, like),
     env.DB.prepare(
       "SELECT path, COUNT(*) AS n, SUM(CASE WHEN email = ? THEN 1 ELSE 0 END) AS mine FROM likes WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' GROUP BY path",
@@ -662,7 +796,13 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
     ).bind(c.slug, like),
     env.DB.prepare("SELECT path, tag FROM item_tags WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' ORDER BY tag").bind(c.slug, like),
     env.DB.prepare("SELECT path FROM hidden WHERE client_slug = ? AND path LIKE ? ESCAPE '\\'").bind(c.slug, like),
+    // Copy for the ads in this folder (shown under each ad), plus a count of copy not tied to any ad.
+    env.DB.prepare("SELECT id, ad_path, kind, text, status FROM copy_items WHERE client_slug = ? AND hidden = 0 AND (ad_path LIKE ? ESCAPE '\\' OR ad_path IS NULL) ORDER BY id").bind(c.slug, like),
   ]);
+  const copyRows = (copyAll.results as { id: number; ad_path: string | null; kind: string; text: string; status: string }[]);
+  const copy = copyRows.filter((r) => r.ad_path && !r.ad_path.slice(prefix.length).includes("/"))
+    .map((r) => ({ id: r.id, adPath: r.ad_path, kind: r.kind, text: r.text.slice(0, 300), status: r.status }));
+  const looseCopy = copyRows.filter((r) => !r.ad_path).length;
   const hidden = new Set((hiddenRows.results as { path: string }[]).map((r) => r.path));
   // Unviewed files under this folder (any depth), for "NEW" badges and folder counts.
   const [unseenRows, knownRows] = await env.DB.batch([
@@ -722,7 +862,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
     })
     .sort((a, b) => (b.mtime ? Date.parse(b.mtime) : 0) - (a.mtime ? Date.parse(a.mtime) : 0));
 
-  return { client: { slug: c.slug, name: c.name }, dir: segs.join("/"), folders, items };
+  return { client: { slug: c.slug, name: c.name }, dir: segs.join("/"), folders, items, copy, looseCopy };
 }
 
 /** Ad cards for a list of paths that may span several folders (favorites, campaigns). */
@@ -916,14 +1056,15 @@ async function route(req: Request, env: Env): Promise<Response> {
       if (texts.length > 50) throw new HttpError(400, "That is a lot of lines. Add 50 or fewer at a time.");
       if (texts.some((t) => t.length > 3000)) throw new HttpError(400, "One of those is too long (3,000 characters max).");
       const note = String(body.note ?? "").trim().slice(0, 1000) || null;
+      const adPath = body.adPath ? cleanPath(String(body.adPath)).join("/") : null;
       const camps = (Array.isArray(body.campaigns) ? body.campaigns : []).map(Number).filter((n) => Number.isInteger(n)).slice(0, 10);
       const valid = camps.length
         ? new Set((await env.DB.prepare(`SELECT id FROM campaigns WHERE client_slug = ? AND id IN (${camps.map(() => "?").join(",")})`).bind(c.slug, ...camps).all<{ id: number }>()).results.map((r) => r.id))
         : new Set<number>();
       for (const t of texts) {
         const r = await env.DB.prepare(
-          "INSERT INTO copy_items (client_slug, kind, text, note, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
-        ).bind(c.slug, kind, t, note, user.email, now(), now()).first<{ id: number }>();
+          "INSERT INTO copy_items (client_slug, kind, text, note, ad_path, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        ).bind(c.slug, kind, t, note, adPath, user.email, now(), now()).first<{ id: number }>();
         if (valid.size) {
           await env.DB.batch([...valid].map((cid) =>
             env.DB.prepare("INSERT OR IGNORE INTO copy_campaigns (copy_id, campaign_id, added_by, added_at) VALUES (?, ?, ?, ?)").bind(r!.id, cid, user.email, now())));
@@ -1269,6 +1410,8 @@ async function route(req: Request, env: Env): Promise<Response> {
         env.DB.prepare(
           "UPDATE campaign_items SET path = ? WHERE path = ? AND campaign_id IN (SELECT id FROM campaigns WHERE client_slug = ?)",
         ).bind(newPath, oldPath, c.slug),
+        // Copy typed in for this exact file follows it (copy files match by name, so rename those in Finder too).
+        env.DB.prepare("UPDATE copy_items SET ad_path = ? WHERE client_slug = ? AND ad_path = ? AND source IS NULL").bind(newPath, c.slug, oldPath),
       ]);
       await logActivity(env, c.slug, newPath, user.email, "renamed", oldName);
       return json({ ok: true, path: newPath, name: newName });
@@ -1867,6 +2010,7 @@ async function scanClients(env: Env) {
     if (budget < 2) break;
     // Breadth first: client folder, its projects, then one more level, until the budget runs out.
     const found: string[] = [];
+    const copyFiles: { path: string; size?: number; mtime?: string }[] = [];
     let queue: string[][] = [[]];
     let complete = true;
     while (queue.length) {
@@ -1877,7 +2021,8 @@ async function scanClients(env: Env) {
         let entries: NasEntry[];
         try { entries = await listNas(env, c.folder, segs); } catch { complete = false; continue; }
         for (const e of entries) {
-          if (e.type === "file") found.push([...segs, e.name].join("/"));
+          if (e.type === "file" && COPY_FILE.test(e.name)) copyFiles.push({ path: [...segs, e.name].join("/"), size: e.size, mtime: e.mtime });
+          else if (e.type === "file") found.push([...segs, e.name].join("/"));
           else if (segs.length < 3) next.push([...segs, e.name]);
         }
       }
@@ -1885,6 +2030,7 @@ async function scanClients(env: Env) {
       queue = next;
     }
     await registerFiles(env, c.slug, found);
+    if (copyFiles.length && budget >= 3) budget -= await syncCopyFiles(env, c, copyFiles, 2);
     if (complete && !(await baselineDone(env, c.slug))) {
       // First full scan of this client: everything already there is old news.
       await env.DB.batch([

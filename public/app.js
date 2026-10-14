@@ -398,6 +398,10 @@
       parts.push(h("div", { class: "grid" }, data.folders.map((f) => projectCard(slug, f))));
     }
 
+    // Ad copy shows under the ad it belongs to (every size and version of it).
+    const copyBy = new Map();
+    for (const x of data.copy || []) { const k = copyKey(x.adPath); copyBy.set(k, [...(copyBy.get(k) || []), x]); }
+    for (const it of data.items) it._copy = copyBy.get(copyKey(it.path)) || null;
     if (data.items.length) {
       if (data.folders.length) parts.push(h("div", { class: "section-label mono muted" }, "ALSO IN THIS FOLDER"));
       parts.push(mediaBrowser(data.items, { tileFn: (it) => tile(slug, it), slug, zipName: `${data.client.name} - ${title}` }));
@@ -473,8 +477,8 @@
     out = out.replace(DUP_RE, "");
     return out.replace(/\s{2,}/g, " ").replace(/[\s_\-.]+$/, "").trim() || stem;
   }
-  function adInfo(it) {
-    let rest = stemOf(it.name);
+  function adName(name) {
+    let rest = stemOf(name);
     let size = null;
     const m = rest.match(SIZE_RE);
     if (m) { size = `${Number(m[1])}:${Number(m[2])}`; rest = rest.replace(m[0], " "); }
@@ -482,9 +486,23 @@
     const v = rest.match(VER_RE);
     if (v) { ver = Number(v[1]) || 1; rest = rest.replace(v[0], " "); }
     else { const d = rest.match(DUP_RE); if (d) { ver = Number(d[1]) || 1; rest = rest.replace(DUP_RE, ""); } }
-    const base = norm(rest) || norm(stemOf(it.name)) || it.name.toLowerCase();
+    const base = norm(rest) || norm(stemOf(name)) || name.toLowerCase();
+    return { size, ver, base };
+  }
+  function adInfo(it) {
+    const { size, ver, base } = adName(it.name);
     return { size, ver, key: [it.clientSlug || "", parentOf(it.path), kindOf(it), base].join("|") };
   }
+  // Ad copy belongs to every size and version of an ad, and to copy files named after it
+  // ("Cap ad.copy.txt" goes with "Cap ad 9x16.mp4" and "Cap ad 4x5 v2.mp4").
+  const copyKey = (p) => {
+    let name = baseName(p);
+    // Final ad screenshots are "<Ad name> - <Placement>.png": the copy goes with the ad name.
+    if (parentOf(p).split("/")[0] === "Final ads" && name.lastIndexOf(" - ") > 0) name = name.slice(0, name.lastIndexOf(" - "));
+    // A copy file named without the extension ("Cap ad") has no extension to take off.
+    const n = /\.[a-z0-9]{2,4}$/i.test(name) ? name : name + ".x";
+    return parentOf(p) + "|" + adName(n).base;
+  };
   const sizeRank = (label) => { if (!label) return 98; const i = SIZE_ORDER.indexOf(label); return i < 0 ? 99 : i; };
   const bySize = (a, b) => sizeRank(a.size) - sizeRank(b.size) || String(a.size).localeCompare(String(b.size));
   // Two files claiming the same size and version (say Hero.mp4 and Hero.mov) are left apart.
@@ -726,6 +744,23 @@
 
   // A grid tile. Videos show their length and play right in the grid (tap the play
   // button); the Open button (and the name) go to the full-size page with comments.
+  // The ad's copy under its preview: the first two lines and how many are approved.
+  const COPY_ORDER = ["headline", "primary", "tagline", "caption", "cta", "other"];
+  function tileCopy(list) {
+    if (!list || !list.length) return null;
+    const ok = list.filter((x) => x.status === "approved").length;
+    const ch = list.filter((x) => x.status === "changes").length;
+    const firsts = [...list].sort((a, b) => COPY_ORDER.indexOf(a.kind) - COPY_ORDER.indexOf(b.kind) || a.id - b.id).slice(0, 2);
+    return h("div", { class: "tile-copy" },
+      h("div", { class: "mono tile-copy-head" }, "AD COPY",
+        h("span", { class: "muted" }, ` · ${list.length} line${list.length === 1 ? "" : "s"}`),
+        ok ? h("span", { style: "color:var(--ok)" }, ` · ${ok} ✓`) : null,
+        ch ? h("span", { style: "color:var(--warn)" }, ` · ${ch} to change`) : null),
+      firsts.map((x) => h("div", { class: "tile-copy-line" + (x.status === "approved" ? " is-approved" : x.status === "changes" ? " is-changes" : "") },
+        h("span", { class: "mono muted" }, (COPY_KIND_LABEL[x.kind] || x.kind) + " "), x.text.split("\n")[0])),
+    );
+  }
+
   function tile(slug, it, showFolder) {
     const src = mediaUrl(slug, it.path);
     const href = `#/c/${enc(slug)}/i/${enc(it.path)}`;
@@ -799,6 +834,7 @@
               it._verCount ? h("span", { class: "size-chip ver-chip", title: `${it._verCount} versions, showing the newest` }, `v${it._verLatest} · ${it._verCount} versions`) : null)
           : null,
         showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
+        tileCopy(it._copy),
         campLine,
         it.tags && it.tags.length ? h("div", { class: "tile-tags" }, it.tags.map((tg) => h("span", { class: "tag" }, `#${tg}`))) : null,
         h("div", { class: "tile-stats mono muted" },
@@ -1181,7 +1217,7 @@
     let detail;
     try {
       [detail, list] = await Promise.all([
-        api("GET", `/api/c/${enc(slug)}/item?path=${enc(path)}`),
+        api("GET", `/api/c/${enc(slug)}/item?path=${enc(path)}`).catch((err) => ({ _err: err })),
         list ? Promise.resolve(list) : api("GET", `/api/c/${enc(slug)}/list?dir=${enc(dir)}`),
       ]);
     } catch (err) {
@@ -1189,6 +1225,13 @@
       return;
     }
     state.listCache.set(`${slug}|${dir}`, list);
+    if (!list.items.some((i) => i.path === path)) {
+      // A link from ad copy can name the ad without its size or extension: open the ad it means.
+      const k = copyKey(path);
+      const match = groupAds(list.items).find((a) => copyKey(a.path) === k);
+      if (match) { location.replace(`#/c/${enc(slug)}/i/${enc(match.path)}`); return; }
+    }
+    if (detail._err) { show(errorCard(detail._err)); return; }
 
     // Opening an ad marks it as viewed for this person.
     const cached = list.items.find((i) => i.path === path);
@@ -1320,6 +1363,64 @@
         h("button", { class: "btn small", type: "button", onclick: () => saveFile(src, it.name) }, "↓ Save"),
       ),
     );
+
+    // Ad copy for this ad, right under the preview: every line with Approve / Request changes.
+    const copyBox = h("div", { class: "ad-copy" });
+    const copyState = { open: new Set(), hidden: false, d: null, adding: false };
+    const myKey = copyKey(path);
+    const copyBase = `/api/c/${enc(slug)}/copy`;
+    async function copyCall(method, url, body) {
+      try { copyState.d = await api(method, url, body); renderCopy(); state.listCache.delete(`${slug}|${dir}`); return true; }
+      catch (err) { toast(err.message); return false; }
+    }
+    function renderCopy() {
+      const d = copyState.d;
+      if (!d) return;
+      const mine = d.items.filter((x) => x.adPath && copyKey(x.adPath) === myKey);
+      const hiddenN = mine.filter((x) => x.hidden).length;
+      if (!hiddenN) copyState.hidden = false;
+      const shown = mine.filter((x) => x.hidden === copyState.hidden);
+      const approved = mine.filter((x) => !x.hidden && x.status === "approved");
+      if (!mine.length && !state.me.admin) { fill(copyBox); return; }
+      let adder = null;
+      if (state.me.admin && copyState.adding) {
+        const kindSel = h("select", { class: "mini-select" }, d.kinds.map((k) => h("option", { value: k }, COPY_KIND_LABEL[k] || k)));
+        const text = h("textarea", { class: "copy-input", rows: 3, maxlength: "3000", placeholder: "Type the copy. Several options? One per line and tick the box." });
+        const lines = h("input", { type: "checkbox" });
+        const add = h("button", { class: "btn small primary", type: "button", onclick: async () => {
+          if (!text.value.trim()) return text.focus();
+          add.disabled = true;
+          if (await copyCall("POST", copyBase, { kind: kindSel.value, text: text.value, lines: lines.checked, adPath: path })) { copyState.adding = false; renderCopy(); toast("Added under this ad."); }
+          else add.disabled = false;
+        } }, "Add");
+        adder = h("div", { class: "card pad copy-adder" },
+          h("div", { class: "copy-row" }, kindSel, h("span", { class: "muted", style: "font-size:13px" }, "Goes with every size and version of this ad")),
+          text,
+          h("label", { class: "check", style: "margin:8px 0" }, lines, "Each line is its own option"),
+          h("div", { class: "copy-row" }, add, h("button", { class: "btn small", type: "button", onclick: () => { copyState.adding = false; renderCopy(); } }, "Cancel")));
+      }
+      fill(copyBox,
+        h("div", { class: "ad-copy-head" },
+          h("h2", {}, "Ad copy"),
+          h("span", { class: "muted", style: "font-size:13px" }, mine.length ? `${mine.length - hiddenN} line${mine.length - hiddenN === 1 ? "" : "s"}, ${approved.length} approved` : "None yet"),
+          h("span", { style: "flex:1" }),
+          hiddenN ? h("button", { class: "btn small" + (copyState.hidden ? " on-warn" : ""), type: "button", onclick: () => { copyState.hidden = !copyState.hidden; renderCopy(); } }, copyState.hidden ? "← Back" : `🗑 Trash (${hiddenN})`) : null,
+          approved.length && !copyState.hidden ? h("button", { class: "btn small", type: "button", title: "Copy the approved lines for this ad", onclick: async () => {
+            const out = d.kinds.map((k) => [k, approved.filter((x) => x.kind === k)]).filter(([, l]) => l.length)
+              .map(([k, l]) => `${(COPY_KIND_LABEL[k] || k).toUpperCase()}\n${l.map((x) => x.text).join("\n\n")}`).join("\n\n\n");
+            try { await navigator.clipboard.writeText(out); toast(`Copied ${approved.length} approved line${approved.length === 1 ? "" : "s"}.`); }
+            catch { toast("Your browser blocked copying. Long-press a line to copy it instead."); }
+          } }, "Copy approved") : null,
+          state.me.admin && !copyState.adding && !copyState.hidden ? h("button", { class: "btn small primary", type: "button", onclick: () => { copyState.adding = true; renderCopy(); } }, "+ Add copy") : null,
+        ),
+        adder,
+        shown.length
+          ? h("div", { class: "copy-list" }, shown.slice().sort((a, b) => COPY_ORDER.indexOf(a.kind) - COPY_ORDER.indexOf(b.kind) || a.id - b.id)
+              .map((x) => copyCard(slug, x, { campaigns: d.campaigns, open: copyState.open, call: copyCall, rerender: renderCopy, compact: true })))
+          : state.me.admin && !adder ? h("p", { class: "muted", style: "margin:0;font-size:13px" }, "No copy for this ad yet. Add it here, or have Claude or Muse save a copy file next to the ad (see CLAUDE.md).") : null,
+      );
+    }
+    api("GET", copyBase).then((d) => { copyState.d = d; renderCopy(); }).catch(() => {});
 
     const side = h("div", { class: "card side" });
 
@@ -1555,7 +1656,7 @@
       ),
       hiddenNotice,
       oldNotice,
-      h("div", { class: "viewer" }, h("div", {}, stage, verSeg, navBar), side),
+      h("div", { class: "viewer" }, h("div", {}, stage, verSeg, navBar, copyBox), side),
     );
   }
 
@@ -1606,7 +1707,7 @@
       api("GET", `/api/c/${enc(slug)}/list?dir=${enc(f.path)}`).then((d) => ({ title: f.name, dir: f.path, items: d.items })).catch(() => null)));
     return [{ title: null, dir: FINAL_DIR, items: root.items }, ...subs.filter(Boolean)];
   }
-  function finalAdsSection(slug, sections, reload) {
+  function finalAdsSection(slug, sections, reload, copyFor) {
     const wrap = h("div", { class: "final-ads" });
     const all = (sections || []).map((s) => ({ ...s, ads: finalAdGroups(s.items) })).filter((s) => s.ads.length);
     const count = all.reduce((n, s) => n + s.ads.length, 0);
@@ -1643,7 +1744,7 @@
             : "This is how each ad will look on Facebook and Instagram. Approve it, or ask for changes before it goes live.")),
       h("div", { class: "section-head-right" }, count ? h("span", { class: "mono muted" }, `${approvedN} of ${count} approved`) : null, tools));
 
-    const card = (ad) => {
+    const card = (ad, dir) => {
       const first = ad.shots[0].it;
       const paths = ad.shots.map((e) => e.it.path);
       const also = paths.slice(1);
@@ -1681,11 +1782,12 @@
           h("button", { class: "btn small" + (ad.status === "changes" ? " on-warn" : ""), type: "button", onclick: () => setStatus(ad.status === "changes" ? "pending" : "changes") }, ad.status === "changes" ? "Changes requested" : "Request changes"),
           h("button", { class: "btn small no-btn" + (ad.status === "rejected" ? " on-no" : ""), type: "button", onclick: () => setStatus(ad.status === "rejected" ? "pending" : "rejected") }, ad.status === "rejected" ? "✕ Marked No" : "✕ No"),
           h("a", { class: "btn small", href: `#/c/${enc(slug)}/i/${enc(first.path)}` }, `💬 ${ad.comments}${ad.openComments && state.me.admin ? ` · ${ad.openComments} open` : ""}`)),
+        copyFor ? copyFor(ad, dir) : null,
       );
     };
 
     const body = count
-      ? all.map((s) => [s.title ? h("div", { class: "section-label mono muted" }, `${s.title.toUpperCase()} · ${s.ads.length}`) : null, h("div", { class: "final-list" }, s.ads.map(card))])
+      ? all.map((s) => [s.title ? h("div", { class: "section-label mono muted" }, `${s.title.toUpperCase()} · ${s.ads.length}`) : null, h("div", { class: "final-list" }, s.ads.map((ad) => card(ad, s.dir)))])
       : h("div", { class: "card empty muted" }, state.me.admin
           ? (sections ? `No screenshots yet. Muse saves them in "${FINAL_DIR}", or tap Add screenshots.` : `No "${FINAL_DIR}" folder yet. Tap Add screenshots, or have Muse save them in the client's folder under "${FINAL_DIR}".`)
           : "No final ads to review yet. They show up here when they are ready.");
@@ -1699,83 +1801,13 @@
     tagline: "Short brand line", headline: "Bold line under the ad (about 40 characters)", primary: "Main text above the ad",
     cta: "Button or closing line", caption: "Post or video caption", other: "Anything else",
   };
-  async function viewCopy(slug, keep) {
-    if (!keep) show(h("p", { class: "muted" }, "Loading…"));
-    let d, finals;
-    try {
-      [d, finals] = await Promise.all([
-        api("GET", `/api/c/${enc(slug)}/copy`),
-        loadFinalAds(slug).catch((err) => ({ error: err.message })),
-      ]);
-    } catch (err) { show(errorCard(err)); return; }
-    const finalBox = h("div");
-    const paintFinal = () => fill(finalBox, finals && finals.error
-      ? h("div", { class: "card empty muted" }, `Could not load the final ads: ${finals.error}`)
-      : finalAdsSection(slug, finals, async () => { try { finals = await loadFinalAds(slug); } catch (err) { finals = { error: err.message }; } paintFinal(); }));
-    paintFinal();
-    const st = viewCopy.state[slug] || (viewCopy.state[slug] = { kind: "all", status: "all", hidden: false, open: new Set() });
-    const campName = new Map(d.campaigns.map((c) => [c.id, c.name]));
-    const refresh = (data) => { d = data; render(); };
-    const call = async (method, url, body) => { try { refresh(await api(method, url, body)); return true; } catch (err) { toast(err.message); return false; } };
-    const base = `/api/c/${enc(slug)}/copy`;
-
-    // Admin: add copy. One line, or many options at once ("each line is its own option").
-    let adder = null;
-    if (state.me.admin) {
-      const kindSel = h("select", { class: "mini-select" }, d.kinds.map((k) => h("option", { value: k }, COPY_KIND_LABEL[k] || k)));
-      const text = h("textarea", { class: "copy-input", rows: 3, maxlength: "3000", placeholder: "Type the copy. To offer several options, put each on its own line and tick the box below." });
-      const lines = h("input", { type: "checkbox" });
-      const note = h("input", { class: "menu-input", maxlength: "1000", placeholder: "Note for the client (optional), e.g. for the golf ads" });
-      const campBoxes = d.campaigns.map((cp) => ({ cp, box: h("input", { type: "checkbox" }) }));
-      const add = h("button", { class: "btn small primary", type: "button", onclick: async () => {
-        if (!text.value.trim()) return text.focus();
-        add.disabled = true;
-        const ok = await call("POST", base, { kind: kindSel.value, text: text.value, lines: lines.checked, note: note.value, campaigns: campBoxes.filter((x) => x.box.checked).map((x) => x.cp.id) });
-        add.disabled = false;
-        if (ok) { text.value = ""; note.value = ""; toast("Added. The client can review it now."); }
-      } }, "Add copy");
-      adder = h("div", { class: "card pad copy-adder" },
-        h("h2", { style: "margin:0 0 12px" }, "Add copy for review"),
-        h("div", { class: "copy-row" }, kindSel, h("span", { class: "muted", style: "font-size:13px" }, "Tagline, headline, primary text, call to action or caption")),
-        text,
-        h("label", { class: "check", style: "margin:8px 0" }, lines, "Each line is its own option (she can approve them one by one)"),
-        note,
-        campBoxes.length ? h("div", { class: "copy-row", style: "flex-wrap:wrap;margin-top:10px" }, h("span", { class: "mono muted" }, "CAMPAIGNS"), campBoxes.map((x) => h("label", { class: "check" }, x.box, x.cp.name))) : null,
-        h("div", { style: "margin-top:12px" }, add),
-      );
-    }
-
-    const listHolder = h("div");
-    function render() {
-      const hiddenCount = d.items.filter((x) => x.hidden).length;
-      if (st.hidden && !hiddenCount) st.hidden = false;
-      const visible = d.items.filter((x) => x.hidden === st.hidden);
-      const shown = visible.filter((x) => (st.kind === "all" || x.kind === st.kind) && (st.status === "all" || x.status === st.status));
-      const kindsUsed = d.kinds.filter((k) => visible.some((x) => x.kind === k));
-      const approved = visible.filter((x) => x.status === "approved");
-
-      const copyApproved = approved.length
-        ? h("button", { class: "btn small primary", type: "button", title: "Copy every approved line, grouped by type, to paste into Ads Manager", onclick: async () => {
-            const groups = d.kinds.map((k) => [k, approved.filter((x) => x.kind === k)]).filter(([, l]) => l.length);
-            const out = groups.map(([k, l]) => `${(COPY_KIND_LABEL[k] || k).toUpperCase()}\n${l.map((x) => x.text).join("\n\n")}`).join("\n\n\n");
-            try { await navigator.clipboard.writeText(out); toast(`Copied ${approved.length} approved line${approved.length === 1 ? "" : "s"}.`); }
-            catch { toast("Your browser blocked copying. Long-press a line to copy it instead."); }
-          } }, `Copy all approved (${approved.length})`)
-        : null;
-      const toolbar = h("div", { class: "toolbar" },
-        h("div", { class: "seg" },
-          [["all", "All"], ...kindsUsed.map((k) => [k, COPY_KIND_LABEL[k] || k])].map(([k, l]) =>
-            h("button", { class: "seg-btn" + (st.kind === k ? " active" : ""), onclick: () => { st.kind = k; render(); } }, `${l} ${visible.filter((x) => k === "all" || x.kind === k).length}`))),
-        h("div", { class: "toolbar-right" },
-          h("select", { class: "mini-select", "aria-label": "Status", onchange: (e) => { st.status = e.target.value; render(); } },
-            [["all", "Any status"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"]].map(([v, l]) => h("option", { value: v, selected: st.status === v }, l))),
-          hiddenCount ? h("button", { class: "btn small" + (st.hidden ? " on-warn" : ""), type: "button", onclick: () => { st.hidden = !st.hidden; render(); } }, st.hidden ? "← Back" : `🗑 Trash (${hiddenCount})`) : null,
-          st.hidden ? null : copyApproved,
-        ),
-      );
-
-      const card = (x) => {
-        const open = st.open.has(x.id);
+  // One line of ad copy with Approve / Request changes / comments / Hide, used on the ad page
+  // (under the preview) and on the All ad copy page. ctx: { campaigns, open (Set of ids that
+  // show their comments), call(method, url, body) -> refreshes, rerender(), showAd }.
+  function copyCard(slug, x, ctx) {
+        const { open: openSet, call } = ctx;
+        const base = `/api/c/${enc(slug)}/copy`;
+        const open = openSet.has(x.id);
         const openCount = x.comments.filter((m) => !m.resolved && !m.mine).length;
         const box = h("textarea", { placeholder: "What should change? Or say what you like about it.", maxlength: "4000", rows: 2 });
         const post = h("button", { class: "btn small primary", type: "button", onclick: async () => {
@@ -1790,8 +1822,8 @@
                     h("div", { class: "comment-head" }, h("span", { class: "mono", style: "color:var(--bone)" }, who(m.email)), h("span", { class: "mono muted" }, fmtDate(m.created_at))),
                     h("div", { class: "comment-body" }, m.body),
                     (m.mine || state.me.admin) ? h("div", { class: "comment-tools" },
-                      state.me.admin ? h("button", { class: "linkish", onclick: async () => { try { await api("POST", `/api/c/${enc(slug)}/comments/${m.id}/resolve`); refresh(await api("GET", base)); } catch (err) { toast(err.message); } } }, m.resolved ? "Reopen" : "Mark done") : null,
-                      h("button", { class: "linkish", onclick: async () => { if (!confirm("Delete this comment?")) return; try { await api("DELETE", `/api/c/${enc(slug)}/comments/${m.id}`); refresh(await api("GET", base)); } catch (err) { toast(err.message); } } }, "Delete")) : null))
+                      state.me.admin ? h("button", { class: "linkish", onclick: async () => { try { await api("POST", `/api/c/${enc(slug)}/comments/${m.id}/resolve`); await call("GET", base); } catch (err) { toast(err.message); } } }, m.resolved ? "Reopen" : "Mark done") : null,
+                      h("button", { class: "linkish", onclick: async () => { if (!confirm("Delete this comment?")) return; try { await api("DELETE", `/api/c/${enc(slug)}/comments/${m.id}`); await call("GET", base); } catch (err) { toast(err.message); } } }, "Delete")) : null))
                 : h("p", { class: "muted", style: "margin:0" }, "No comments yet."),
               x.history.length ? h("div", { class: "copy-history" }, h("div", { class: "mono muted" }, "EARLIER WORDINGS"), x.history.slice().reverse().map((hh) => h("div", { class: "copy-old" }, `v${hh.version}: ${hh.text}`))) : null,
               h("div", { class: "composer" }, box, h("div", { class: "composer-row" }, h("span"), post)))
@@ -1813,10 +1845,21 @@
             editBtn,
           ),
           h("div", { class: "copy-text" }, x.text),
+          ctx.showAd && x.adPath ? h("a", { class: "mono copy-for", href: `#/c/${enc(slug)}/i/${enc(x.adPath)}` }, `FOR ${baseName(x.adPath).replace(/\.[a-z0-9]{2,4}$/i, "")} →`) : null,
           x.note ? h("div", { class: "muted copy-note" }, x.note) : null,
-          d.campaigns.length && !x.hidden
+          ctx.campaigns.length && !x.hidden && ctx.compact
             ? h("div", { class: "filters", style: "margin-top:12px" },
-                d.campaigns.map((cp) => {
+                ctx.campaigns.filter((cp) => x.campaigns.includes(cp.id)).map((cp) =>
+                  h("button", { class: "chip small-chip active", type: "button", title: "In this campaign. Tap to take it out.",
+                    onclick: () => call("POST", `${base}/${x.id}/campaign`, { campaign: cp.id, on: false }) }, `✓ ${cp.name}`)),
+                ctx.campaigns.some((cp) => !x.campaigns.includes(cp.id))
+                  ? h("select", { class: "mini-select", "aria-label": "Use in a campaign", onchange: (e) => e.target.value && call("POST", `${base}/${x.id}/campaign`, { campaign: Number(e.target.value), on: true }) },
+                      h("option", { value: "" }, "+ Use in campaign"),
+                      ctx.campaigns.filter((cp) => !x.campaigns.includes(cp.id)).map((cp) => h("option", { value: cp.id }, cp.name)))
+                  : null)
+            : ctx.campaigns.length && !x.hidden
+            ? h("div", { class: "filters", style: "margin-top:12px" },
+                ctx.campaigns.map((cp) => {
                   const on = x.campaigns.includes(cp.id);
                   return h("button", { class: "chip small-chip" + (on ? " active" : ""), type: "button", title: on ? "In this campaign. Tap to take it out." : "Use in this campaign",
                     onclick: () => call("POST", `${base}/${x.id}/campaign`, { campaign: cp.id, on: !on }) }, `${on ? "✓ " : "+ "}${cp.name}`);
@@ -1827,23 +1870,145 @@
               ? [h("button", { class: "btn small", type: "button", onclick: () => call("POST", `${base}/${x.id}/hide`, { hidden: false }) }, "Restore"),
                  state.me.admin ? h("button", { class: "btn small danger", type: "button", onclick: () => confirm("Delete this copy for good? Its comments go too.") && call("POST", `${base}/${x.id}/delete`) }, "Delete") : null]
               : [h("button", { class: "btn small" + (x.status === "approved" ? " on-ok" : ""), type: "button", onclick: () => call("POST", `${base}/${x.id}/status`, { status: x.status === "approved" ? "pending" : "approved" }) }, x.status === "approved" ? "✓ Approved" : "Approve"),
-                 h("button", { class: "btn small" + (x.status === "changes" ? " on-warn" : ""), type: "button", onclick: () => { call("POST", `${base}/${x.id}/status`, { status: x.status === "changes" ? "pending" : "changes" }); if (x.status !== "changes") st.open.add(x.id); } }, x.status === "changes" ? "Changes requested" : "Request changes"),
-                 h("button", { class: "btn small", type: "button", onclick: () => { open ? st.open.delete(x.id) : st.open.add(x.id); render(); } }, `💬 ${x.comments.length}${openCount && state.me.admin ? ` · ${openCount} open` : ""}`),
+                 h("button", { class: "btn small" + (x.status === "changes" ? " on-warn" : ""), type: "button", onclick: () => { call("POST", `${base}/${x.id}/status`, { status: x.status === "changes" ? "pending" : "changes" }); if (x.status !== "changes") openSet.add(x.id); } }, x.status === "changes" ? "Changes requested" : "Request changes"),
+                 h("button", { class: "btn small", type: "button", onclick: () => { open ? openSet.delete(x.id) : openSet.add(x.id); ctx.rerender(); } }, `💬 ${x.comments.length}${openCount && state.me.admin ? ` · ${openCount} open` : ""}`),
                  h("span", { style: "flex:1" }),
                  h("button", { class: "linkish hide-link", type: "button", onclick: () => call("POST", `${base}/${x.id}/hide`, { hidden: true }).then((ok) => ok && toast("Moved to the trash. Tap Trash to get it back.")) }, "🗑 Move to trash")],
           ),
           x.statusBy && x.status !== "pending" ? h("div", { class: "status-note muted" }, `${STATUS_LABEL[x.status]} by ${who(x.statusBy)}, ${fmtDate(x.statusAt)}`) : null,
           thread,
         );
-      };
+      }
+
+  async function viewCopy(slug, keep) {
+    if (!keep) show(h("p", { class: "muted" }, "Loading…"));
+    let d, finals;
+    try {
+      [d, finals] = await Promise.all([
+        api("GET", `/api/c/${enc(slug)}/copy`),
+        loadFinalAds(slug).catch((err) => ({ error: err.message })),
+      ]);
+    } catch (err) { show(errorCard(err)); return; }
+    const st = viewCopy.state[slug] || (viewCopy.state[slug] = { kind: "all", status: "all", hidden: false, open: new Set(), addingFor: null });
+    // Copy shows under the final ad it belongs to: matched by folder and ad name, or by ad
+    // name alone (a copy file saved next to the video ad also covers its final screenshots).
+    let shownUnder = new Set();
+    const ORDER = COPY_ORDER;
+    function copyFor(ad, dir) {
+      const k = dir + "|" + adName(ad.name + ".x").base;
+      const live = d.items.filter((x) => x.adPath && !x.hidden && !shownUnder.has(x.id));
+      let mine = live.filter((x) => copyKey(x.adPath) === k);
+      if (!mine.length) mine = live.filter((x) => copyKey(x.adPath).split("|").pop() === k.split("|").pop());
+      mine.sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || a.id - b.id).forEach((x) => shownUnder.add(x.id));
+      const adding = state.me.admin && st.addingFor === k;
+      if (!mine.length && !state.me.admin) return null;
+      let adderBox = null;
+      if (adding) {
+        const kindSel = h("select", { class: "mini-select" }, d.kinds.map((kk) => h("option", { value: kk }, COPY_KIND_LABEL[kk] || kk)));
+        const text = h("textarea", { class: "copy-input", rows: 3, maxlength: "3000", placeholder: "Type the copy. Several options? One per line and tick the box." });
+        const lines = h("input", { type: "checkbox" });
+        const add = h("button", { class: "btn small primary", type: "button", onclick: async () => {
+          if (!text.value.trim()) return text.focus();
+          add.disabled = true;
+          st.addingFor = null;
+          if (await call("POST", base, { kind: kindSel.value, text: text.value, lines: lines.checked, adPath: `${dir}/${ad.name}` })) toast("Added under this ad.");
+          else { st.addingFor = k; add.disabled = false; }
+        } }, "Add");
+        adderBox = h("div", { class: "card pad copy-adder" },
+          h("div", { class: "copy-row" }, kindSel, h("span", { class: "muted", style: "font-size:13px" }, `For ${ad.name}`)),
+          text,
+          h("label", { class: "check", style: "margin:8px 0" }, lines, "Each line is its own option"),
+          h("div", { class: "copy-row" }, add, h("button", { class: "btn small", type: "button", onclick: () => { st.addingFor = null; repaint(); } }, "Cancel")));
+      }
+      const ok = mine.filter((x) => x.status === "approved").length;
+      return h("div", { class: "ad-copy final-copy" },
+        h("div", { class: "ad-copy-head" },
+          h("h2", {}, "Ad copy"),
+          h("span", { class: "muted", style: "font-size:13px" }, mine.length ? `${mine.length} line${mine.length === 1 ? "" : "s"}, ${ok} approved` : "None yet"),
+          h("span", { style: "flex:1" }),
+          state.me.admin && !adding ? h("button", { class: "btn small", type: "button", onclick: () => { st.addingFor = k; repaint(); } }, "+ Add copy") : null),
+        adderBox,
+        mine.length ? h("div", { class: "copy-list" }, mine.map((x) => copyCard(slug, x, { campaigns: d.campaigns, open: st.open, call, rerender: repaint, compact: true }))) : null);
+    }
+    const finalBox = h("div");
+    const paintFinal = () => {
+      shownUnder = new Set();
+      fill(finalBox, finals && finals.error
+        ? h("div", { class: "card empty muted" }, `Could not load the final ads: ${finals.error}`)
+        : finalAdsSection(slug, finals, async () => { try { finals = await loadFinalAds(slug); } catch (err) { finals = { error: err.message }; } repaint(); }, copyFor));
+    };
+    const repaint = () => { paintFinal(); render(); };
+    const campName = new Map(d.campaigns.map((c) => [c.id, c.name]));
+    const refresh = (data) => { d = data; repaint(); };
+    const call = async (method, url, body) => { try { refresh(await api(method, url, body)); return true; } catch (err) { toast(err.message); return false; } };
+    const base = `/api/c/${enc(slug)}/copy`;
+
+    // Admin: add copy. One line, or many options at once ("each line is its own option").
+    let adder = null;
+    if (state.me.admin) {
+      const kindSel = h("select", { class: "mini-select" }, d.kinds.map((k) => h("option", { value: k }, COPY_KIND_LABEL[k] || k)));
+      const text = h("textarea", { class: "copy-input", rows: 3, maxlength: "3000", placeholder: "Type the copy. To offer several options, put each on its own line and tick the box below." });
+      const lines = h("input", { type: "checkbox" });
+      const note = h("input", { class: "menu-input", maxlength: "1000", placeholder: "Note for the client (optional), e.g. for the golf ads" });
+      const campBoxes = d.campaigns.map((cp) => ({ cp, box: h("input", { type: "checkbox" }) }));
+      const add = h("button", { class: "btn small primary", type: "button", onclick: async () => {
+        if (!text.value.trim()) return text.focus();
+        add.disabled = true;
+        const ok = await call("POST", base, { kind: kindSel.value, text: text.value, lines: lines.checked, note: note.value, campaigns: campBoxes.filter((x) => x.box.checked).map((x) => x.cp.id) });
+        add.disabled = false;
+        if (ok) { text.value = ""; note.value = ""; toast("Added. The client can review it now."); }
+      } }, "Add copy");
+      adder = h("div", { class: "card pad copy-adder" },
+        h("h2", { style: "margin:0 0 12px" }, "Add copy not tied to one ad"),
+        h("div", { class: "copy-row" }, kindSel, h("span", { class: "muted", style: "font-size:13px" }, "Tagline, headline, primary text, call to action or caption")),
+        text,
+        h("label", { class: "check", style: "margin:8px 0" }, lines, "Each line is its own option (she can approve them one by one)"),
+        note,
+        campBoxes.length ? h("div", { class: "copy-row", style: "flex-wrap:wrap;margin-top:10px" }, h("span", { class: "mono muted" }, "CAMPAIGNS"), campBoxes.map((x) => h("label", { class: "check" }, x.box, x.cp.name))) : null,
+        h("div", { style: "margin-top:12px" }, add),
+      );
+    }
+
+    const listHolder = h("div");
+    function render() {
+      const hiddenCount = d.items.filter((x) => x.hidden).length;
+      if (st.hidden && !hiddenCount) st.hidden = false;
+      // Copy already shown under a final ad above is not listed again here.
+      const visible = d.items.filter((x) => x.hidden === st.hidden && (st.hidden || !shownUnder.has(x.id)));
+      const shown = visible.filter((x) => (st.kind === "all" || x.kind === st.kind) && (st.status === "all" || x.status === st.status));
+      const kindsUsed = d.kinds.filter((k) => visible.some((x) => x.kind === k));
+      const approved = d.items.filter((x) => !x.hidden && x.status === "approved");
+
+      const copyApproved = approved.length
+        ? h("button", { class: "btn small primary", type: "button", title: "Copy every approved line, grouped by type, to paste into Ads Manager", onclick: async () => {
+            const groups = d.kinds.map((k) => [k, approved.filter((x) => x.kind === k)]).filter(([, l]) => l.length);
+            const out = groups.map(([k, l]) => `${(COPY_KIND_LABEL[k] || k).toUpperCase()}\n${l.map((x) => x.text).join("\n\n")}`).join("\n\n\n");
+            try { await navigator.clipboard.writeText(out); toast(`Copied ${approved.length} approved line${approved.length === 1 ? "" : "s"}.`); }
+            catch { toast("Your browser blocked copying. Long-press a line to copy it instead."); }
+          } }, `Copy all approved (${approved.length})`)
+        : null;
+      const toolbar = h("div", { class: "toolbar" },
+        h("div", { class: "seg" },
+          [["all", "All"], ...kindsUsed.map((k) => [k, COPY_KIND_LABEL[k] || k])].map(([k, l]) =>
+            h("button", { class: "seg-btn" + (st.kind === k ? " active" : ""), onclick: () => { st.kind = k; render(); } }, `${l} ${visible.filter((x) => k === "all" || x.kind === k).length}`))),
+        h("div", { class: "toolbar-right" },
+          h("select", { class: "mini-select", "aria-label": "Status", onchange: (e) => { st.status = e.target.value; render(); } },
+            [["all", "Any status"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"]].map(([v, l]) => h("option", { value: v, selected: st.status === v }, l))),
+          hiddenCount ? h("button", { class: "btn small" + (st.hidden ? " on-warn" : ""), type: "button", onclick: () => { st.hidden = !st.hidden; render(); } }, st.hidden ? "← Back" : `🗑 Trash (${hiddenCount})`) : null,
+          st.hidden ? null : copyApproved,
+        ),
+      );
+
+      const card = (x) => copyCard(slug, x, { campaigns: d.campaigns, open: st.open, call, rerender: repaint, showAd: true, compact: true });
 
       const body = shown.length
         ? h("div", { class: "copy-list" }, shown.map(card))
-        : h("div", { class: "card empty muted" }, d.items.length ? "Nothing matches these filters." : state.me.admin ? "No copy yet. Add taglines, headlines or ad text above and the client can approve them here." : "No ad copy to review yet.");
+        : h("div", { class: "card empty muted" }, shownUnder.size && !visible.length ? "All the copy is shown under its ad above." : d.items.length ? "Nothing matches these filters." : state.me.admin ? "No copy yet. Add taglines, headlines or ad text above and the client can approve them here." : "No ad copy to review yet.");
       fill(listHolder, toolbar,
         st.hidden ? h("div", { class: "card hidden-note" }, h("div", {}, h("strong", {}, "Copy in the trash. "), "Only shown here. Restore to bring a line back.")) : null,
         body);
     }
+    paintFinal();
     render();
     show(
       crumbs(d.client, "", "Ad review"),
@@ -1851,8 +2016,10 @@
       h("div", { class: "page-head" }, h("h1", {}, "Ad review"),
         h("p", { class: "muted", style: "margin:6px 0 0;max-width:640px" }, state.me.admin ? "The final look of each ad, plus the wording, for the client to approve." : "Check how each ad will look, and the wording. Approve what you like, or ask for changes.")),
       finalBox,
-      h("div", { class: "section-head", style: "margin-top:36px" }, h("div", {}, h("h2", {}, "Ad copy"),
-        h("p", { class: "muted", style: "margin:4px 0 0;max-width:640px" }, state.me.admin ? "Taglines, headlines and ad text for the client to approve." : "Approve the wording you like, ask for changes, or hide what you don't want."))),
+      h("div", { class: "section-head", style: "margin-top:36px" }, h("div", {}, h("h2", {}, shownUnder.size ? "Other ad copy" : "Ad copy"),
+        h("p", { class: "muted", style: "margin:4px 0 0;max-width:640px" }, shownUnder.size
+          ? "Wording that is not tied to one of the ads above. Copy for an ad shows right under it."
+          : state.me.admin ? "Taglines, headlines and ad text for the client to approve. Copy saved for an ad shows under that ad." : "Approve the wording you like, ask for changes, or move what you don't want to the trash."))),
       adder,
       listHolder,
     );
@@ -2000,7 +2167,7 @@
         h("div", { class: "section-label mono muted" }, `AD COPY · ${mine.length}`),
         mine.length
           ? h("div", { class: "copy-list" },
-              mine.map((x) => h("a", { class: "card copy-card" + (x.status === "approved" ? " is-approved" : x.status === "changes" ? " is-changes" : ""), href: `#/c/${enc(slug)}/copy`, style: "display:block;color:inherit" },
+              mine.map((x) => h("a", { class: "card copy-card" + (x.status === "approved" ? " is-approved" : x.status === "changes" ? " is-changes" : ""), href: x.adPath ? `#/c/${enc(slug)}/i/${enc(x.adPath)}` : `#/c/${enc(slug)}/copy`, style: "display:block;color:inherit" },
                 h("div", { class: "copy-head" }, h("span", { class: "tag" }, COPY_KIND_LABEL[x.kind] || x.kind), h("span", { class: `pill ${x.status}` }, STATUS_LABEL[x.status])),
                 h("div", { class: "copy-text" }, x.text))),
               approved.length

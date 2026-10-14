@@ -15,7 +15,8 @@ portal or upload anything.
   what you saw. Do not fix it yourself.
 - Never enter payment details or approve a charge.
 - On the Synology: only add new files inside the client's `Final ads` folder. Do not
-  rename, move or delete anything, and never overwrite an existing file.
+  rename, move or delete anything, and never overwrite an existing file (the one exception
+  is updating an ad's `.copy.txt` text file, see 3b).
 
 ## 1. Find the ad preview
 
@@ -61,6 +62,35 @@ Save each screenshot here (the Synology share is mounted on the Mac at /Volumes/
 
 Optional: to group a batch, put it in one subfolder, for example
 `Final ads/Fall golf/Cart Bag - Facebook Feed.png`. Only one level of subfolders.
+
+## 3b. Save the ad's text next to the screenshots
+
+The client approves the wording too, and the portal shows it right under the screenshots.
+For each ad, copy the text exactly as it appears in the ad (do not change anything) into a
+plain text file in the same folder, named after the ad with no placement:
+
+```
+/Volumes/GenvydClients/<client folder>/Final ads/<Ad name>.copy.txt
+```
+
+For example `Golf Polo.copy.txt` next to `Golf Polo - Instagram Feed.png`. One line per piece,
+starting with its label:
+
+```
+Headline: Polo that plays all 18
+Primary text: Breathable, stretchy, made for the course.
+Second paragraph of the primary text can go on the next lines.
+CTA: Shop now
+```
+
+Labels: `Headline:`, `Primary text:`, `Tagline:`, `CTA:`, `Caption:`. Lines without a label
+belong to the line above. If the ad has several text options (Meta lets an ad have up to 5
+headlines and 5 primary texts), give each its own labelled line. The portal reads the file on
+its own within about 15 minutes, or as soon as anyone opens Ad review.
+
+When the ad is revised (v2), update the same `.copy.txt` file instead of making a new one. This
+is the one file you may change: the portal keeps approved lines and sends changed lines back
+to the client for approval.
 
 ## 4. After the client asks for changes
 
