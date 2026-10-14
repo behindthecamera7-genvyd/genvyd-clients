@@ -1,0 +1,80 @@
+# Final ad screenshots (brief for Muse)
+
+Anthony's clients review finished ads on clients.genvyd.com, on the **Ad review** tab.
+That page shows screenshots of each ad exactly as people will see it on Facebook and
+Instagram. Your job is to take those screenshots and save them in the right folder with
+the right names. The portal picks them up on its own. You do not need to log in to the
+portal or upload anything.
+
+## Ground rules
+
+- Look, do not change. In Meta Ads Manager, only open ads and their previews.
+- Never click Publish, Review and publish, Turn on, or anything that makes an ad go live.
+- Never change a budget, schedule, audience, payment method, ad text or creative. If the
+  ad looks wrong (typo, wrong image, cut-off text), screenshot it anyway and tell Anthony
+  what you saw. Do not fix it yourself.
+- Never enter payment details or approve a charge.
+- On the Synology: only add new files inside the client's `Final ads` folder. Do not
+  rename, move or delete anything, and never overwrite an existing file.
+
+## 1. Find the ad preview
+
+1. Open Meta Ads Manager in the browser on the Mac mini, in the client's ad account
+   (Anthony tells you which client and which ads).
+2. Open the ad (a draft or paused ad is fine) so the **Ad preview** panel shows on the right.
+3. Use the placement switcher in the preview panel to step through the placements below.
+   Skip any placement the ad does not run on.
+
+Placements, in this order:
+
+- Facebook Feed
+- Instagram Feed
+- Instagram Stories
+- Instagram Reels
+- Facebook Reels (only if the ad uses it)
+- Facebook Stories (only if the ad uses it)
+
+## 2. Take each screenshot
+
+- Capture only the phone preview, from the top of the frame to the bottom, with nothing
+  else around it (no side panels, menus or cursor). On macOS: Cmd + Shift + 4, then drag
+  around the preview. Save as PNG.
+- Make sure the whole ad is visible: headline, primary text (expand "See more" if the
+  preview offers it), image or first frame of the video, and the button.
+- For video ads, pause on a frame that shows the product clearly.
+
+## 3. Name and save
+
+Save each screenshot here (the Synology share is mounted on the Mac at /Volumes/GenvydClients):
+
+```
+/Volumes/GenvydClients/<client folder>/Final ads/<Ad name> - <Placement>.png
+```
+
+- `<client folder>` is the client's own folder in the GenvydClients share (for example
+  `WYCOGA`). Create `Final ads` inside it if it is not there yet. Spell it exactly
+  `Final ads`.
+- `<Ad name>` is the ad's name, the same for every placement of one ad, so they show
+  together. Keep it short and plain: `Golf Polo`, `Weekend Hoodie`.
+- `<Placement>` is one of the names in the list above, spelled the same way.
+- There is a space, a hyphen and a space between the two: `Golf Polo - Instagram Feed.png`.
+
+Optional: to group a batch, put it in one subfolder, for example
+`Final ads/Fall golf/Cart Bag - Facebook Feed.png`. Only one level of subfolders.
+
+## 4. After the client asks for changes
+
+When Anthony has fixed an ad and asks for new screenshots, do not replace the old ones.
+Add a version number after the ad name and save new files next to the old ones:
+
+```
+Golf Polo v2 - Instagram Feed.png
+Golf Polo v2 - Instagram Stories.png
+```
+
+The portal shows the newest version and sends it back to the client for approval.
+
+## 5. Report back
+
+Tell Anthony which ads and placements you saved and where, and anything that looked off
+in the previews. Never paste passwords, codes or account numbers into your report.

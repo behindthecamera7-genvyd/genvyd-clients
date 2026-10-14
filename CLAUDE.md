@@ -131,6 +131,20 @@ the dashboard, resolve and digest work (`itemHref()` / `itemLink()` send those t
 tab). Campaign pages list their copy with "Copy approved copy". "Copy all approved" puts
 every approved line on the clipboard grouped by type, for Ads Manager. It is in the Claude feed.
 
+## Ad review: final ads
+
+The Ad copy tab is labelled **Ad review** (route still `#/c/:slug/copy`). Above the copy it
+shows **Final ads**: screenshots of each finished ad as it will look on Facebook and
+Instagram, which Muse takes from Meta Ads Manager's preview (`synology/MUSE_FINAL_ADS.md`).
+They are plain files on the Synology in `<client folder>/Final ads/` (plus one level of
+subfolders, shown as sections, max 12), named `<Ad name> - <Placement>.png`, versions as
+`<Ad name> v2 - <Placement>.png`. `finalAdGroups()` in app.js groups by ad name, shows the
+newest version's placements side by side (swipe on phones), and Approve / Request changes
+post to the normal `/status` with `also`, so every placement shares one status and the
+dashboard, digest and Claude feed pick them up as ordinary files. Request changes opens
+the first placement's ad page for the comment. Admin gets Add screenshots (creates the
+folder if needed, uploads there) and Open folder. No D1 changes.
+
 ## Claude feed
 
 `writeFeed()` writes `_Claude feed/client-feedback.md` (and `.json`) on the Synology: per

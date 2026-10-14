@@ -447,3 +447,22 @@ label.check input { width: auto; }
 .cc-links a:hover { color: var(--bone); background: var(--surface-2); }
 .topnav a { white-space: nowrap; }
 .client-grid { align-items: start; }
+
+/* Ad review: final ads (screenshots of each placement, side by side) */
+.final-ads { margin-bottom: 8px; }
+.section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 8px 0 16px; }
+.section-head-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.final-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }
+.final-card, .final-ads { min-width: 0; max-width: 100%; }
+.final-card { padding: 18px 20px; border: 1px solid var(--line); }
+.final-card.is-approved { border-color: rgba(61, 220, 132, 0.45); }
+.final-card.is-changes { border-color: rgba(255, 176, 32, 0.5); }
+.final-name { font-size: 20px; }
+.final-row { display: flex; gap: 14px; overflow-x: auto; padding: 14px 2px 6px; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; }
+.final-shot { flex: 0 0 auto; width: 220px; scroll-snap-align: start; color: var(--ash); }
+.final-frame { height: 400px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.final-frame img { max-width: 100%; max-height: 100%; object-fit: contain; opacity: 0; transition: opacity .2s; }
+.final-frame img.loaded { opacity: 1; }
+.final-shot:hover .final-frame { border-color: var(--accent); }
+.final-place { font-size: 12px; margin-top: 8px; text-transform: uppercase; letter-spacing: .04em; }
+@media (max-width: 640px) { .final-card { padding: 16px; } .final-shot { width: 72vw; } .final-frame { height: 62vh; max-height: 520px; } }

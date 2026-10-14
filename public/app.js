@@ -89,7 +89,7 @@
       tab("projects", "Projects", `#/c/${enc(slug)}`),
       tab("favorites", "♥ Favorites", `#/c/${enc(slug)}/favorites`),
       tab("campaigns", "Campaigns", `#/c/${enc(slug)}/campaigns`),
-      tab("copy", "Ad copy", `#/c/${enc(slug)}/copy`),
+      tab("copy", "Ad review", `#/c/${enc(slug)}/copy`),
     );
   }
 
@@ -234,7 +234,7 @@
         h("div", { class: "cc-links" },
           h("a", { href: `#/c/${enc(c.slug)}` }, "Projects"),
           h("a", { href: `#/c/${enc(c.slug)}/campaigns` }, "Campaigns"),
-          h("a", { href: `#/c/${enc(c.slug)}/copy` }, "Ad copy"),
+          h("a", { href: `#/c/${enc(c.slug)}/copy` }, "Ad review"),
           h("a", { href: `#/c/${enc(c.slug)}/favorites` }, "Favorites")),
       );
     });
@@ -1502,6 +1502,139 @@
     );
   }
 
+  // ---- Final ads: screenshots of the finished ads as people will see them -------
+  // Muse saves them on the Synology in "<client folder>/Final ads/", optionally in one level
+  // of subfolders (a batch or campaign), named "<Ad name> - <Placement>.png", and
+  // "<Ad name> v2 - <Placement>.png" after changes. Each ad shows all its placements side by
+  // side; Approve and Request changes cover every placement of the newest version.
+  const FINAL_DIR = "Final ads";
+  const PLACE_ORDER = ["facebook feed", "instagram feed", "instagram stories", "facebook stories", "instagram reels", "facebook reels"];
+  function finalAdGroups(items) {
+    const groups = new Map();
+    for (const it of items) {
+      if (it.hidden || it.kind !== "image") continue;
+      const stem = stemOf(it.name);
+      const cut = stem.lastIndexOf(" - ");
+      let ad = cut > 0 ? stem.slice(0, cut) : stem;
+      const place = cut > 0 ? stem.slice(cut + 3).trim() : "Preview";
+      let ver = 1;
+      const v = ad.match(VER_RE);
+      if (v) { ver = Number(v[1]) || 1; ad = ad.replace(v[0], " "); }
+      ad = ad.replace(/\s{2,}/g, " ").replace(/[\s_\-.]+$/, "").trim() || stem;
+      const key = ad.toLowerCase();
+      if (!groups.has(key)) groups.set(key, { name: ad, all: [] });
+      groups.get(key).all.push({ it, place, ver });
+    }
+    const rank = (p) => { const i = PLACE_ORDER.indexOf(p.toLowerCase()); return i < 0 ? 99 : i; };
+    return [...groups.values()].map((g) => {
+      const latest = Math.max(...g.all.map((e) => e.ver));
+      const shots = g.all.filter((e) => e.ver === latest).sort((a, b) => rank(a.place) - rank(b.place) || a.place.localeCompare(b.place));
+      const st = new Set(shots.map((e) => e.it.status));
+      return {
+        name: g.name, ver: latest, versions: new Set(g.all.map((e) => e.ver)).size, shots,
+        status: st.size === 1 ? shots[0].it.status : st.has("changes") ? "changes" : "pending",
+        comments: shots.reduce((n, e) => n + (e.it.comments || 0), 0),
+        openComments: shots.reduce((n, e) => n + (e.it.openComments || 0), 0),
+        seen: shots.every((e) => e.it.seen !== false),
+        mtime: Math.max(...shots.map((e) => (e.it.mtime ? Date.parse(e.it.mtime) : 0))),
+      };
+    }).sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
+  }
+  // The "Final ads" folder plus up to 12 subfolders. null when there is no such folder yet.
+  async function loadFinalAds(slug) {
+    let root;
+    try { root = await api("GET", `/api/c/${enc(slug)}/list?dir=${enc(FINAL_DIR)}`); }
+    catch (err) { if (/not on the Synology/i.test(err.message)) return null; throw err; }
+    const subs = await Promise.all(root.folders.slice(0, 12).map((f) =>
+      api("GET", `/api/c/${enc(slug)}/list?dir=${enc(f.path)}`).then((d) => ({ title: f.name, dir: f.path, items: d.items })).catch(() => null)));
+    return [{ title: null, dir: FINAL_DIR, items: root.items }, ...subs.filter(Boolean)];
+  }
+  function finalAdsSection(slug, sections, reload) {
+    const wrap = h("div", { class: "final-ads" });
+    const all = (sections || []).map((s) => ({ ...s, ads: finalAdGroups(s.items) })).filter((s) => s.ads.length);
+    const count = all.reduce((n, s) => n + s.ads.length, 0);
+    const approvedN = all.reduce((n, s) => n + s.ads.filter((a) => a.status === "approved").length, 0);
+
+    let tools = null;
+    if (state.me.admin) {
+      const picker = h("input", { type: "file", multiple: true, accept: "image/*", hidden: true, onchange: async () => {
+        const files = [...picker.files]; picker.value = "";
+        if (!files.length) return;
+        try {
+          if (!sections) await api("POST", `/api/c/${enc(slug)}/folder`, { dir: "", name: FINAL_DIR });
+          for (let i = 0; i < files.length; i++) {
+            toast(`Uploading ${i + 1} of ${files.length}…`);
+            const r = await fetch(`/api/c/${enc(slug)}/upload?dir=${enc(FINAL_DIR)}&name=${enc(files[i].name)}`, { method: "POST", headers: { "content-type": files[i].type || "image/png" }, body: files[i] });
+            if (!r.ok) { let m = `Upload failed (${r.status}).`; try { m = (await r.json()).error || m; } catch {} throw new Error(m); }
+          }
+          toast(`${files.length} screenshot${files.length === 1 ? "" : "s"} added.`);
+          state.listCache.clear();
+          reload();
+        } catch (err) { toast(err.message); }
+      } });
+      tools = h("div", { class: "actions" }, picker,
+        sections ? h("a", { class: "btn small", href: `#/c/${enc(slug)}/f/${enc(FINAL_DIR)}` }, "Open folder") : null,
+        h("button", { class: "btn small primary", type: "button", onclick: () => picker.click() }, "Add screenshots"));
+    }
+
+    const head = h("div", { class: "section-head" },
+      h("div", {},
+        h("h2", {}, "Final ads"),
+        h("p", { class: "muted", style: "margin:4px 0 0;max-width:640px" },
+          state.me.admin
+            ? `How each ad will look once it runs. Muse saves screenshots in "${FINAL_DIR}" in the client's folder, named "Ad name - Placement.png".`
+            : "This is how each ad will look on Facebook and Instagram. Approve it, or ask for changes before it goes live.")),
+      h("div", { class: "section-head-right" }, count ? h("span", { class: "mono muted" }, `${approvedN} of ${count} approved`) : null, tools));
+
+    const card = (ad) => {
+      const first = ad.shots[0].it;
+      const paths = ad.shots.map((e) => e.it.path);
+      const also = paths.slice(1);
+      const setStatus = async (status) => {
+        try {
+          await api("POST", `/api/c/${enc(slug)}/status`, { path: first.path, status, also });
+          state.listCache.clear();
+          if (status === "changes") {
+            toast("Say what should change in a comment.");
+            location.hash = `#/c/${enc(slug)}/i/${enc(first.path)}`;
+            return;
+          }
+          toast(status === "approved" ? "Approved. Thank you!" : "Approval taken back.");
+          reload();
+        } catch (err) { toast(err.message); }
+      };
+      const shots = ad.shots.map((e) => {
+        const img = h("img", { "data-src": mediaUrl(slug, e.it.path), alt: `${ad.name}, ${e.place}`, loading: "lazy", onload: (ev) => ev.target.classList.add("loaded") });
+        lazy.observe(img);
+        return h("a", { class: "final-shot", href: `#/c/${enc(slug)}/i/${enc(e.it.path)}`, title: "Open full size, with comments" },
+          h("div", { class: "final-frame" }, img),
+          h("div", { class: "final-place mono" }, e.place, e.it.comments ? h("span", { class: "muted" }, ` · 💬 ${e.it.comments}`) : null));
+      });
+      return h("div", { class: "card final-card" + (ad.status === "approved" ? " is-approved" : ad.status === "changes" ? " is-changes" : "") },
+        h("div", { class: "copy-head" },
+          h("h3", { class: "final-name" }, ad.name),
+          ad.versions > 1 ? h("span", { class: "size-chip ver-chip" }, `v${ad.ver} · ${ad.versions} versions`) : null,
+          h("span", { class: `pill ${ad.status}` }, STATUS_LABEL[ad.status]),
+          ad.seen ? null : h("span", { class: "pill new" }, "NEW"),
+          h("span", { style: "flex:1" }),
+          h("span", { class: "mono muted" }, `${ad.shots.length} placement${ad.shots.length === 1 ? "" : "s"}`)),
+        h("div", { class: "final-row" }, shots),
+        h("div", { class: "copy-actions" },
+          h("button", { class: "btn small" + (ad.status === "approved" ? " on-ok" : ""), type: "button", onclick: () => setStatus(ad.status === "approved" ? "pending" : "approved") }, ad.status === "approved" ? "✓ Approved" : "Approve"),
+          h("button", { class: "btn small" + (ad.status === "changes" ? " on-warn" : ""), type: "button", onclick: () => setStatus(ad.status === "changes" ? "pending" : "changes") }, ad.status === "changes" ? "Changes requested" : "Request changes"),
+          h("a", { class: "btn small", href: `#/c/${enc(slug)}/i/${enc(first.path)}` }, `💬 ${ad.comments}${ad.openComments && state.me.admin ? ` · ${ad.openComments} open` : ""}`)),
+      );
+    };
+
+    const body = count
+      ? all.map((s) => [s.title ? h("div", { class: "section-label mono muted" }, `${s.title.toUpperCase()} · ${s.ads.length}`) : null, h("div", { class: "final-list" }, s.ads.map(card))])
+      : h("div", { class: "card empty muted" }, state.me.admin
+          ? (sections ? `No screenshots yet. Muse saves them in "${FINAL_DIR}", or tap Add screenshots.` : `No "${FINAL_DIR}" folder yet. Tap Add screenshots, or have Muse save them in the client's folder under "${FINAL_DIR}".`)
+          : "No final ads to review yet. They show up here when they are ready.");
+    fill(wrap, head, body);
+    return wrap;
+  }
+
   // ---- Ad copy: taglines, headlines, primary text, CTAs for approval -----------
   const COPY_KIND_LABEL = { tagline: "Tagline", headline: "Headline", primary: "Primary text", cta: "Call to action", caption: "Caption", other: "Other" };
   const COPY_KIND_HINT = {
@@ -1510,8 +1643,18 @@
   };
   async function viewCopy(slug, keep) {
     if (!keep) show(h("p", { class: "muted" }, "Loading…"));
-    let d;
-    try { d = await api("GET", `/api/c/${enc(slug)}/copy`); } catch (err) { show(errorCard(err)); return; }
+    let d, finals;
+    try {
+      [d, finals] = await Promise.all([
+        api("GET", `/api/c/${enc(slug)}/copy`),
+        loadFinalAds(slug).catch((err) => ({ error: err.message })),
+      ]);
+    } catch (err) { show(errorCard(err)); return; }
+    const finalBox = h("div");
+    const paintFinal = () => fill(finalBox, finals && finals.error
+      ? h("div", { class: "card empty muted" }, `Could not load the final ads: ${finals.error}`)
+      : finalAdsSection(slug, finals, async () => { try { finals = await loadFinalAds(slug); } catch (err) { finals = { error: err.message }; } paintFinal(); }));
+    paintFinal();
     const st = viewCopy.state[slug] || (viewCopy.state[slug] = { kind: "all", status: "all", hidden: false, open: new Set() });
     const campName = new Map(d.campaigns.map((c) => [c.id, c.name]));
     const refresh = (data) => { d = data; render(); };
@@ -1645,10 +1788,13 @@
     }
     render();
     show(
-      crumbs(d.client, "", "Ad copy"),
+      crumbs(d.client, "", "Ad review"),
       clientTabs(slug, "copy"),
-      h("div", { class: "page-head" }, h("h1", {}, "Ad copy"),
-        h("p", { class: "muted", style: "margin:6px 0 0;max-width:640px" }, state.me.admin ? "Taglines, headlines and ad text for the client to approve." : "Approve the wording you like, ask for changes, or hide what you don't want.")),
+      h("div", { class: "page-head" }, h("h1", {}, "Ad review"),
+        h("p", { class: "muted", style: "margin:6px 0 0;max-width:640px" }, state.me.admin ? "The final look of each ad, plus the wording, for the client to approve." : "Check how each ad will look, and the wording. Approve what you like, or ask for changes.")),
+      finalBox,
+      h("div", { class: "section-head", style: "margin-top:36px" }, h("div", {}, h("h2", {}, "Ad copy"),
+        h("p", { class: "muted", style: "margin:4px 0 0;max-width:640px" }, state.me.admin ? "Taglines, headlines and ad text for the client to approve." : "Approve the wording you like, ask for changes, or hide what you don't want."))),
       adder,
       listHolder,
     );
@@ -1805,7 +1951,7 @@
                     try { await navigator.clipboard.writeText(out); toast(`Copied ${approved.length} approved line${approved.length === 1 ? "" : "s"}.`); } catch { toast("Your browser blocked copying."); }
                   } }, `Copy approved copy (${approved.length})`))
                 : null)
-          : h("div", { class: "card empty muted" }, "No copy in this campaign yet. On the Ad copy tab, tap this campaign's name under a line to add it."),
+          : h("div", { class: "card empty muted" }, "No copy in this campaign yet. On the Ad review tab, tap this campaign's name under a line to add it."),
       );
     }).catch(() => {});
   }
@@ -2100,7 +2246,7 @@
     const name = ((state.me && state.me.clients) || []).find((c) => c.slug === slug)?.name || "projects";
     if (parts[2] === "f" && parts[3]) return baseName(decodeURIComponent(parts.slice(3).join("/")));
     if (parts[2] === "favorites") return "Favorites";
-    if (parts[2] === "copy") return "Ad copy";
+    if (parts[2] === "copy") return "Ad review";
     if (parts[2] === "campaigns") return "Campaigns";
     if (parts[2] === "campaign") return "the campaign";
     return name;
