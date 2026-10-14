@@ -82,6 +82,33 @@
   const itemLabel = (p, detail) => (String(p).startsWith("copy:") ? `ad copy${detail ? ` "${String(detail).slice(0, 60)}"` : ""}` : baseName(p));
   const baseName = (p) => p.split("/").pop();
 
+  // Comment text with web links made clickable. A link to an ad in this portal shows the ad's
+  // name ("wycoga_golf_ad_4x5 v2.png") instead of the long address and opens in place.
+  function linkify(text) {
+    const out = [];
+    const re = /https?:\/\/[^\s<>"]+/g;
+    let last = 0, m;
+    while ((m = re.exec(String(text)))) {
+      let url = m[0].replace(/[.,;:!?)\]]+$/, "");
+      if (m.index > last) out.push(String(text).slice(last, m.index));
+      let label = url, inPortal = false;
+      try {
+        const u = new URL(url);
+        if (u.origin === location.origin) {
+          inPortal = true;
+          const parts = u.hash.replace(/^#\/?/, "").split("/");
+          if (parts[0] === "c" && parts[2] === "i" && parts[3]) label = "▸ " + baseName(decodeURIComponent(parts.slice(3).join("/")));
+          else label = "▸ Open in the portal";
+        }
+      } catch { /* not a URL after all */ }
+      out.push(h("a", inPortal ? { class: "comment-link", href: url.includes("#") ? url.slice(url.indexOf("#")) : "#/" } : { class: "comment-link", href: url, target: "_blank", rel: "noopener noreferrer" }, label));
+      last = m.index + url.length;
+      re.lastIndex = last;
+    }
+    if (last < String(text).length) out.push(String(text).slice(last));
+    return out;
+  }
+
   function errorCard(err) {
     return h("div", { class: "card error" }, err.message || String(err));
   }
@@ -187,8 +214,8 @@
           h("span", { style: "color:var(--bone)" }, cm.email), " on ",
           h("a", { href: itemHref(cm.client_slug, cm.path) }, itemLabel(cm.path)),
         ),
-        h("div", { class: "detail" }, cm.timecode != null ? h("span", { class: "tc" }, fmtTime(cm.timecode)) : null, cm.body),
-        (cm.replies || []).map((r) => h("div", { class: "detail dash-reply" }, h("span", { class: "mono muted" }, `↳ ${who(r.email)}, ${fmtDate(r.created_at)}: `), r.body)),
+        h("div", { class: "detail" }, cm.timecode != null ? h("span", { class: "tc" }, fmtTime(cm.timecode)) : null, ...linkify(cm.body)),
+        (cm.replies || []).map((r) => h("div", { class: "detail dash-reply" }, h("span", { class: "mono muted" }, `↳ ${who(r.email)}, ${fmtDate(r.created_at)}: `), ...linkify(r.body))),
         replyHolder,
         h("div", { class: "comment-tools" },
           String(cm.path).startsWith("copy:") ? null : h("button", { class: "btn small", type: "button", onclick: () => {
@@ -1770,7 +1797,7 @@
             !isReply && c.timecode != null && video
               ? h("button", { class: "tc", onclick: () => { video.currentTime = c.timecode; video.play(); } }, fmtTime(c.timecode))
               : !isReply && c.timecode != null ? h("span", { class: "tc" }, fmtTime(c.timecode)) : null,
-            c.body,
+            ...linkify(c.body),
           ),
           (c.mine || state.me.admin)
             ? h("div", { class: "comment-tools" },
@@ -2068,7 +2095,7 @@
               x.comments.length
                 ? x.comments.map((m) => h("div", { class: "comment" + (m.resolved ? " resolved" : "") },
                     h("div", { class: "comment-head" }, h("span", { class: "mono", style: "color:var(--bone)" }, who(m.email)), h("span", { class: "mono muted" }, fmtDate(m.created_at))),
-                    h("div", { class: "comment-body" }, m.body),
+                    h("div", { class: "comment-body" }, ...linkify(m.body)),
                     (m.mine || state.me.admin) ? h("div", { class: "comment-tools" },
                       state.me.admin ? h("button", { class: "linkish", onclick: async () => { try { await api("POST", `/api/c/${enc(slug)}/comments/${m.id}/resolve`); await call("GET", base); } catch (err) { toast(err.message); } } }, m.resolved ? "Reopen" : "Mark done") : null,
                       h("button", { class: "linkish", onclick: async () => { if (!confirm("Delete this comment?")) return; try { await api("DELETE", `/api/c/${enc(slug)}/comments/${m.id}`); await call("GET", base); } catch (err) { toast(err.message); } } }, "Delete")) : null))

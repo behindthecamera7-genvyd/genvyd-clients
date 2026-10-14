@@ -533,3 +533,7 @@ label.check input { width: auto; }
 .reply-composer { margin: 8px 0 4px 22px; display: grid; gap: 8px; }
 .reply-box { width: 100%; box-sizing: border-box; border-radius: 12px; border: 1px solid var(--line); background: var(--void); color: var(--bone); padding: 10px 12px; font: 14px/1.45 var(--sans); resize: vertical; }
 .dash-reply { margin-left: 14px; border-left: 2px solid var(--line); padding-left: 10px; }
+
+/* Links in comments: portal links show the ad name */
+.comment-link { color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; word-break: break-word; }
+.comment-link:hover { color: var(--bone); }
