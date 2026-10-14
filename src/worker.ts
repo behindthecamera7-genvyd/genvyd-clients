@@ -448,7 +448,7 @@ async function buildFeed(env: Env) {
   const weekAgo = now() - 7 * 86400 * 1000;
   const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR] = await env.DB.batch([
     env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
-    env.DB.prepare("SELECT client_slug, path, status, updated_by, updated_at FROM item_status WHERE status IN ('approved','changes') ORDER BY updated_at DESC"),
+    env.DB.prepare("SELECT client_slug, path, status, updated_by, updated_at FROM item_status WHERE status IN ('approved','changes','rejected') ORDER BY updated_at DESC"),
     env.DB.prepare("SELECT id, client_slug, path, email, body, timecode, resolved, created_at FROM comments ORDER BY created_at"),
     env.DB.prepare("SELECT c.id, c.client_slug, c.name, c.notes, i.path FROM campaigns c LEFT JOIN campaign_items i ON i.campaign_id = c.id ORDER BY c.created_at DESC, i.added_at"),
     env.DB.prepare("SELECT client_slug, path, hidden_by, hidden_at FROM hidden ORDER BY hidden_at DESC"),
@@ -493,8 +493,10 @@ async function buildFeed(env: Env) {
         campsByPath.set(r.path, [...(campsByPath.get(r.path) ?? []), r.name]);
       }
     }
+    const saidNo = mine.filter((r) => r.status === "rejected").map((r) => ({ ...fileInfo(r.path), by: r.updated_by, at: azTime(r.updated_at), comments: commentsOn(r.path) }));
+    const noPaths = new Set(saidNo.map((x) => x.path));
     const approved = mine.filter((r) => r.status === "approved").map((r) => ({ ...fileInfo(r.path), approved_by: r.updated_by, at: azTime(r.updated_at), campaigns: campsByPath.get(r.path) ?? [], comments: commentsOn(r.path) }));
-    const openElsewhere = [...new Set(comments.filter((m) => m.client_slug === c.slug && !m.resolved && !isAdmin(m.email) && !String(m.path).startsWith("copy:") && !changePaths.has(m.path) && !hiddenSet.has(key(m.path))).map((m) => m.path))]
+    const openElsewhere = [...new Set(comments.filter((m) => m.client_slug === c.slug && !m.resolved && !isAdmin(m.email) && !String(m.path).startsWith("copy:") && !changePaths.has(m.path) && !noPaths.has(m.path) && !hiddenSet.has(key(m.path))).map((m) => m.path))]
       .map((p) => ({ ...fileInfo(p), comments: commentsOn(p) }));
     const hid = hidden.filter((r) => r.client_slug === c.slug).map((r) => ({ ...fileInfo(r.path), hidden_by: r.hidden_by, at: azTime(r.hidden_at) }));
     const recent = acts.filter((a) => a.client_slug === c.slug).slice(0, 60).map((a) => ({ at: azTime(a.created_at), by: a.email, did: a.kind, path: a.path, detail: a.detail }));
@@ -505,7 +507,7 @@ async function buildFeed(env: Env) {
       campaigns: copyCamps.get(r.id) ?? [], comments: commentsOn(`copy:${r.id}`),
       earlier_wordings: (JSON.parse(r.history || "[]") as { text: string }[]).map((h) => h.text),
     }));
-    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, changes_requested: changes, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
+    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
 
     const cm = (list: ReturnType<typeof commentsOn>) =>
       list.map((m) => `    - ${m.open ? "OPEN " : ""}${m.from === "Genvyd" ? "Genvyd" : m.by} (${m.at}): ${tc(m.timecode)}${m.text.replace(/\s+/g, " ")}`).join("\n");
@@ -513,6 +515,8 @@ async function buildFeed(env: Env) {
     md += `\n---\n\n## ${c.name}\n\nSynology folder: \`${c.folder}\` (Mac: \`${MAC_SHARE}/${c.folder}\`)\n`;
     md += `\n### Changes requested (${changes.length})\n`;
     md += changes.length ? changes.map((f) => `\n- ${file(f)}\n  - Requested by ${f.requested_by}, ${f.at}${f.comments.length ? "\n  - Comments:\n" + cm(f.comments) : "\n  - No comment left. Ask what to change."}`).join("\n") + "\n" : "\nNone.\n";
+    md += `\n### Said no, do not use (${saidNo.length})\n`;
+    md += saidNo.length ? saidNo.map((f) => `\n- ${file(f)}\n  - Marked No by ${f.by}, ${f.at}${f.comments.length ? "\n  - Comments:\n" + cm(f.comments) : ""}`).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Unanswered comments on other ads (${openElsewhere.length})\n`;
     md += openElsewhere.length ? openElsewhere.map((f) => `\n- ${file(f)}\n  - Comments:\n${cm(f.comments)}`).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Approved (${approved.length})\n`;
@@ -532,14 +536,14 @@ async function buildFeed(env: Env) {
       if (list.length) md += `\n**${label} (${list.length})**\n` + list.map(copyLine).join("") + "\n";
     }
     const hidCopy = copy.filter((x) => x.hidden);
-    if (hidCopy.length) md += `\n**Hidden, they don't want these (${hidCopy.length})**\n` + hidCopy.map((x) => `\n- ${x.type} #${x.id}: "${x.text.replace(/\s+/g, " ")}"`).join("") + "\n";
+    if (hidCopy.length) md += `\n**In the trash, they don't want these (${hidCopy.length})**\n` + hidCopy.map((x) => `\n- ${x.type} #${x.id}: "${x.text.replace(/\s+/g, " ")}"`).join("") + "\n";
     md += `\n### Campaigns (${campaigns.length})\n`;
     md += campaigns.length ? campaigns.map((cp) => {
       const cc = live.filter((x) => x.campaigns.includes(cp.name)).map((x) => `${x.type} #${x.id} "${x.text.replace(/\s+/g, " ")}"`);
       return `\n- **${cp.name}**${cp.notes ? ` (${cp.notes.replace(/\s+/g, " ")})` : ""}: ${cp.files.length ? cp.files.join(", ") : "no ads"}${cc.length ? `\n  - Copy: ${cc.join("; ")}` : ""}`;
     }).join("\n") + "\n" : "\nNone.\n";
-    md += `\n### Hidden by the client, they don't want these (${hid.length})\n`;
-    md += hid.length ? hid.map((f) => `\n- ${f.path} (hidden by ${f.hidden_by}, ${f.at})`).join("") + "\n" : "\nNone.\n";
+    md += `\n### In the trash, they don't want these (${hid.length})\n`;
+    md += hid.length ? hid.map((f) => `\n- ${f.path} (trashed by ${f.hidden_by}, ${f.at})`).join("") + "\n" : "\nNone.\n";
     md += `\n### Client activity, last 7 days\n`;
     md += recent.length ? recent.map((a) => `\n- ${a.at}: ${a.by} ${a.did} ${String(a.path).startsWith("copy:") ? `ad copy #${String(a.path).slice(5)}` : a.path}${a.detail && a.did !== "comment" ? ` (${a.detail})` : ""}`).join("") + "\n" : "\nNothing.\n";
   }
@@ -1369,7 +1373,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       const body = await readBody(req);
       const p = cleanPath(String(body.path ?? "")).join("/");
       const status = String(body.status ?? "");
-      if (!["pending", "approved", "changes"].includes(status)) throw new HttpError(400, "Bad status.");
+      if (!["pending", "approved", "changes", "rejected"].includes(status)) throw new HttpError(400, "Bad status.");
       for (const q of [p, ...alsoPaths(body, p)]) {
         await env.DB.prepare(
           "INSERT INTO item_status (client_slug, path, status, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) " +
@@ -1708,7 +1712,7 @@ async function sendWelcome(env: Env, slug: string, email: string): Promise<{ sen
 // ---------------------------------------------------------------------------
 
 type ActivityRow = { id: number; client_slug: string; path: string; email: string; kind: string; detail: string | null; created_at: number };
-const DIGEST_KINDS = ["approved", "changes", "comment", "campaign_add", "like", "hidden"];
+const DIGEST_KINDS = ["approved", "changes", "rejected", "comment", "campaign_add", "like", "hidden"];
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
@@ -1760,23 +1764,25 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
   const bits = [
     count("approved") && `${count("approved")} approved`,
     count("changes") && `${count("changes")} change request${count("changes") === 1 ? "" : "s"}`,
+    count("rejected") && `${count("rejected")} said no`,
     count("comment") && `${count("comment")} comment${count("comment") === 1 ? "" : "s"}`,
     count("campaign_add") && `${count("campaign_add")} campaign pick${count("campaign_add") === 1 ? "" : "s"}`,
     count("like") && `${count("like")} favorite${count("like") === 1 ? "" : "s"}`,
-    count("hidden") && `${count("hidden")} hidden`,
+    count("hidden") && `${count("hidden")} moved to trash`,
   ].filter(Boolean);
   const clientList = [...new Set(rows.map((r) => names.get(r.client_slug) || r.client_slug))];
   const subject = `${clientList.join(", ")}: ${bits.join(", ")}`;
 
   const LABEL: Record<string, string> = {
     changes: "Changes requested",
+    rejected: "Said no (don't use these)",
     comment: "New comments",
     approved: "Approved",
     campaign_add: "Added to campaigns",
     like: "Favorited",
-    hidden: "Hidden (they don't want these)",
+    hidden: "Moved to trash (they don't want these)",
   };
-  const order = ["changes", "comment", "approved", "campaign_add", "like", "hidden"];
+  const order = ["changes", "rejected", "comment", "approved", "campaign_add", "like", "hidden"];
   let html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:620px">`;
   let text = "";
   for (const slug of [...new Set(rows.map((r) => r.client_slug))]) {
@@ -1786,7 +1792,7 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
     for (const kind of order) {
       const list = rows.filter((r) => r.client_slug === slug && r.kind === kind);
       if (!list.length) continue;
-      html += `<p style="margin:14px 0 6px;font-weight:bold;color:${kind === "changes" ? "#b26a00" : kind === "approved" ? "#127a3f" : "#111"}">${LABEL[kind]}</p><ul style="margin:0;padding-left:18px">`;
+      html += `<p style="margin:14px 0 6px;font-weight:bold;color:${kind === "changes" ? "#b26a00" : kind === "rejected" ? "#c4161c" : kind === "approved" ? "#127a3f" : "#111"}">${LABEL[kind]}</p><ul style="margin:0;padding-left:18px">`;
       text += `  ${LABEL[kind]}:\n`;
       for (const r of list) {
         const file = r.path.startsWith("copy:") ? (kind === "comment" ? "Ad copy" : `Ad copy "${r.detail ?? ""}"`) : r.path.split("/").pop() || r.path;

@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns. All additive.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status. All keep existing data.
 
 ## Roles
 
@@ -118,6 +118,20 @@ with Unhide. Hides go in the email digest. Admin only: Delete a hidden ad (`POST
 /api/c/:slug/delete`, refuses anything not hidden) MOVEs the file to
 `_Deleted files/<client folder>/<subfolders>/` on the Synology (Worker-built destination,
 `freeName`, never erased) and removes its D1 rows. Anthony empties that folder in Finder.
+
+## No and Trash
+
+Ads have a fourth status, `rejected`, shown as "No, not using": a No button next to Approve /
+Request changes on the ad page, the "..." menu and Final ads. It is loud on purpose: solid red
+pill, red outline, dimmed preview, a big NO stamp and a struck-through name on tiles, and a red
+banner on the ad page with "Move to trash". Ad copy keeps its three statuses (copy_items CHECK
+unchanged). In the UI, Hide is called **Trash** ("Move to trash", "Trash (N)", "Restore");
+the code and the `hidden` table keep their names. Admin "Delete for good" is the old Delete.
+
+Admin comment tools (dashboard and ad page): "Mark done" and "Mark done + move to trash".
+The second (`noAndTrash()` in app.js) resolves the comment, marks the whole ad No and trashes
+it, finding every size and version through `groupAds()` on the folder listing. The digest
+reports "Said no", the Claude feed has a "Said no, do not use" section per client.
 
 ## Ad copy
 

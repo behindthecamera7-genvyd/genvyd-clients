@@ -59,7 +59,23 @@
   const fmtDate = (ms) => new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const fmtSize = (b) => (b == null ? "" : b > 1e9 ? (b / 1e9).toFixed(1) + " GB" : b > 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1e3)) + " KB");
   const who = (email) => (state.me && email === state.me.email ? "You" : email);
-  const STATUS_LABEL = { pending: "Awaiting review", approved: "Approved", changes: "Changes requested" };
+  const STATUS_LABEL = { pending: "Awaiting review", approved: "Approved", changes: "Changes requested", rejected: "No, not using" };
+
+  // Mark an ad No and move it to the trash: every size and version of it, plus the
+  // comment (if any) marked done. Used by the dashboard and the ad page.
+  async function noAndTrash(slug, path, commentId) {
+    let paths = [path];
+    try {
+      const l = await api("GET", `/api/c/${enc(slug)}/list?dir=${enc(parentOf(path))}`);
+      const ad = groupAds(l.items).find((a) => a.path === path || (a._paths || []).includes(path));
+      if (ad && ad._paths && ad._paths.length) paths = ad._paths;
+    } catch {}
+    const also = paths.filter((p) => p !== path);
+    if (commentId != null) await api("POST", `/api/c/${enc(slug)}/comments/${commentId}/resolve`);
+    await api("POST", `/api/c/${enc(slug)}/status`, { path, status: "rejected", also });
+    await api("POST", `/api/c/${enc(slug)}/hide`, { path, also, hidden: true });
+    state.listCache.clear();
+  }
   const parentOf = (p) => p.split("/").slice(0, -1).join("/");
   // Comments and activity can point at an ad file or at a line of ad copy ("copy:12").
   const itemHref = (slug, p) => (String(p).startsWith("copy:") ? `#/c/${enc(slug)}/copy` : `#/c/${enc(slug)}/i/${enc(p)}`);
@@ -171,13 +187,21 @@
         ),
         h("div", { class: "detail" }, cm.timecode != null ? h("span", { class: "tc" }, fmtTime(cm.timecode)) : null, cm.body),
         h("div", { class: "comment-tools" },
-          h("a", { class: "linkish", href: itemHref(cm.client_slug, cm.path) }, "Open"),
           h("button", {
-            class: "linkish",
+            class: "btn small", type: "button",
             onclick: async () => {
               try { await api("POST", `/api/c/${enc(cm.client_slug)}/comments/${cm.id}/resolve`); row.remove(); toast("Marked done."); } catch (err) { toast(err.message); }
             },
-          }, "Mark done"),
+          }, "✓ Mark done"),
+          String(cm.path).startsWith("copy:") ? null : h("button", {
+            class: "btn small no-btn", type: "button", title: "Mark the comment done, mark the ad No, and move it to the trash (every size)",
+            onclick: async (e) => {
+              e.currentTarget.disabled = true;
+              try { await noAndTrash(cm.client_slug, cm.path, cm.id); row.remove(); toast("Done. Marked No and moved to the trash."); }
+              catch (err) { toast(err.message); e.currentTarget.disabled = false; }
+            },
+          }, "🗑 Mark done + move to trash"),
+          h("a", { class: "linkish", href: itemHref(cm.client_slug, cm.path) }, "Open"),
         ),
       );
       return row;
@@ -201,7 +225,7 @@
     }
     renderApproved(null);
 
-    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "hid", unhidden: "unhid", deleted: "deleted" };
+    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted" };
     const feed = fromClients.slice(0, 15).map((a) =>
       h("div", { class: "feed-item" + (a.created_at > lastSeen ? " fresh" : "") },
         h("div", { class: "mono muted" }, `${a.client_name || a.client_slug} · ${fmtDate(a.created_at)}${a.created_at > lastSeen ? " · NEW" : ""}`),
@@ -593,7 +617,7 @@
           .map(([k, label]) => h("button", { class: "seg-btn" + (st.type === k ? " active" : ""), onclick: () => { st.type = k; render(); } }, `${label} ${count(k)}`)),
       );
       const statusSel = h("select", { class: "mini-select", "aria-label": "Status", onchange: (e) => { st.status = e.target.value; render(); } },
-        [["all", "Any status"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"]].map(([v, l]) =>
+        [["all", "Any status"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"], ["rejected", "No, not using"]].map(([v, l]) =>
           h("option", { value: v, selected: st.status === v }, l)),
       );
       const seenSel = h("select", { class: "mini-select", "aria-label": "Viewed", onchange: (e) => { st.seen = e.target.value; render(); } },
@@ -638,18 +662,18 @@
       const shown = sorted(base.filter((it) => st.type === "all" || kindOfItem(it) === st.type));
       // Hidden ads: out of the way, one tap to see them, Unhide to bring one back.
       const hiddenBtn = hiddenAds.length
-        ? h("button", { class: "btn small" + (st.hidden ? " on-warn" : ""), type: "button", title: "Ads you or the client hid", onclick: () => { st.hidden = !st.hidden; render(); } },
-            st.hidden ? "← Back to all ads" : `Hidden (${hiddenAds.length})`)
+        ? h("button", { class: "btn small" + (st.hidden ? " on-warn" : ""), type: "button", title: "Ads you or the client moved to the trash", onclick: () => { st.hidden = !st.hidden; render(); } },
+            st.hidden ? "← Back to all ads" : `🗑 Trash (${hiddenAds.length})`)
         : null;
       const hiddenNote = st.hidden
         ? h("div", { class: "card hidden-note" },
             h("div", {},
-              h("strong", {}, `${hiddenAds.length} hidden ad${hiddenAds.length === 1 ? "" : "s"}. `),
+              h("strong", {}, `${hiddenAds.length} ad${hiddenAds.length === 1 ? "" : "s"} in the trash. `),
               state.me.admin
-                ? "Only shown here. Unhide one from its ... menu, or delete them. Deleting moves the files to the \"_Deleted files\" folder on the Synology."
-                : "Only shown here. Tap ... on one and pick Unhide to bring it back."),
+                ? "Only shown here. Restore one from its ... menu, or delete them for good. Deleting moves the files to the \"_Deleted files\" folder on the Synology."
+                : "Only shown here. Tap ... on one and pick Restore to bring it back."),
             state.me.admin
-              ? h("button", { class: "btn small danger", type: "button", onclick: () => deleteHidden(hiddenAds) }, `Delete all ${hiddenAds.length}`)
+              ? h("button", { class: "btn small danger", type: "button", onclick: () => deleteHidden(hiddenAds) }, `Delete all ${hiddenAds.length} for good`)
               : null)
         : null;
       async function deleteHidden(list) {
@@ -679,7 +703,7 @@
       const grid = (list) => h("div", { class: "grid" }, list.map(tileFn));
       let body;
       if (!shown.length) {
-        body = h("div", { class: "card empty muted" }, ads.length ? "Nothing matches these filters." : grouped.length ? "Everything here is hidden. Tap Hidden to see it." : emptyText || "Nothing here yet.");
+        body = h("div", { class: "card empty muted" }, ads.length ? "Nothing matches these filters." : grouped.length ? "Everything here is in the trash. Tap Trash to see it." : emptyText || "Nothing here yet.");
       } else if (st.type === "all") {
         const groups = [["video", "VIDEOS"], ["image", "PHOTOS"], ["other", "OTHER FILES"]]
           .map(([k, label]) => [label, shown.filter((it) => kindOfItem(it) === k)])
@@ -764,7 +788,8 @@
       class: "more-btn", type: "button", title: "More: add to a campaign, favorite, approve", "aria-label": "More options", "aria-haspopup": "menu",
       onclick: (e) => { e.preventDefault(); e.stopPropagation(); openTileMenu(e.currentTarget, slug, it, { pill, likesEl, campLine, href, src }); },
     }, h("span", { html: ICON_DOTS }));
-    return h("div", { class: "card tile" },
+    if (it.status === "rejected") thumb.append(h("div", { class: "no-stamp", "aria-hidden": "true" }, "NO"));
+    return h("div", { class: "card tile" + (it.status === "rejected" ? " is-no" : "") },
       thumb,
       h("div", { class: "meta-wrap" }, more, h("a", { class: "tile-meta", href },
         h("div", { class: "tile-name", title: it.name }, it.name),
@@ -999,7 +1024,10 @@
 
     const favBtn = h("button", { class: "menu-item", type: "button" });
     const okBtn = h("button", { class: "menu-item", type: "button" });
+    const noBtn = h("button", { class: "menu-item", type: "button" });
     const paintActions = () => {
+      fill(noBtn, h("span", { class: "mi-icon" }, "✕"), detail.status === "rejected" ? "Marked No (tap to undo)" : "No, I don't want this one");
+      noBtn.classList.toggle("on-no", detail.status === "rejected");
       fill(favBtn, h("span", { class: "mi-icon" }, detail.liked ? "♥" : "♡"), detail.liked ? "Favorited (tap to undo)" : "Add to favorites");
       fill(okBtn, h("span", { class: "mi-icon" }, "✓"), detail.status === "approved" ? "Approved (tap to undo)" : "Approve");
       favBtn.classList.toggle("on-like", detail.liked);
@@ -1010,6 +1038,13 @@
       it.status = d.status; it.liked = d.liked; it.likes = d.likes;
       refs.pill.className = `pill ${d.status}`;
       refs.pill.textContent = STATUS_LABEL[d.status];
+      const card = refs.pill.closest(".tile");
+      if (card) {
+        card.classList.toggle("is-no", d.status === "rejected");
+        const stamp = card.querySelector(".no-stamp");
+        if (d.status === "rejected" && !stamp) card.querySelector(".thumb").append(h("div", { class: "no-stamp", "aria-hidden": "true" }, "NO"));
+        if (d.status !== "rejected" && stamp) stamp.remove();
+      }
       refs.likesEl.textContent = `♥ ${d.likes}`;
       state.listCache.clear();
       paintActions();
@@ -1020,6 +1055,10 @@
     };
     okBtn.onclick = async () => {
       try { after(await api("POST", `/api/c/${enc(cs)}/status`, { path: it.path, status: detail.status === "approved" ? "pending" : "approved", also })); toast(detail.status === "approved" ? "Approved." : "Approval taken back."); }
+      catch (err) { toast(err.message); }
+    };
+    noBtn.onclick = async () => {
+      try { after(await api("POST", `/api/c/${enc(cs)}/status`, { path: it.path, status: detail.status === "rejected" ? "pending" : "rejected", also })); toast(detail.status === "rejected" ? "Marked No. Move it to the trash too if you never want to see it." : "No taken back."); }
       catch (err) { toast(err.message); }
     };
     paintActions();
@@ -1076,11 +1115,11 @@
     const hideBtn = h("button", { class: "menu-item", type: "button", onclick: async () => {
       try {
         await api("POST", `/api/c/${enc(cs)}/hide`, { path: it.path, also: others, hidden: !it.hidden });
-        toast(it.hidden ? "Back in the list." : "Hidden. Find it under Hidden to bring it back.");
+        toast(it.hidden ? "Restored. It is back in the list." : "Moved to the trash. Tap Trash in the toolbar to get it back.");
         closeTileMenu();
         announce({ paths: allPaths, hidden: !it.hidden });
       } catch (err) { toast(err.message); }
-    } }, h("span", { class: "mi-icon" }, it.hidden ? "↺" : "⊘"), it.hidden ? "Unhide (put it back)" : "Hide this ad (I don't want it)");
+    } }, h("span", { class: "mi-icon" }, it.hidden ? "↺" : "🗑"), it.hidden ? "Restore (take it out of the trash)" : "Move to trash");
     const delBtn = state.me.admin && it.hidden
       ? h("button", { class: "menu-item danger-item", type: "button", onclick: async () => {
           if (!confirm(`Delete "${it.name}"${others.length ? ` and its ${others.length} other size/version file${others.length === 1 ? "" : "s"}` : ""}?\n\nThe file moves to "_Deleted files" on the Synology, and its comments and approvals are removed from the portal.`)) return;
@@ -1090,7 +1129,7 @@
             closeTileMenu();
             announce({ paths: allPaths, deleted: true });
           } catch (err) { toast(err.message); }
-        } }, h("span", { class: "mi-icon" }, "🗑"), "Delete (admin)")
+        } }, h("span", { class: "mi-icon" }, "⨯"), "Delete for good (admin)")
       : null;
 
     const panel = h("div", { class: "tile-menu", role: "menu" },
@@ -1104,6 +1143,7 @@
       h("div", { class: "menu-sep" }),
       favBtn,
       okBtn,
+      noBtn,
       h("a", { class: "menu-item", href: refs.href, onclick: closeTileMenu }, h("span", { class: "mi-icon", html: ICON_EXPAND }), "Open full size and comments"),
       h("button", { class: "menu-item", type: "button", onclick: () => { closeTileMenu(); saveFile(refs.src, it.name); } }, h("span", { class: "mi-icon" }, "↓"), "Save or share"),
       h("div", { class: "menu-sep" }),
@@ -1213,7 +1253,7 @@
       try {
         await api("POST", `/api/c/${enc(slug)}/hide`, { path, also: adPaths.filter((p) => p !== path), hidden: hide });
         state.listCache.clear();
-        toast(hide ? "Hidden. Find it under Hidden in the folder to bring it back." : "Back in the list.");
+        toast(hide ? "Moved to the trash. Tap Trash in the folder to get it back." : "Restored. It is back in the list.");
         if (hide) location.hash = (state.backTo && state.backTo.slug === slug ? state.backTo.hash : `#/c/${enc(slug)}/f/${enc(dir)}`);
         else viewItem(slug, path);
       } catch (err) { toast(err.message); }
@@ -1229,10 +1269,10 @@
     }
     const hiddenNotice = isHidden
       ? h("div", { class: "card hidden-note" },
-          h("div", {}, h("strong", {}, "This ad is hidden. "), "It does not show in the lists."),
+          h("div", {}, h("strong", {}, "This ad is in the trash. "), "It does not show in the lists."),
           h("div", { class: "actions" },
-            h("button", { class: "btn small", type: "button", onclick: () => setHidden(false) }, "Unhide"),
-            state.me.admin ? h("button", { class: "btn small danger", type: "button", onclick: deleteAd }, "Delete") : null))
+            h("button", { class: "btn small", type: "button", onclick: () => setHidden(false) }, "Restore"),
+            state.me.admin ? h("button", { class: "btn small danger", type: "button", onclick: deleteAd }, "Delete for good") : null))
       : null;
     const oldNotice = fam.versions.length > 1 && fam.ver < fam.latestVer
       ? h("div", { class: "card old-notice" },
@@ -1366,13 +1406,22 @@
           class: "btn" + (d.status === "changes" ? " on-warn" : ""),
           onclick: () => setStatus(d.status === "changes" ? "pending" : "changes"),
         }, d.status === "changes" ? "Changes requested" : "Request changes"),
+        h("button", {
+          class: "btn no-btn" + (d.status === "rejected" ? " on-no" : ""),
+          title: "You don't want this one",
+          onclick: () => setStatus(d.status === "rejected" ? "pending" : "rejected"),
+        }, d.status === "rejected" ? "✕ Marked No" : "✕ No"),
         h("button", { class: "btn" + (d.liked ? " on-like" : ""), onclick: toggleLike, title: d.likers.length ? "Favorited by " + d.likers.map(who).join(", ") : "Save to your favorites" },
           d.liked ? `♥ Favorited${d.likes > 1 ? " · " + d.likes : ""}` : `♡ Favorite${d.likes ? " · " + d.likes : ""}`),
       );
 
-      const statusNote = d.statusBy
+      const statusNote = d.status === "rejected"
+        ? h("div", { class: "card no-banner" },
+            h("div", {}, h("strong", {}, "NO. "), `${who(d.statusBy)} marked this one No, ${fmtDate(d.statusAt)}.`),
+            isHidden ? null : h("button", { class: "btn small no-btn", type: "button", onclick: () => setHidden(true) }, "🗑 Move to trash"))
+        : d.statusBy
         ? h("div", { class: "status-note muted" }, `${STATUS_LABEL[d.status]} by ${who(d.statusBy)}, ${fmtDate(d.statusAt)}`)
-        : h("div", { class: "status-note muted" }, "Approve it, or request changes and say what in a comment.");
+        : h("div", { class: "status-note muted" }, "Approve it, request changes and say what in a comment, or tap No if you don't want it.");
       const sizesNote = also.length
         ? h("div", { class: "status-note muted" }, `Approve, Favorite and campaign picks cover all ${sizes.length} sizes.`)
         : null;
@@ -1393,7 +1442,8 @@
                 ),
                 (c.mine || state.me.admin)
                   ? h("div", { class: "comment-tools" },
-                      state.me.admin ? h("button", { class: "linkish", onclick: () => resolve(c.id) }, c.resolved ? "Reopen" : "Mark done") : null,
+                      state.me.admin ? h("button", { class: "linkish", onclick: () => resolve(c.id) }, c.resolved ? "Reopen" : "✓ Mark done") : null,
+                      state.me.admin && !c.resolved && !c.mine && !isHidden ? h("button", { class: "linkish no-link", onclick: () => doneAndTrash(c.id) }, "🗑 Mark done + move to trash") : null,
                       h("button", { class: "linkish", onclick: () => removeComment(c.id) }, "Delete"),
                     )
                   : null,
@@ -1444,7 +1494,7 @@
         statusBtns,
         statusNote,
         sizesNote,
-        isHidden ? null : h("button", { class: "linkish hide-link", type: "button", title: "Take it out of the lists. You can bring it back.", onclick: () => setHidden(true) }, "⊘ Hide this ad (I don't want it)"),
+        isHidden || d.status === "rejected" ? null : h("button", { class: "linkish hide-link", type: "button", title: "Take it out of the lists. You can bring it back from Trash.", onclick: () => setHidden(true) }, "🗑 Move to trash (I don't want it)"),
         tagBox,
         campBox,
         h("div", { class: "mono muted" }, `COMMENTS (${d.comments.length})`, also.length ? ` · ON THE ${thisSize} SIZE` : ""),
@@ -1481,6 +1531,13 @@
     const setStatus = (status) => act(api("POST", `/api/c/${enc(slug)}/status`, { path, status, also }));
     const toggleLike = () => act(api("POST", `/api/c/${enc(slug)}/like`, { path, also }));
     const resolve = (id) => act(api("POST", `/api/c/${enc(slug)}/comments/${id}/resolve`));
+    const doneAndTrash = async (id) => {
+      try {
+        await noAndTrash(slug, path, id);
+        toast("Done. Marked No and moved to the trash.");
+        location.hash = (state.backTo && state.backTo.slug === slug ? state.backTo.hash : `#/c/${enc(slug)}/f/${enc(dir)}`);
+      } catch (err) { toast(err.message); }
+    };
     const removeComment = (id) => {
       if (confirm("Delete this comment?")) act(api("DELETE", `/api/c/${enc(slug)}/comments/${id}`));
     };
@@ -1599,7 +1656,7 @@
             location.hash = `#/c/${enc(slug)}/i/${enc(first.path)}`;
             return;
           }
-          toast(status === "approved" ? "Approved. Thank you!" : "Approval taken back.");
+          toast(status === "approved" ? "Approved. Thank you!" : status === "rejected" ? "Marked No." : "Status taken back.");
           reload();
         } catch (err) { toast(err.message); }
       };
@@ -1610,7 +1667,7 @@
           h("div", { class: "final-frame" }, img),
           h("div", { class: "final-place mono" }, e.place, e.it.comments ? h("span", { class: "muted" }, ` · 💬 ${e.it.comments}`) : null));
       });
-      return h("div", { class: "card final-card" + (ad.status === "approved" ? " is-approved" : ad.status === "changes" ? " is-changes" : "") },
+      return h("div", { class: "card final-card" + (ad.status === "approved" ? " is-approved" : ad.status === "changes" ? " is-changes" : ad.status === "rejected" ? " is-no" : "") },
         h("div", { class: "copy-head" },
           h("h3", { class: "final-name" }, ad.name),
           ad.versions > 1 ? h("span", { class: "size-chip ver-chip" }, `v${ad.ver} · ${ad.versions} versions`) : null,
@@ -1622,6 +1679,7 @@
         h("div", { class: "copy-actions" },
           h("button", { class: "btn small" + (ad.status === "approved" ? " on-ok" : ""), type: "button", onclick: () => setStatus(ad.status === "approved" ? "pending" : "approved") }, ad.status === "approved" ? "✓ Approved" : "Approve"),
           h("button", { class: "btn small" + (ad.status === "changes" ? " on-warn" : ""), type: "button", onclick: () => setStatus(ad.status === "changes" ? "pending" : "changes") }, ad.status === "changes" ? "Changes requested" : "Request changes"),
+          h("button", { class: "btn small no-btn" + (ad.status === "rejected" ? " on-no" : ""), type: "button", onclick: () => setStatus(ad.status === "rejected" ? "pending" : "rejected") }, ad.status === "rejected" ? "✕ Marked No" : "✕ No"),
           h("a", { class: "btn small", href: `#/c/${enc(slug)}/i/${enc(first.path)}` }, `💬 ${ad.comments}${ad.openComments && state.me.admin ? ` · ${ad.openComments} open` : ""}`)),
       );
     };
@@ -1711,7 +1769,7 @@
         h("div", { class: "toolbar-right" },
           h("select", { class: "mini-select", "aria-label": "Status", onchange: (e) => { st.status = e.target.value; render(); } },
             [["all", "Any status"], ["pending", "Awaiting review"], ["changes", "Changes requested"], ["approved", "Approved"]].map(([v, l]) => h("option", { value: v, selected: st.status === v }, l))),
-          hiddenCount ? h("button", { class: "btn small" + (st.hidden ? " on-warn" : ""), type: "button", onclick: () => { st.hidden = !st.hidden; render(); } }, st.hidden ? "← Back" : `Hidden (${hiddenCount})`) : null,
+          hiddenCount ? h("button", { class: "btn small" + (st.hidden ? " on-warn" : ""), type: "button", onclick: () => { st.hidden = !st.hidden; render(); } }, st.hidden ? "← Back" : `🗑 Trash (${hiddenCount})`) : null,
           st.hidden ? null : copyApproved,
         ),
       );
@@ -1766,13 +1824,13 @@
             : null,
           h("div", { class: "copy-actions" },
             x.hidden
-              ? [h("button", { class: "btn small", type: "button", onclick: () => call("POST", `${base}/${x.id}/hide`, { hidden: false }) }, "Unhide"),
+              ? [h("button", { class: "btn small", type: "button", onclick: () => call("POST", `${base}/${x.id}/hide`, { hidden: false }) }, "Restore"),
                  state.me.admin ? h("button", { class: "btn small danger", type: "button", onclick: () => confirm("Delete this copy for good? Its comments go too.") && call("POST", `${base}/${x.id}/delete`) }, "Delete") : null]
               : [h("button", { class: "btn small" + (x.status === "approved" ? " on-ok" : ""), type: "button", onclick: () => call("POST", `${base}/${x.id}/status`, { status: x.status === "approved" ? "pending" : "approved" }) }, x.status === "approved" ? "✓ Approved" : "Approve"),
                  h("button", { class: "btn small" + (x.status === "changes" ? " on-warn" : ""), type: "button", onclick: () => { call("POST", `${base}/${x.id}/status`, { status: x.status === "changes" ? "pending" : "changes" }); if (x.status !== "changes") st.open.add(x.id); } }, x.status === "changes" ? "Changes requested" : "Request changes"),
                  h("button", { class: "btn small", type: "button", onclick: () => { open ? st.open.delete(x.id) : st.open.add(x.id); render(); } }, `💬 ${x.comments.length}${openCount && state.me.admin ? ` · ${openCount} open` : ""}`),
                  h("span", { style: "flex:1" }),
-                 h("button", { class: "linkish hide-link", type: "button", onclick: () => call("POST", `${base}/${x.id}/hide`, { hidden: true }).then((ok) => ok && toast("Hidden. Find it under Hidden to bring it back.")) }, "⊘ Hide")],
+                 h("button", { class: "linkish hide-link", type: "button", onclick: () => call("POST", `${base}/${x.id}/hide`, { hidden: true }).then((ok) => ok && toast("Moved to the trash. Tap Trash to get it back.")) }, "🗑 Move to trash")],
           ),
           x.statusBy && x.status !== "pending" ? h("div", { class: "status-note muted" }, `${STATUS_LABEL[x.status]} by ${who(x.statusBy)}, ${fmtDate(x.statusAt)}`) : null,
           thread,
@@ -1783,7 +1841,7 @@
         ? h("div", { class: "copy-list" }, shown.map(card))
         : h("div", { class: "card empty muted" }, d.items.length ? "Nothing matches these filters." : state.me.admin ? "No copy yet. Add taglines, headlines or ad text above and the client can approve them here." : "No ad copy to review yet.");
       fill(listHolder, toolbar,
-        st.hidden ? h("div", { class: "card hidden-note" }, h("div", {}, h("strong", {}, "Hidden copy. "), "Only shown here. Unhide to bring a line back.")) : null,
+        st.hidden ? h("div", { class: "card hidden-note" }, h("div", {}, h("strong", {}, "Copy in the trash. "), "Only shown here. Restore to bring a line back.")) : null,
         body);
     }
     render();
@@ -2200,7 +2258,7 @@
     }
     loadFeed();
 
-    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "hid", unhidden: "unhid", deleted: "deleted" };
+    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
           h("div", { class: "feed-item" },

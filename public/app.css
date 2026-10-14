@@ -139,7 +139,7 @@ label.check input { width: auto; }
 .comment.resolved { opacity: 0.5; }
 .comment-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
 .comment-body { color: var(--bone); white-space: pre-wrap; word-wrap: break-word; }
-.comment-tools { display: flex; gap: 12px; margin-top: 8px; }
+.comment-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; }
 .linkish { background: none; border: 0; padding: 0; color: var(--smoke); font: 12px var(--mono); cursor: pointer; }
 .linkish:hover { color: var(--accent); }
 .tc { background: rgba(255, 42, 42, 0.12); color: var(--accent); border: 0; border-radius: 6px; padding: 2px 6px; font: 500 12px var(--mono); cursor: pointer; margin-right: 6px; }
@@ -466,3 +466,30 @@ label.check input { width: auto; }
 .final-shot:hover .final-frame { border-color: var(--accent); }
 .final-place { font-size: 12px; margin-top: 8px; text-transform: uppercase; letter-spacing: .04em; }
 @media (max-width: 640px) { .final-card { padding: 16px; } .final-shot { width: 72vw; } .final-frame { height: 62vh; max-height: 520px; } }
+
+/* "No" status: impossible to miss. Red pill, red outline, dimmed preview, big stamp. */
+:root { --no: #ff4d4f; }
+.pill.rejected { color: #fff; background: var(--no); border-color: var(--no); font-weight: 600; }
+.btn.no-btn { border-color: rgba(255, 77, 79, 0.45); color: var(--no); }
+.btn.no-btn:hover { background: rgba(255, 77, 79, 0.12); border-color: var(--no); color: var(--no); }
+.btn.on-no { background: var(--no); border-color: var(--no); color: #fff; }
+.btn.on-no:hover { background: var(--no); color: #fff; }
+.linkish.no-link { color: var(--no); }
+.menu-item.on-no { color: var(--no); }
+.menu-item.on-no .mi-icon { color: var(--no); }
+.tile.is-no, .final-card.is-no { border-color: var(--no); box-shadow: 0 0 0 1px var(--no) inset; }
+.tile.is-no .thumb img, .tile.is-no .thumb video:not([controls]) { opacity: 0.35; filter: grayscale(0.7); }
+.tile.is-no .tile-name { text-decoration: line-through; text-decoration-color: var(--no); }
+.no-stamp {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-12deg);
+  padding: 4px 18px; border: 4px solid var(--no); border-radius: 10px; color: var(--no);
+  font: 800 42px/1 var(--mono, monospace); letter-spacing: 0.08em; background: rgba(0, 0, 0, 0.45);
+  pointer-events: none; z-index: 2;
+}
+.thumb.playing .no-stamp { display: none; }
+.final-card.is-no .final-frame { opacity: 0.4; filter: grayscale(0.7); }
+.no-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 12px 14px; border: 1px solid var(--no); background: rgba(255, 77, 79, 0.12); color: var(--bone);
+}
+.no-banner strong { color: var(--no); }
