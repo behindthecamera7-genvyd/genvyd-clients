@@ -38,6 +38,17 @@ Clients menu that jumps into any client, and Admin, with the current one highlig
 dashboard opens with client cards showing what each is waiting on (new, change requests,
 comments, approved) plus quick links to Projects, Campaigns, Ad copy and Favorites.
 
+## Client home: Waiting on you
+
+The top of a client's Projects page (`todoPanel()` in app.js, data from `GET /api/c/:slug/todo`)
+shows what is waiting on them across every project: ads still Awaiting review (from the `files`
+table plus status, hidden, views, likes and comment counts in one batch; folded by `groupAds()`, so
+a v2 shows once and an older approved version does not count), new ones first, 8 tiles on a
+computer and 4 on a phone with "See all N". Links to Ad review for final ads (`finalAdGroups()`
+on the `Final ads/` files) and pending ad copy, a note about ads with changes requested, and the
+last 3 replies from Genvyd to their comments (21 days). Admin sees the same box as "Waiting on
+<client>". Files that are hidden, copy files and `_`/`.`/`@`/`#` paths are left out.
+
 ## Email digest
 
 Cron every 15 min (`scheduled()` in worker.ts, `runDigest`): emails client activity

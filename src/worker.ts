@@ -1277,7 +1277,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   }
 
   // ---- client scoped ------------------------------------------------------
-  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import|view|hide|delete|where)(?:\/(\d+)(?:\/(resolve))?)?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import|view|hide|delete|where|todo)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
     const [, slug, action, idStr, sub] = m;
     const c = await requireClient(env, user, decodeURIComponent(slug));
@@ -1392,6 +1392,50 @@ async function route(req: Request, env: Env): Promise<Response> {
         );
       }
       return json({ ok: true, path, renamed: name !== wanted ? name : null });
+    }
+    if (action === "todo" && method === "GET") {
+      // The client's home: every file the portal knows for this client with its status, so the
+      // page can fold sizes and versions and show what is still waiting for review, plus counts
+      // for ad copy and Genvyd's recent replies to the client's comments. A few queries in total.
+      const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+      const since = now() - 21 * 86400 * 1000;
+      const [filesR, statusR, hiddenR, viewsR, likesR, cmtR, copyR, repliesR] = await env.DB.batch([
+        env.DB.prepare("SELECT path, first_seen FROM files WHERE client_slug = ? ORDER BY first_seen DESC LIMIT 600").bind(c.slug),
+        env.DB.prepare("SELECT path, status, updated_by, updated_at FROM item_status WHERE client_slug = ?").bind(c.slug),
+        env.DB.prepare("SELECT path FROM hidden WHERE client_slug = ?").bind(c.slug),
+        env.DB.prepare("SELECT path FROM views WHERE client_slug = ? AND email = ?").bind(c.slug, user.email),
+        env.DB.prepare("SELECT path, COUNT(*) AS n, SUM(CASE WHEN email = ? THEN 1 ELSE 0 END) AS mine FROM likes WHERE client_slug = ? GROUP BY path").bind(user.email, c.slug),
+        env.DB.prepare("SELECT path, COUNT(*) AS n, SUM(CASE WHEN resolved = 0 THEN 1 ELSE 0 END) AS open FROM comments WHERE client_slug = ? AND path NOT LIKE 'copy:%' GROUP BY path").bind(c.slug),
+        env.DB.prepare("SELECT status, COUNT(*) AS n FROM copy_items WHERE client_slug = ? AND hidden = 0 GROUP BY status").bind(c.slug),
+        env.DB.prepare(
+          "SELECT r.id, r.path, r.email, r.body, r.created_at, p.body AS parent_body, p.email AS parent_email FROM comments r JOIN comments p ON p.id = r.parent_id " +
+            "WHERE r.client_slug = ? AND r.created_at > ? ORDER BY r.created_at DESC LIMIT 12",
+        ).bind(c.slug, since),
+      ]);
+      const st = new Map((statusR.results as { path: string; status: string; updated_by: string; updated_at: number }[]).map((r) => [r.path, r]));
+      const hid = new Set((hiddenR.results as { path: string }[]).map((r) => r.path));
+      const seen = new Set((viewsR.results as { path: string }[]).map((r) => r.path));
+      const lk = new Map((likesR.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
+      const cm = new Map((cmtR.results as { path: string; n: number; open: number }[]).map((r) => [r.path, r]));
+      const items = (filesR.results as { path: string; first_seen: number }[])
+        .filter((f) => !hid.has(f.path) && !COPY_FILE.test(f.path) && !/(^|\/)[.@#_]/.test(f.path))
+        .map((f) => {
+          const name = f.path.split("/").pop() || f.path;
+          const s0 = st.get(f.path);
+          return {
+            name, path: f.path, folder: f.path.split("/").slice(0, -1).join("/"), kind: kindOf(name),
+            size: null, mtime: new Date(f.first_seen).toISOString(),
+            status: s0?.status ?? "pending", statusBy: s0?.updated_by ?? null, statusAt: s0?.updated_at ?? null,
+            likes: lk.get(f.path)?.n ?? 0, liked: (lk.get(f.path)?.mine ?? 0) > 0,
+            comments: cm.get(f.path)?.n ?? 0, openComments: cm.get(f.path)?.open ?? 0,
+            tags: [], seen: seen.has(f.path), hidden: false,
+          };
+        });
+      const copy = Object.fromEntries((copyR.results as { status: string; n: number }[]).map((r) => [r.status, r.n]));
+      const replies = (repliesR.results as Record<string, any>[])
+        .filter((r) => admins.includes(String(r.email).toLowerCase()) && !admins.includes(String(r.parent_email).toLowerCase()))
+        .map((r) => ({ id: r.id, path: r.path, body: r.body, at: r.created_at, yourComment: r.parent_body }));
+      return json({ client: { slug: c.slug, name: c.name }, items, copy, replies });
     }
     if (action === "where" && method === "GET") {
       // Old links: where does a file that was renamed in the portal live now?

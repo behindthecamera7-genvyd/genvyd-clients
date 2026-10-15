@@ -440,6 +440,7 @@
         h("div", { class: "actions" }, newFolderBtn, uploadBtn),
       ),
       uploadPanel,
+      dir ? null : todoPanel(slug, data.client.name),
     ];
 
     if (data.folders.length) {
@@ -475,6 +476,56 @@
       parts.push(h("div", { class: "card empty" }, h("h2", {}, "Nothing here yet"), h("p", { class: "muted" }, state.me.admin ? "Click Upload, or drag files onto this page." : "New work will show up here as soon as it is ready.")));
     }
     show(...parts.filter(Boolean));
+  }
+
+  // Client home: what is waiting on the client, across every project, newest first. Ads still
+  // awaiting review (sizes and versions folded, so a v2 shows once), final ads and ad copy to
+  // check, and Genvyd's recent replies to their comments. Admin sees the same, as "Waiting on <client>".
+  function todoPanel(slug, clientName) {
+    const box = h("div", { class: "todo" }, h("p", { class: "muted", style: "margin:0" }, "Checking what is new…"));
+    const st = { all: false };
+    api("GET", `/api/c/${enc(slug)}/todo`).then((d) => {
+      const inFinal = (it) => it.folder === "Final ads" || it.folder.startsWith("Final ads/");
+      const ads = groupAds(d.items.filter((it) => !inFinal(it)));
+      const waiting = ads.filter((a) => a.status === "pending" && (a.kind === "image" || a.kind === "video"))
+        .sort((a, b) => (a.seen === b.seen ? 0 : a.seen ? 1 : -1) || String(b.mtime).localeCompare(String(a.mtime)));
+      const changing = ads.filter((a) => a.status === "changes").length;
+      const finals = finalAdGroups(d.items.filter(inFinal)).filter((g) => g.status === "pending").length;
+      const copyN = d.copy.pending || 0;
+      const me = !state.me.admin;
+      const render = () => {
+        const first = window.innerWidth <= 640 ? 4 : 8;
+        const shown = st.all ? waiting : waiting.slice(0, first);
+        const links = [
+          finals ? h("a", { class: "todo-link", href: `#/c/${enc(slug)}/copy` }, h("strong", {}, String(finals)), ` final ad${finals === 1 ? "" : "s"} to check, as they will look on Facebook and Instagram →`) : null,
+          copyN ? h("a", { class: "todo-link", href: `#/c/${enc(slug)}/copy` }, h("strong", {}, String(copyN)), ` line${copyN === 1 ? "" : "s"} of ad copy to approve →`) : null,
+        ].filter(Boolean);
+        const nothing = !waiting.length && !links.length;
+        fill(box,
+          h("div", { class: "todo-head" },
+            h("h2", {}, me ? "Waiting on you" : `Waiting on ${clientName}`),
+            waiting.length ? h("span", { class: "pill pending" }, `${waiting.length} to review`) : null,
+            me && waiting.some((a) => a.seen === false) ? h("span", { class: "pill new" }, `${waiting.filter((a) => a.seen === false).length} new`) : null),
+          nothing
+            ? h("p", { class: "muted", style: "margin:4px 0 0" }, me ? "You're all caught up. New work will show up here as soon as it's ready." : "Nothing waiting on the client right now.")
+            : h("p", { class: "muted", style: "margin:4px 0 14px" }, me ? "Newest first. Open one to approve it, ask for changes, or leave a comment." : "What the client still needs to approve, newest first."),
+          links.length ? h("div", { class: "todo-links" }, links) : null,
+          d.replies.length
+            ? h("div", { class: "todo-replies" },
+                h("div", { class: "section-label mono muted" }, me ? "REPLIES FROM GENVYD" : "YOUR RECENT REPLIES"),
+                d.replies.slice(0, 3).map((r) => h("div", { class: "card todo-reply" },
+                  h("div", { class: "mono muted", style: "font-size:12px" }, `${fmtDate(r.at)} · on `, h("a", { href: `#/c/${enc(slug)}/i/${enc(r.path)}` }, baseName(r.path))),
+                  r.yourComment ? h("div", { class: "muted todo-quote" }, `${me ? "You" : "Client"}: "${String(r.yourComment).slice(0, 140)}${String(r.yourComment).length > 140 ? "…" : ""}"`) : null,
+                  h("div", { class: "todo-reply-body" }, h("strong", {}, "Genvyd: "), ...linkify(r.body)))))
+            : null,
+          shown.length ? h("div", { class: "grid" }, shown.map((it) => tile(slug, it, true))) : null,
+          waiting.length > first ? h("button", { class: "btn small", type: "button", style: "margin-top:12px", onclick: () => { st.all = !st.all; render(); } }, st.all ? "Show fewer" : `See all ${waiting.length}`) : null,
+          changing ? h("p", { class: "muted todo-note" }, me ? `Genvyd is working on the changes you asked for on ${changing} ad${changing === 1 ? "" : "s"}.` : `${changing} ad${changing === 1 ? "" : "s"} with changes requested.`) : null,
+        );
+      };
+      render();
+    }).catch(() => box.remove());
+    return box;
   }
 
   // A project folder: previews of what is inside, how many files, and a clear Open button,
