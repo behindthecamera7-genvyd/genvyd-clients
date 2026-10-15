@@ -548,6 +548,9 @@
     let name = baseName(p);
     // Final ad screenshots are "<Ad name> - <Placement>.png": the copy goes with the ad name.
     if (parentOf(p).split("/")[0] === "Final ads" && name.lastIndexOf(" - ") > 0) name = name.slice(0, name.lastIndexOf(" - "));
+    // Copy for a carousel goes with every card ("Just Dropped.copy.txt" covers card 1, card 2...).
+    const cm = stemOf(name).match(CARD_RE);
+    if (cm) name = stemOf(name).replace(cm[0], " ").replace(/\s{2,}/g, " ").trim() + extOf(name);
     // A copy file named without the extension ("Cap ad") has no extension to take off.
     const n = /\.[a-z0-9]{2,4}$/i.test(name) ? name : name + ".x";
     return parentOf(p) + "|" + adName(n).base;
@@ -595,7 +598,56 @@
         mtime: latest ? new Date(latest).toISOString() : all[0].mtime,
       });
     }
-    return out;
+    return foldCarousels(out);
+  }
+
+  // Carousels: one ad made of several cards, named "<Ad name> card 1", "card 2"... (or "slide 1").
+  // Each card still stacks its own sizes and versions; the cards then fold into one carousel
+  // entry with `_carousel` [{ n, path, item }] in card order, `_paths` (every file of every card)
+  // and `_approvePaths` (the newest file of every size of every card), so Approve, Favorite,
+  // campaigns and Trash cover the whole carousel.
+  const CARD_RE = /(?:^|[\s_\-.(\[])(?:card|slide)\s*[_\-]?\s*(\d{1,2})(?=$|[\s_\-.)\]])/i;
+  function cardOf(it) {
+    const st = stemOf(it.name);
+    const m = st.match(CARD_RE);
+    if (!m) return null;
+    const rest = st.replace(m[0], " ").replace(/\s{2,}/g, " ").trim() + extOf(it.name);
+    return { n: Number(m[1]), key: [it.clientSlug || "", parentOf(it.path), kindOf(it), adName(rest).base].join("|") };
+  }
+  function foldCarousels(list) {
+    const groups = new Map();
+    const order = [];
+    for (const e of list) {
+      const c = cardOf(e);
+      if (!c) { order.push(e); continue; }
+      let g = groups.get(c.key);
+      if (!g) { g = { cards: [] }; groups.set(c.key, g); order.push(g); }
+      g.cards.push({ n: c.n, e });
+    }
+    return order.map((x) => {
+      if (!x.cards) return x;
+      if (x.cards.length === 1) return x.cards[0].e;
+      const cards = x.cards.sort((a, b) => a.n - b.n);
+      const all = cards.map((c) => c.e);
+      const statuses = new Set(all.map((a) => a.status));
+      return {
+        ...all[0],
+        _carousel: cards.map((c) => ({ n: c.n, path: c.e.path, item: c.e })),
+        // The carousel's own name: the file name without "card 1", the size and the extension.
+        _title: (() => { let t = stemOf(all[0].name); const cm = t.match(CARD_RE); if (cm) t = t.replace(cm[0], " "); const sm = t.match(SIZE_RE); if (sm) t = t.replace(sm[0], " "); return t.replace(/[\s_]{2,}/g, " ").trim(); })(),
+        _paths: all.flatMap((a) => a._paths || [a.path]),
+        _approvePaths: all.flatMap((a) => (a._sizes ? a._sizes.map((v) => v.path) : [a.path])),
+        status: statuses.size === 1 ? all[0].status : statuses.has("changes") ? "changes" : statuses.has("rejected") ? "rejected" : "pending",
+        likes: Math.max(...all.map((a) => a.likes || 0)),
+        comments: all.reduce((n, a) => n + (a.comments || 0), 0),
+        openComments: all.reduce((n, a) => n + (a.openComments || 0), 0),
+        seen: all.every((a) => a.seen !== false),
+        hidden: all.every((a) => a.hidden),
+        tags: [...new Set(all.flatMap((a) => a.tags || []))],
+        campaigns: [...new Set(all.flatMap((a) => a.campaigns || []))],
+        mtime: all.map((a) => a.mtime).sort().pop(),
+      };
+    });
   }
   // Sizes (same version) and versions (same size) of one file, from its folder listing.
   function adFamily(items, path) {
@@ -865,6 +917,21 @@
       thumb = h("a", { class: "thumb", href }, media, ...pills, expand);
     }
 
+    // Carousel: small previews of every card along the bottom of the picture; tap one to open it.
+    if (it._carousel) {
+      const cs = it.clientSlug || slug;
+      const strip = h("div", { class: "car-strip", title: `${it._carousel.length} cards in this carousel` },
+        it._carousel.slice(0, 6).map((c, i) => {
+          const mini = c.item.kind === "video"
+            ? h("span", { class: "car-mini car-mini-video" }, String(i + 1))
+            : h("img", { class: "car-mini", "data-src": mediaUrl(cs, c.path), alt: `Card ${i + 1}`, loading: "lazy" });
+          if (mini.tagName === "IMG") lazy.observe(mini);
+          return h("span", { class: "car-mini-wrap", role: "link", tabindex: "0",
+            onclick: (e) => { e.preventDefault(); e.stopPropagation(); location.hash = `#/c/${enc(cs)}/i/${enc(c.path)}`; } }, mini);
+        }),
+        it._carousel.length > 6 ? h("span", { class: "car-more mono" }, `+${it._carousel.length - 6}`) : null);
+      thumb.append(strip);
+    }
     const pill = pills[0];
     const likesEl = h("span", {}, `♥ ${it.likes}`);
     const campLine = h("div", { class: "mono tile-folder tile-camps" }, it.campaigns && it.campaigns.length ? `In ${it.campaigns.join(", ")}` : "");
@@ -873,12 +940,13 @@
       onclick: (e) => { e.preventDefault(); e.stopPropagation(); openTileMenu(e.currentTarget, slug, it, { pill, likesEl, campLine, href, src }); },
     }, h("span", { html: ICON_DOTS }));
     if (it.status === "rejected") thumb.append(h("div", { class: "no-stamp", "aria-hidden": "true" }, "NO"));
-    return h("div", { class: "card tile" + (it.status === "rejected" ? " is-no" : "") },
+    return h("div", { class: "card tile" + (it.status === "rejected" ? " is-no" : "") + (it._carousel ? " is-carousel" : "") },
       thumb,
       h("div", { class: "meta-wrap" }, more, h("a", { class: "tile-meta", href },
-        h("div", { class: "tile-name", title: it.name }, it.name),
-        it._sizes || it._verCount
+        h("div", { class: "tile-name", title: it.name }, it._title || it.name),
+        it._sizes || it._verCount || it._carousel
           ? h("div", { class: "tile-sizes" },
+              it._carousel ? h("span", { class: "size-chip car-chip", title: "One ad with several cards people swipe through" }, `Carousel · ${it._carousel.length} cards`) : null,
               (it._sizes || []).map((v) => h("span", { class: "size-chip" }, v.label)),
               it._verCount ? h("span", { class: "size-chip ver-chip", title: `${it._verCount} versions, showing the newest` }, `v${it._verLatest} · ${it._verCount} versions`) : null)
           : null,
@@ -1301,8 +1369,10 @@
   function openTileMenu(anchor, slug, it, refs) {
     closeTileMenu();
     const cs = it.clientSlug || slug;
-    const also = (it._sizes || []).map((v) => v.path).filter((p) => p !== it.path);
-    const sizesNote = also.length ? h("div", { class: "menu-note mono muted" }, `Covers all ${also.length + 1} sizes`) : null;
+    const also = (it._approvePaths || (it._sizes || []).map((v) => v.path)).filter((p) => p !== it.path);
+    const sizesNote = it._carousel
+      ? h("div", { class: "menu-note mono muted" }, `Covers all ${it._carousel.length} cards`)
+      : also.length ? h("div", { class: "menu-note mono muted" }, `Covers all ${also.length + 1} sizes`) : null;
     const campList = h("div", { class: "menu-camps" }, h("div", { class: "muted menu-loading" }, "Loading campaigns…"));
     let detail = { status: it.status, liked: !!it.liked, likes: it.likes };
 
@@ -1505,7 +1575,9 @@
     const next = idx >= 0 && idx < ads.length - 1 ? ads[idx + 1] : null;
     const fam = adFamily(items, path);
     const sizes = fam.sizes.length > 1 ? fam.sizes : [];
-    const also = sizes.map((v) => v.path).filter((p) => p !== path);
+    // In a carousel, Approve, Favorite and campaign picks cover every card (all their sizes).
+    const carAd = groupAds(items).find((a) => a._carousel && (a._paths || []).includes(path));
+    const also = (carAd ? carAd._approvePaths : sizes.map((v) => v.path)).filter((p) => p !== path);
     const thisSize = (sizes.find((v) => v.path === path) || {}).label;
     const src = mediaUrl(slug, path);
 
@@ -1523,6 +1595,30 @@
     }
 
     const stage = h("div", { class: "card stage" }, stageInner);
+    // Carousel: every card in order, tap one to look at it (same size when it has one).
+    let cardStrip = null;
+    if (carAd) {
+      const curN = (carAd._carousel.find((c) => (c.item._paths || [c.path]).includes(path)) || {}).n;
+      const sameSize = (c) => {
+        const want = thisSize;
+        const hit = want && c.item._sizes && c.item._sizes.find((v) => v.label === want);
+        return hit ? hit.path : c.path;
+      };
+      cardStrip = h("div", { class: "card-strip-wrap" },
+        h("div", { class: "mono muted card-strip-label" }, `CAROUSEL · CARD ${carAd._carousel.findIndex((c) => c.n === curN) + 1} OF ${carAd._carousel.length}`),
+        h("div", { class: "card-strip" }, carAd._carousel.map((c, i) => {
+          const target = sameSize(c);
+          const thumb = c.item.kind === "video"
+            ? h("video", { src: mediaUrl(slug, target) + "#t=0.5", preload: "metadata", muted: true, playsinline: true })
+            : h("img", { src: mediaUrl(slug, target), alt: `Card ${i + 1}`, loading: "lazy" });
+          return h("a", {
+            class: "card-thumb" + (c.n === curN ? " active" : "") + (c.item.status === "changes" ? " is-changes" : c.item.status === "approved" ? " is-approved" : ""),
+            href: `#/c/${enc(slug)}/i/${enc(target)}`,
+            title: `Card ${i + 1}`,
+            onclick: (e) => { e.preventDefault(); if (c.n !== curN) location.replace(`#/c/${enc(slug)}/i/${enc(target)}`); },
+          }, thumb, h("span", { class: "card-num mono" }, String(i + 1)));
+        })));
+    }
     const sizeSeg = sizes.length > 1
       ? h("div", { class: "seg size-seg", title: "Sizes of this ad" },
           sizes.map((v) => h("button", {
@@ -1780,7 +1876,9 @@
         : d.statusBy
         ? h("div", { class: "status-note muted" }, `${STATUS_LABEL[d.status]} by ${who(d.statusBy)}, ${fmtDate(d.statusAt)}`)
         : h("div", { class: "status-note muted" }, "Approve it, request changes and say what in a comment, or tap No if you don't want it.");
-      const sizesNote = also.length
+      const sizesNote = carAd
+        ? h("div", { class: "status-note muted" }, `Approve, Favorite and campaign picks cover all ${carAd._carousel.length} cards of this carousel. Comments stay on the card you are looking at.`)
+        : also.length
         ? h("div", { class: "status-note muted" }, `Approve, Favorite and campaign picks cover all ${sizes.length} sizes.`)
         : null;
 
@@ -1931,7 +2029,7 @@
       ),
       hiddenNotice,
       oldNotice,
-      h("div", { class: "viewer" }, h("div", {}, stage, verSeg, navBar, copyBox), side),
+      h("div", { class: "viewer" }, h("div", {}, stage, cardStrip, verSeg, navBar, copyBox), side),
     );
   }
 

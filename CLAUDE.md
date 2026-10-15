@@ -109,6 +109,20 @@ start fresh). Files that clash (same size and version) are left apart. Approve, 
 campaign picks send `also` (the other sizes) so the server applies them to every size,
 logging activity once. Comments and tags stay per file. Previous/Next skip sibling sizes.
 
+## Carousels
+
+One ad made of several cards: files in the same folder named "<Ad name> card 1", "card 2"...
+("slide 1" also works), each card optionally in several sizes and versions ("... card 2 4x5 v2.png").
+`foldCarousels()` (called at the end of `groupAds()`, `CARD_RE`) folds two or more cards into one
+entry: `_carousel` [{ n, path, item }] in card order, `_title` (name without card/size/extension),
+`_paths` (every file) and `_approvePaths` (newest file of every size of every card). Tiles show a
+"Carousel · N cards" chip and small card previews along the bottom of the picture (tap one to
+open that card). The ad page shows "CAROUSEL · CARD 2 OF 5" and a strip of every card under the
+preview (green or amber underline for approved or changes requested). Approve, Favorite, campaign
+picks and Trash cover the whole carousel (`also` is capped at 60 paths in `alsoPaths()`); comments
+stay on each card. `copyKey()` ignores the card number, so "<Ad name>.copy.txt" covers every card.
+Rename's "All versions and sizes" works per card, not across the carousel.
+
 ## Rename (admin)
 
 "Rename (admin)" in the tile "..." menu and Rename on the ad page open `openRename()` in

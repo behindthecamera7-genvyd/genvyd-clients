@@ -1986,7 +1986,7 @@ function itemLink(env: Env, slug: string, path: string) {
 // ad, so approving, favoriting or picking it for a campaign covers every size. Capped and
 // cleaned like any path; only the main path is logged, so the digest lists the ad once.
 function alsoPaths(body: Record<string, unknown>, main: string): string[] {
-  const raw = Array.isArray(body.also) ? body.also.slice(0, 8) : [];
+  const raw = Array.isArray(body.also) ? body.also.slice(0, 60) : []; // a carousel: up to 10 cards in several sizes
   const out = new Set<string>();
   for (const a of raw) {
     const q = cleanPath(String(a ?? "")).join("/");
