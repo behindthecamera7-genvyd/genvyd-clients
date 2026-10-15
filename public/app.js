@@ -256,6 +256,119 @@
       return row;
     }
 
+    // ---- Changes to make: one row per ad (sizes and versions folded), with the client's words
+    // right there, so nothing needs opening to know what to fix. Ads that already have a newer
+    // version uploaded move to "Sent back to the client" and stop counting as to-do.
+    const cmtBy = new Map();
+    for (const m of dash.changeComments || []) { const k = `${m.client_slug}|${m.path}`; cmtBy.set(k, [...(cmtBy.get(k) || []), m]); }
+    const sibBy = new Map();
+    for (const [cs, p] of dash.changeSiblings || []) { const k = `${cs}|${parentOf(p)}`; sibBy.set(k, [...(sibBy.get(k) || []), p]); }
+    const kindFromName = (n) => (/\.(mp4|mov|m4v|webm)$/i.test(n) ? "video" : /\.(jpe?g|png|webp|gif|avif)$/i.test(n) ? "image" : "file");
+    // Only files that are still there (a file renamed or deleted in Finder leaves its old status behind).
+    const known = new Set((dash.changeSiblings || []).map(([cs, p]) => `${cs}|${p}`));
+    const changeAds = groupAds(dash.changes.filter((it) => known.has(`${it.clientSlug}|${it.path}`)).map((it) => ({ ...it }))).map((ad) => {
+      const paths = ad._paths || [ad.path];
+      const info = adInfo(ad);
+      const myVer = ad._verLatest || info.ver;
+      let newer = null;
+      for (const p of sibBy.get(`${ad.clientSlug}|${parentOf(ad.path)}`) || []) {
+        const o = adInfo({ name: baseName(p), path: p, kind: kindFromName(p), clientSlug: ad.clientSlug });
+        if (o.key === info.key && o.ver > myVer && (!newer || o.ver > newer.ver)) newer = { ver: o.ver, path: p };
+      }
+      const all = paths.flatMap((p) => cmtBy.get(`${ad.clientSlug}|${p}`) || []);
+      const roots = all.filter((m) => !m.parent_id).sort((a, b) => a.created_at - b.created_at).map((m) => ({ ...m, replies: all.filter((r) => r.parent_id === m.id) }));
+      const statusAt = Math.max(...dash.changes.filter((c) => c.clientSlug === ad.clientSlug && paths.includes(c.path)).map((c) => c.statusAt || 0));
+      return { ad, paths, newer, roots, statusAt };
+    }).sort((a, b) => b.statusAt - a.statusAt);
+    const todoChanges = changeAds.filter((c) => !c.newer);
+    const sentBack = changeAds.filter((c) => c.newer);
+    const copyChanges = dash.copyChanges || [];
+    const changesCount = todoChanges.length + copyChanges.length;
+
+    function commentList(roots, slug, path) {
+      return h("div", { class: "chg-comments" }, roots.map((m) =>
+        h("div", { class: "chg-c" + (m.resolved ? " done" : "") },
+          h("div", { class: "chg-q" }, m.timecode != null ? h("span", { class: "tc" }, fmtTime(m.timecode)) : null, ...linkify(m.body)),
+          h("div", { class: "mono muted chg-by" }, `${m.genvyd ? "Genvyd" : who(m.email)}, ${fmtDate(m.created_at)}${m.resolved ? " · marked done" : ""}`),
+          (m.replies || []).map((r) => h("div", { class: "chg-reply" }, h("span", { class: "mono muted" }, `↳ ${r.genvyd ? "You" : who(r.email)}: `), ...linkify(r.body))))));
+    }
+    function replyButton(slug, path, root, onDone) {
+      if (!root) return null;
+      const holder = h("div", { class: "chg-reply-box" });
+      const btn = h("button", { class: "btn small", type: "button", onclick: () => {
+        if (holder.firstChild) { fill(holder); return; }
+        const tb = h("textarea", { class: "reply-box", placeholder: `Reply to ${who(root.email)}…`, maxlength: "4000", rows: 2 });
+        const go = async () => {
+          if (!tb.value.trim()) return tb.focus();
+          try {
+            await api("POST", `/api/c/${enc(slug)}/comments`, { path: root.path, body: tb.value.trim(), parentId: root.id });
+            root.replies = [...(root.replies || []), { email: state.me.email, genvyd: true, body: tb.value.trim() }];
+            toast("Replied."); onDone();
+          } catch (err) { toast(err.message); }
+        };
+        fill(holder, h("div", { class: "reply-composer", style: "margin-left:0" }, tb,
+          h("div", { class: "composer-row" }, h("span"), h("button", { class: "btn small primary", type: "button", onclick: go }, "Post reply"))));
+        tb.focus();
+      } }, "↩ Reply");
+      return [btn, holder];
+    }
+    const changesBox = h("div");
+    function renderChanges() {
+      const rowFor = (c) => {
+        const { ad } = c;
+        const href = `#/c/${enc(ad.clientSlug)}/i/${enc(ad.path)}`;
+        const src = mediaUrl(ad.clientSlug, ad.path);
+        const media = ad.kind === "video"
+          ? h("video", { src: src + "#t=0.5", preload: "metadata", muted: true, playsinline: true })
+          : ad.kind === "image" ? h("img", { src, alt: "", loading: "lazy" }) : h("div", { class: "ftype" }, ad.name.split(".").pop());
+        const open = c.roots.filter((m) => !m.resolved && !m.genvyd);
+        const lastOpen = open[open.length - 1] || c.roots.filter((m) => !m.genvyd).pop();
+        const replyBits = replyButton(ad.clientSlug, ad.path, lastOpen, renderChanges);
+        return h("div", { class: "card chg-row" },
+          h("a", { class: "chg-thumb", href, title: "Open the ad" }, media),
+          h("div", { class: "chg-body" },
+            h("div", { class: "mono muted chg-meta" }, `${ad.clientName} · ${ad.folder || "Projects"} · ${who(ad.statusBy || "")} asked ${fmtDate(c.statusAt)}`),
+            h("h3", { class: "chg-name" }, h("a", { href }, ad._title || ad.name)),
+            ad._sizes || ad._verCount || ad._carousel
+              ? h("div", { class: "tile-sizes" },
+                  ad._carousel ? h("span", { class: "size-chip car-chip" }, `Carousel · ${ad._carousel.length} cards`) : null,
+                  (ad._sizes || []).map((v) => h("span", { class: "size-chip" }, v.label)),
+                  ad._verCount ? h("span", { class: "size-chip ver-chip" }, `v${ad._verLatest}`) : null)
+              : null,
+            c.roots.length ? commentList(c.roots) : h("div", { class: "chg-none" }, "No comment left. Reply to ask what she'd like changed."),
+            h("div", { class: "chg-actions" },
+              h("a", { class: "btn small primary", href }, "Open the ad"),
+              h("a", { class: "btn small", href, title: "On the ad page, use ↑ New version to upload the fixed file" }, `↑ Upload v${(ad._verLatest || adInfo(ad).ver) + 1}`),
+              replyBits ? replyBits[0] : null),
+            replyBits ? replyBits[1] : null));
+      };
+      const copyRow = (x) => {
+        const label = `${x.card ? `Card ${x.card} ` : ""}${COPY_KIND_LABEL[x.kind] || x.kind}`;
+        const href = `#/c/${enc(x.client_slug)}/copy`;
+        const roots = x.comments.filter((m) => !m.parent_id).map((m) => ({ ...m, replies: x.comments.filter((r) => r.parent_id === m.id) }));
+        return h("div", { class: "card chg-row chg-copy" },
+          h("a", { class: "chg-thumb chg-copy-thumb", href }, h("span", { class: "mono" }, "AD COPY")),
+          h("div", { class: "chg-body" },
+            h("div", { class: "mono muted chg-meta" }, `${x.clientName} · ${x.ad_path ? baseName(x.ad_path) : "Ad copy"} · ${who(x.status_by || "")} asked ${x.status_at ? fmtDate(x.status_at) : ""}`),
+            h("h3", { class: "chg-name" }, label, x.version > 1 ? h("span", { class: "mono muted", style: "font-size:13px" }, ` v${x.version}`) : null),
+            h("div", { class: "chg-copytext" }, x.text),
+            roots.length ? commentList(roots) : h("div", { class: "chg-none" }, "No comment left. Reply to ask what wording she'd like."),
+            h("div", { class: "chg-actions" }, h("a", { class: "btn small primary", href }, "Open in Ad review"))));
+      };
+      fill(changesBox,
+        changesCount
+          ? h("div", { class: "chg-list" }, todoChanges.map(rowFor), copyChanges.map(copyRow))
+          : h("div", { class: "card empty muted" }, "No changes waiting on you."),
+        sentBack.length
+          ? h("details", { class: "chg-sent" },
+              h("summary", { class: "mono muted" }, `SENT BACK TO THE CLIENT, WAITING ON THEM (${sentBack.length})`),
+              h("div", { class: "chg-sent-list" }, sentBack.map((c) => h("div", { class: "chg-sent-row" },
+                h("a", { href: `#/c/${enc(c.ad.clientSlug)}/i/${enc(c.newer.path)}` }, c.ad._title || c.ad.name),
+                h("span", { class: "mono muted" }, ` · ${c.ad.clientName} · v${c.newer.ver} is up`)))))
+          : null);
+    }
+    renderChanges();
+
     // Approved work, filterable by client, with the usual sort and type tabs.
     const clientsWithApproved = [...new Map(dash.approved.map((it) => [it.clientSlug, it.clientName])).entries()];
     const approvedHolder = h("div");
@@ -290,7 +403,7 @@
     // Clients first: what each one is waiting on, one tap to open.
     const clientCards = state.me.clients.map((c) => {
       const n = {
-        changes: dash.changes.filter((x) => x.clientSlug === c.slug).length,
+        changes: todoChanges.filter((x) => x.ad.clientSlug === c.slug).length + copyChanges.filter((x) => x.client_slug === c.slug).length,
         comments: dash.openComments.filter((x) => x.client_slug === c.slug).length,
         approved: dash.approved.filter((x) => x.clientSlug === c.slug).length,
         fresh: fresh.filter((a) => a.client_slug === c.slug).length,
@@ -314,21 +427,20 @@
 
     show(
       h("div", { class: "page-head" }, h("h1", {}, "Studio dashboard"), h("a", { class: "btn small", href: "#/admin" }, "Admin: clients, logins, backups")),
-      h("div", { class: "dash-h mono muted", style: "font-size:12px;margin:0 0 12px" }, "YOUR CLIENTS"),
+      h("h2", { id: "dash-changes", class: "dash-h" }, changesCount ? `Changes to make (${changesCount})` : "Changes to make"),
+      changesCount ? h("p", { class: "muted", style: "margin:-6px 0 14px" }, "What each client asked for, newest first. Upload the fix as a new version and it moves to Sent back.") : null,
+      changesBox,
+      h("div", { class: "dash-h mono muted", style: "font-size:12px;margin:32px 0 12px" }, "YOUR CLIENTS"),
       h("div", { class: "grid client-grid" }, clientCards.length ? clientCards : h("div", { class: "card empty muted" }, "No clients yet. Add one on the Admin page.")),
       h("div", { class: "stats", style: "margin-top:28px" },
         stat(fresh.length, "NEW SINCE LAST VISIT", "dash-activity", fresh.length ? "hot" : ""),
-        stat(dash.changes.length, "CHANGES REQUESTED", "dash-changes", dash.changes.length ? "warn" : ""),
+        stat(changesCount, "CHANGES TO MAKE", "dash-changes", changesCount ? "warn" : ""),
         stat(dash.openComments.length, "UNANSWERED COMMENTS", "dash-comments", ""),
         stat(dash.approved.length, "APPROVED, READY TO USE", "dash-approved", "ok"),
       ),
       h("div", { class: "dash-cols" },
         h("div", {},
-          h("h2", { id: "dash-changes", class: "dash-h" }, "Changes requested"),
-          dash.changes.length
-            ? h("div", { class: "grid" }, dash.changes.map(dashTile))
-            : h("div", { class: "card empty muted" }, "No open change requests."),
-          h("h2", { id: "dash-approved", class: "dash-h", style: "margin-top:36px" }, "Approved and ready to use"),
+          h("h2", { id: "dash-approved", class: "dash-h" }, "Approved and ready to use"),
           h("p", { class: "muted", style: "margin:-6px 0 14px" }, "Sort by Most favorited or In campaigns to see what the client likes best."),
           approvedHolder,
         ),

@@ -32,6 +32,17 @@ Mark done) and approved work (filter by client; sort by Most favorited / In most
 campaigns). Data from `GET /api/admin/dashboard` plus `/api/admin/overview`. Clients
 never see it (403, and their home goes straight to their projects).
 
+The dashboard opens with **Changes to make** (`renderChanges()` in viewDashboard): one row per
+ad, sizes and versions folded by `groupAds()`, newest request first, with a preview, client,
+folder, who asked and when, every comment on any size written out (timecodes, replies, done ones
+dimmed), and Open the ad / "↑ Upload vN" (opens the ad page, where admin uploads the new
+version) / Reply. Copy lines with changes requested are rows too (link to Ad review). Data:
+`changeComments`, `changeSiblings` (files in those clients) and `copyChanges` from
+`/api/admin/dashboard`. An ad whose folder already has a newer version (same `adInfo()` key,
+higher version) moves to "Sent back to the client, waiting on them" and stops counting; files no
+longer in the `files` table (renamed or deleted in Finder) are skipped. The count on the stat,
+the heading and the client cards is ads, not files.
+
 Top bar (`setupNav()` / `markNav()`): the logo always goes home (on the dashboard it
 refreshes and scrolls to top, since the hash does not change). Admin also gets Dashboard, a
 Clients menu that jumps into any client, and Admin, with the current one highlighted. The

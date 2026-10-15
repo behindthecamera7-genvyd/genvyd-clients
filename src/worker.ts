@@ -1797,7 +1797,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
       const adminMarks = admins.map(() => "?").join(",") || "''";
 
-      const [changes, approved, openComments, picks] = await env.DB.batch([
+      const [changes, approved, openComments, picks, chgComments, chgSiblings, copyChg, copyChgComments] = await env.DB.batch([
         env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status s WHERE status = 'changes' AND NOT EXISTS (SELECT 1 FROM hidden h WHERE h.client_slug = s.client_slug AND h.path = s.path) ORDER BY updated_at DESC LIMIT 200"),
         env.DB.prepare("SELECT client_slug, path, updated_by, updated_at FROM item_status s WHERE status = 'approved' AND NOT EXISTS (SELECT 1 FROM hidden h WHERE h.client_slug = s.client_slug AND h.path = s.path) ORDER BY updated_at DESC LIMIT 300"),
         env.DB.prepare(
@@ -1807,6 +1807,18 @@ async function route(req: Request, env: Env): Promise<Response> {
         ).bind(...admins),
         env.DB.prepare(
           "SELECT c.client_slug, i.path, c.name FROM campaign_items i JOIN campaigns c ON c.id = i.campaign_id ORDER BY c.name",
+        ),
+        // Change requests, readable on the dashboard: every comment on a file marked "changes".
+        env.DB.prepare(
+          "SELECT m.id, m.client_slug, m.path, m.email, m.body, m.timecode, m.resolved, m.parent_id, m.created_at FROM comments m " +
+            "JOIN item_status s ON s.client_slug = m.client_slug AND s.path = m.path WHERE s.status = 'changes' ORDER BY m.created_at",
+        ),
+        // Files in the clients that have change requests, so the page can tell when a newer version is already up.
+        env.DB.prepare("SELECT client_slug, path FROM files WHERE client_slug IN (SELECT DISTINCT client_slug FROM item_status WHERE status = 'changes')"),
+        env.DB.prepare("SELECT id, client_slug, kind, card, text, ad_path, status_by, status_at, version FROM copy_items WHERE status = 'changes' AND hidden = 0 ORDER BY status_at DESC LIMIT 100"),
+        env.DB.prepare(
+          "SELECT m.id, m.client_slug, m.path, m.email, m.body, m.resolved, m.parent_id, m.created_at FROM comments m " +
+            "JOIN copy_items i ON m.path = 'copy:' || i.id AND m.client_slug = i.client_slug WHERE i.status = 'changes' AND i.hidden = 0 ORDER BY m.created_at",
         ),
       ]);
 
@@ -1845,6 +1857,13 @@ async function route(req: Request, env: Env): Promise<Response> {
         openComments: (openComments.results as { client_slug: string }[])
           .filter((r) => byClient.has(r.client_slug))
           .map((r) => ({ ...r, replies: JSON.parse(String((r as { replies?: string }).replies || "[]")), clientName: byClient.get(r.client_slug)!.name })),
+        changeComments: (chgComments.results as Record<string, unknown>[]).map((m) => ({ ...m, resolved: !!m.resolved, genvyd: admins.includes(String(m.email).toLowerCase()) })),
+        changeSiblings: (chgSiblings.results as { client_slug: string; path: string }[]).map((r) => [r.client_slug, r.path]),
+        copyChanges: (copyChg.results as Record<string, any>[]).filter((r) => byClient.has(r.client_slug)).map((r) => ({
+          ...r, clientName: byClient.get(r.client_slug)!.name,
+          comments: (copyChgComments.results as Record<string, any>[]).filter((m) => m.path === `copy:${r.id}`)
+            .map((m) => ({ ...m, resolved: !!m.resolved, genvyd: admins.includes(String(m.email).toLowerCase()) })),
+        })),
       });
     }
 
