@@ -511,9 +511,9 @@ async function buildFeed(env: Env) {
       .map((p) => ({ ...fileInfo(p), comments: commentsOn(p) }));
     const hid = hidden.filter((r) => r.client_slug === c.slug).map((r) => ({ ...fileInfo(r.path), hidden_by: r.hidden_by, at: azTime(r.hidden_at) }));
     const recent = acts.filter((a) => a.client_slug === c.slug).slice(0, 60).map((a) => ({ at: azTime(a.created_at), by: a.email, did: a.kind, path: a.path, detail: a.detail }));
-    const KIND_LABEL: Record<string, string> = { tagline: "Tagline", headline: "Headline", primary: "Primary text", cta: "Call to action", caption: "Caption", other: "Other" };
+    const KIND_LABEL: Record<string, string> = { tagline: "Tagline", headline: "Headline", primary: "Primary text", description: "Description", link: "Link", cta: "Call to action", caption: "Caption", other: "Other" };
     const copy = copies.filter((r) => r.client_slug === c.slug).map((r) => ({
-      id: r.id, type: KIND_LABEL[r.kind] || r.kind, text: r.text, note: r.note, status: r.status, status_by: r.status_by,
+      id: r.id, type: (r.card ? `Card ${r.card} ` : "") + (KIND_LABEL[r.kind] || r.kind), card: r.card ?? null, text: r.text, note: r.note, status: r.status, status_by: r.status_by,
       at: r.status_at ? azTime(r.status_at) : null, version: r.version, hidden: !!r.hidden,
       campaigns: copyCamps.get(r.id) ?? [], comments: commentsOn(`copy:${r.id}`),
       for_ad: r.ad_path ? fileInfo(r.ad_path) : null,
@@ -596,7 +596,7 @@ async function writeFeed(env: Env, force = false) {
 // Every table that stores a file by its path (besides campaign_items, scoped by campaign).
 const RENAME_TABLES = ["item_status", "likes", "comments", "item_tags", "activity", "files", "views", "hidden"];
 
-const COPY_KINDS = ["tagline", "headline", "primary", "cta", "caption", "other"];
+const COPY_KINDS = ["tagline", "headline", "primary", "description", "link", "cta", "caption", "other"];
 
 // Copy files: Claude or Muse saves "<ad name>.copy.txt" next to the ad on the Synology,
 // one line per option:
@@ -610,40 +610,58 @@ const COPY_FILE = /\.copy\.(txt|md)$/i;
 const COPY_LABELS: [RegExp, string][] = [
   [/^tag ?lines?$/, "tagline"],
   [/^(headlines?|titles?)$/, "headline"],
-  [/^(primary( text)?|primary copy|body( text)?|ad text|text|description)$/, "primary"],
+  [/^(primary( text)?|primary copy|body( text)?|ad text|text)$/, "primary"],
+  [/^(description|desc|link description)$/, "description"],
+  [/^(link|url|website|destination|landing page)$/, "link"],
   [/^(cta|ctas|call to action|button( text)?)$/, "cta"],
   [/^(captions?|post caption|video caption)$/, "caption"],
   [/^other$/, "other"],
 ];
 
+// Carousels: a line "Card 2" (or "## Card 2", "Card 2:", "Slide 2") starts that card's section;
+// lines after it belong to card 2 until the next card or a "Shared"/"All cards" line.
+const CARD_HEAD = /^\s*(?:#{1,6}\s*)?\**\s*(?:card|slide)\s*#?\s*(\d{1,2})\s*\**\s*:?\s*$/i;
+const SHARED_HEAD = /^\s*(?:#{1,6}\s*)?\**\s*(?:shared|all cards|whole ad|every card)\s*\**\s*:?\s*$/i;
+// Labels that describe the file rather than being ad text ("Placement shown: Facebook Feed").
+const COPY_META = /^(placement( shown)?|placements|ad name|ad|format|size|sizes|campaign|client|date|version)$/;
+
 function parseCopyFile(text: string) {
-  type Line = { kind: string; text: string; note: string | null };
+  type Line = { kind: string; text: string; note: string | null; card: number | null };
   const out: Line[] = [];
   let cur: Line | null = null;
+  let card: number | null = null;
   let inNote = false;
   for (const raw of text.replace(/\r/g, "").replace(/^\uFEFF/, "").split("\n")) {
+    const ch = raw.match(CARD_HEAD);
+    if (ch) { card = Number(ch[1]) || null; cur = null; inNote = false; continue; }
+    if (SHARED_HEAD.test(raw)) { card = null; cur = null; inNote = false; continue; }
     // Markdown headings ("# Ponytail cap") and rules are for people; hashtags ("#golf") are not headings.
     if (/^\s*#{1,6}\s/.test(raw) || /^\s*(-{3,}|\*{3,})\s*$/.test(raw)) { if (cur) inNote = false; continue; }
     const m = raw.match(/^\s*(?:[-*]\s+)?\**\s*([A-Za-z][A-Za-z ]{0,24}?)\s*(?:\d{1,2}|\(\d{1,2}\)|option \d{1,2})?\s*\**\s*:\s*\**\s*(.*)$/i);
     const label = m ? m[1].trim().toLowerCase() : "";
     const kind = m ? COPY_LABELS.find(([re]) => re.test(label))?.[1] : undefined;
     if (m && kind) {
-      cur = { kind, text: m[2], note: null };
+      // Primary text and the button belong to the whole ad even inside a card section, unless
+      // the file clearly gives each card its own.
+      cur = { kind, text: m[2], note: null, card: kind === "primary" || kind === "cta" ? null : card };
       out.push(cur);
       inNote = false;
     } else if (m && /^notes?$/.test(label) && cur) {
       cur.note = m[2].trim();
       inNote = true;
+    } else if (m && COPY_META.test(label)) {
+      cur = null; inNote = false;
     } else if (cur) {
       if (inNote) { if (raw.trim()) cur.note = `${cur.note ?? ""}\n${raw.trim()}`.trim(); else inNote = false; }
       else cur.text += "\n" + raw;
     }
   }
   const seen = new Set<string>();
+  const key = (l: Line) => `${l.card ?? ""}|${l.kind}|${l.text}`;
   return out
     .map((l) => ({ ...l, text: l.text.replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 3000), note: l.note ? l.note.slice(0, 1000) : null }))
-    .filter((l) => l.text && !seen.has(l.kind + "|" + l.text) && seen.add(l.kind + "|" + l.text))
-    .slice(0, 50);
+    .filter((l) => l.text && !seen.has(key(l)) && seen.add(key(l)))
+    .slice(0, 80);
 }
 
 /**
@@ -656,16 +674,27 @@ async function importCopyFile(env: Env, slug: string, filePath: string, content:
   const adPath = filePath.replace(COPY_FILE, "");
   const want = parseCopyFile(content);
   const have = (await env.DB.prepare(
-    "SELECT i.id, i.kind, i.text, i.note, i.status, i.version, i.history, i.hidden, i.updated_at, " +
+    "SELECT i.id, i.kind, i.card, i.text, i.note, i.status, i.version, i.history, i.hidden, i.updated_at, " +
       "(SELECT COUNT(*) FROM comments m WHERE m.client_slug = i.client_slug AND m.path = 'copy:' || i.id) AS ncomments " +
       "FROM copy_items i WHERE i.client_slug = ? AND i.source = ? ORDER BY i.id",
   ).bind(slug, filePath).all<Record<string, any>>()).results;
   const rank: Record<string, number> = { changes: 0, pending: 1, approved: 2 };
   const stmts: D1PreparedStatement[] = [];
   const t = now();
-  for (const kind of COPY_KINDS) {
-    const w = want.filter((x) => x.kind === kind);
-    const hv = have.filter((x) => x.kind === kind);
+  // A line that used to be read without its card (older files) keeps its approval and gets its card.
+  for (const x of want) {
+    if (x.card == null) continue;
+    const old = have.find((y) => y.kind === x.kind && y.text === x.text && y.card == null && !want.some((z) => z.card == null && z.kind === y.kind && z.text === y.text));
+    if (old) { old.card = x.card; stmts.push(env.DB.prepare("UPDATE copy_items SET card = ? WHERE id = ?").bind(x.card, old.id)); }
+  }
+  // Each kind on each card (or the whole ad) is matched on its own.
+  const gk = (kind: string, card: number | null) => `${kind}|${card ?? ""}`;
+  const groups = new Set([...want.map((x) => gk(x.kind, x.card)), ...have.map((y) => gk(y.kind, y.card ?? null))]);
+  for (const g of groups) {
+    const w = want.filter((x) => gk(x.kind, x.card) === g);
+    const hv = have.filter((y) => gk(y.kind, y.card ?? null) === g);
+    const kind = g.split("|")[0];
+    const card = g.split("|")[1] ? Number(g.split("|")[1]) : null;
     for (const x of w) {
       const same = hv.find((y) => y.text === x.text);
       if (same && x.note !== null && x.note !== same.note) stmts.push(env.DB.prepare("UPDATE copy_items SET note = ? WHERE id = ?").bind(x.note, same.id));
@@ -682,8 +711,8 @@ async function importCopyFile(env: Env, slug: string, filePath: string, content:
         ).bind(x.text, x.note ?? old.note, adPath, JSON.stringify(history.slice(-20)), t, old.id));
       } else {
         stmts.push(env.DB.prepare(
-          "INSERT INTO copy_items (client_slug, kind, text, note, ad_path, source, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'copy file', ?, ?)",
-        ).bind(slug, kind, x.text, x.note, adPath, filePath, t, t));
+          "INSERT INTO copy_items (client_slug, kind, card, text, note, ad_path, source, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'copy file', ?, ?)",
+        ).bind(slug, kind, card, x.text, x.note, adPath, filePath, t, t));
       }
     });
     for (const old of stale.slice(fresh.length)) {
@@ -707,7 +736,7 @@ async function syncCopyFiles(env: Env, c: Client, files: { path: string; size?: 
   );
   let done = 0;
   for (const f of list) {
-    const sig = `${f.size ?? ""}|${f.mtime ?? ""}`;
+    const sig = `r2|${f.size ?? ""}|${f.mtime ?? ""}`; // r2: reader that understands carousel cards
     if (known.get(f.path) === sig) continue;
     if (done >= limit) break;
     done++;
@@ -744,7 +773,7 @@ async function copyList(env: Env, user: User, c: Client) {
     items: (items.results as Record<string, any>[]).map((r) => ({
       id: r.id, kind: r.kind, text: r.text, note: r.note, status: r.status, statusBy: r.status_by, statusAt: r.status_at,
       version: r.version, history: JSON.parse(r.history || "[]"), hidden: !!r.hidden, createdAt: r.created_at, updatedAt: r.updated_at,
-      adPath: r.ad_path ?? null, source: r.source ?? null,
+      adPath: r.ad_path ?? null, source: r.source ?? null, card: r.card ?? null,
       campaigns: byCopy.get(r.id) ?? [], comments: cmts.get(`copy:${r.id}`) ?? [],
     })),
   };
@@ -815,11 +844,11 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
     env.DB.prepare("SELECT path, tag FROM item_tags WHERE client_slug = ? AND path LIKE ? ESCAPE '\\' ORDER BY tag").bind(c.slug, like),
     env.DB.prepare("SELECT path FROM hidden WHERE client_slug = ? AND path LIKE ? ESCAPE '\\'").bind(c.slug, like),
     // Copy for the ads in this folder (shown under each ad), plus a count of copy not tied to any ad.
-    env.DB.prepare("SELECT id, ad_path, kind, text, status FROM copy_items WHERE client_slug = ? AND hidden = 0 AND (ad_path LIKE ? ESCAPE '\\' OR ad_path IS NULL) ORDER BY id").bind(c.slug, like),
+    env.DB.prepare("SELECT id, ad_path, kind, card, text, status FROM copy_items WHERE client_slug = ? AND hidden = 0 AND (ad_path LIKE ? ESCAPE '\\' OR ad_path IS NULL) ORDER BY id").bind(c.slug, like),
   ]);
-  const copyRows = (copyAll.results as { id: number; ad_path: string | null; kind: string; text: string; status: string }[]);
+  const copyRows = (copyAll.results as { id: number; ad_path: string | null; kind: string; card: number | null; text: string; status: string }[]);
   const copy = copyRows.filter((r) => r.ad_path && !r.ad_path.slice(prefix.length).includes("/"))
-    .map((r) => ({ id: r.id, adPath: r.ad_path, kind: r.kind, text: r.text.slice(0, 300), status: r.status }));
+    .map((r) => ({ id: r.id, adPath: r.ad_path, kind: r.kind, card: r.card ?? null, text: r.text.slice(0, 300), status: r.status }));
   const looseCopy = copyRows.filter((r) => !r.ad_path).length;
   const hidden = new Set((hiddenRows.results as { path: string }[]).map((r) => r.path));
   // Unviewed files under this folder (any depth), for "NEW" badges and folder counts.
@@ -1077,14 +1106,15 @@ async function route(req: Request, env: Env): Promise<Response> {
       if (texts.some((t) => t.length > 3000)) throw new HttpError(400, "One of those is too long (3,000 characters max).");
       const note = String(body.note ?? "").trim().slice(0, 1000) || null;
       const adPath = body.adPath ? cleanPath(String(body.adPath)).join("/") : null;
+      const card = Number.isInteger(Number(body.card)) && Number(body.card) > 0 && Number(body.card) < 100 ? Number(body.card) : null;
       const camps = (Array.isArray(body.campaigns) ? body.campaigns : []).map(Number).filter((n) => Number.isInteger(n)).slice(0, 10);
       const valid = camps.length
         ? new Set((await env.DB.prepare(`SELECT id FROM campaigns WHERE client_slug = ? AND id IN (${camps.map(() => "?").join(",")})`).bind(c.slug, ...camps).all<{ id: number }>()).results.map((r) => r.id))
         : new Set<number>();
       for (const t of texts) {
         const r = await env.DB.prepare(
-          "INSERT INTO copy_items (client_slug, kind, text, note, ad_path, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
-        ).bind(c.slug, kind, t, note, adPath, user.email, now(), now()).first<{ id: number }>();
+          "INSERT INTO copy_items (client_slug, kind, card, text, note, ad_path, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        ).bind(c.slug, kind, card, t, note, adPath, user.email, now(), now()).first<{ id: number }>();
         if (valid.size) {
           await env.DB.batch([...valid].map((cid) =>
             env.DB.prepare("INSERT OR IGNORE INTO copy_campaigns (copy_id, campaign_id, added_by, added_at) VALUES (?, ?, ?, ?)").bind(r!.id, cid, user.email, now())));

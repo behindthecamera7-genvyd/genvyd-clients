@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id. All keep existing data.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card. All keep existing data.
 
 ## Roles
 
@@ -215,6 +215,16 @@ A final ad takes copy whose `copyKey()` matches its folder and name, or failing 
 with the same ad name (so one copy file next to the video ad covers its screenshots too). In
 `Final ads/`, `copyKey()` ignores the " - <Placement>" part. What is not shown under an ad is
 listed below as "Other ad copy".
+
+Carousel copy (migration 0012, `copy_items.card`): in a copy file, a line "Card 2" (or "## Card 2",
+"Slide 2") starts that card's section and "Shared" / "All cards" ends it. Headline, Description
+and Link lines get the card number; Primary text and Button (cta) always belong to the whole ad.
+Kinds now include `description` and `link`. On Ad review each card's lines show as compact
+`copyLine()`s under that card's first screenshot (`copyFor()` returns `{ el, perCard }`), and the
+whole-ad lines below; the ad page shows the current card's lines plus the whole-ad ones. Admin
+"+ Add copy" has a Card picker for carousels. Metadata lines such as "Placement shown: ..." are
+ignored (`COPY_META`). The import signature is prefixed "r2|" so every copy file is read again
+once with this reader; lines that already existed keep their approvals and get their card.
 
 Copy files (how Claude and Muse import copy): save `<ad name>.copy.txt` (or `.copy.md`) in the
 same folder as the ad. The name is the ad's name with or without size, version and extension
