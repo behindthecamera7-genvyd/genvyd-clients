@@ -1438,8 +1438,8 @@ async function route(req: Request, env: Env): Promise<Response> {
         env.DB.prepare("SELECT path, COUNT(*) AS n, SUM(CASE WHEN resolved = 0 THEN 1 ELSE 0 END) AS open FROM comments WHERE client_slug = ? AND path NOT LIKE 'copy:%' GROUP BY path").bind(c.slug),
         env.DB.prepare("SELECT status, COUNT(*) AS n FROM copy_items WHERE client_slug = ? AND hidden = 0 GROUP BY status").bind(c.slug),
         env.DB.prepare(
-          "SELECT r.id, r.path, r.email, r.body, r.created_at, p.body AS parent_body, p.email AS parent_email FROM comments r JOIN comments p ON p.id = r.parent_id " +
-            "WHERE r.client_slug = ? AND r.created_at > ? ORDER BY r.created_at DESC LIMIT 12",
+          "SELECT r.id, r.path, r.email, r.body, r.created_at, p.body AS parent_body, p.email AS parent_email FROM comments r LEFT JOIN comments p ON p.id = r.parent_id " +
+            "WHERE r.client_slug = ? AND r.created_at > ? AND r.path NOT LIKE 'copy:%' ORDER BY r.created_at DESC LIMIT 30",
         ).bind(c.slug, since),
       ]);
       const st = new Map((statusR.results as { path: string; status: string; updated_by: string; updated_at: number }[]).map((r) => [r.path, r]));
@@ -1463,7 +1463,9 @@ async function route(req: Request, env: Env): Promise<Response> {
         });
       const copy = Object.fromEntries((copyR.results as { status: string; n: number }[]).map((r) => [r.status, r.n]));
       const replies = (repliesR.results as Record<string, any>[])
-        .filter((r) => admins.includes(String(r.email).toLowerCase()) && !admins.includes(String(r.parent_email).toLowerCase()))
+        // Genvyd's replies to the client's comments, and Genvyd's own new comments on an ad (a question).
+        .filter((r) => admins.includes(String(r.email).toLowerCase()) && (r.parent_email == null || !admins.includes(String(r.parent_email).toLowerCase())))
+        .slice(0, 12)
         .map((r) => ({ id: r.id, path: r.path, body: r.body, at: r.created_at, yourComment: r.parent_body }));
       return json({ client: { slug: c.slug, name: c.name }, items, copy, replies });
     }

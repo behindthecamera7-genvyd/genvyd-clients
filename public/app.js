@@ -312,6 +312,27 @@
       } }, "↩ Reply");
       return [btn, holder];
     }
+    // No comment to reply to: ask on the ad itself (she sees it on the ad and on her home page).
+    function askButton(ad, c) {
+      const holder = h("div", { class: "chg-reply-box" });
+      const btn = h("button", { class: "btn small", type: "button", onclick: () => {
+        if (holder.firstChild) { fill(holder); return; }
+        const tb = h("textarea", { class: "reply-box", maxlength: "4000", rows: 2 });
+        tb.value = "Happy to change this one. What would you like different?";
+        const go = async () => {
+          if (!tb.value.trim()) return tb.focus();
+          try {
+            await api("POST", `/api/c/${enc(ad.clientSlug)}/comments`, { path: ad.path, body: tb.value.trim() });
+            c.roots.push({ id: 0, path: ad.path, email: state.me.email, genvyd: true, body: tb.value.trim(), created_at: Date.now(), replies: [] });
+            toast("Asked. She'll see it on the ad and on her home page."); renderChanges();
+          } catch (err) { toast(err.message); }
+        };
+        fill(holder, h("div", { class: "reply-composer", style: "margin-left:0" }, tb,
+          h("div", { class: "composer-row" }, h("span"), h("button", { class: "btn small primary", type: "button", onclick: go }, "Send"))));
+        tb.focus();
+      } }, "↩ Ask what to change");
+      return [btn, holder];
+    }
     const changesBox = h("div");
     function renderChanges() {
       const rowFor = (c) => {
@@ -323,7 +344,7 @@
           : ad.kind === "image" ? h("img", { src, alt: "", loading: "lazy" }) : h("div", { class: "ftype" }, ad.name.split(".").pop());
         const open = c.roots.filter((m) => !m.resolved && !m.genvyd);
         const lastOpen = open[open.length - 1] || c.roots.filter((m) => !m.genvyd).pop();
-        const replyBits = replyButton(ad.clientSlug, ad.path, lastOpen, renderChanges);
+        const replyBits = lastOpen ? replyButton(ad.clientSlug, ad.path, lastOpen, renderChanges) : askButton(ad, c);
         return h("div", { class: "card chg-row" },
           h("a", { class: "chg-thumb", href, title: "Open the ad" }, media),
           h("div", { class: "chg-body" },
@@ -626,7 +647,7 @@
           links.length ? h("div", { class: "todo-links" }, links) : null,
           d.replies.length
             ? h("div", { class: "todo-replies" },
-                h("div", { class: "section-label mono muted" }, me ? "REPLIES FROM GENVYD" : "YOUR RECENT REPLIES"),
+                h("div", { class: "section-label mono muted" }, me ? "MESSAGES FROM GENVYD" : "YOUR RECENT MESSAGES"),
                 d.replies.slice(0, 3).map((r) => h("div", { class: "card todo-reply" },
                   h("div", { class: "mono muted", style: "font-size:12px" }, `${fmtDate(r.at)} · on `, h("a", { href: `#/c/${enc(slug)}/i/${enc(r.path)}` }, baseName(r.path))),
                   r.yourComment ? h("div", { class: "muted todo-quote" }, `${me ? "You" : "Client"}: "${String(r.yourComment).slice(0, 140)}${String(r.yourComment).length > 140 ? "…" : ""}"`) : null,

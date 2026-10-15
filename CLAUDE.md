@@ -41,7 +41,9 @@ version) / Reply. Copy lines with changes requested are rows too (link to Ad rev
 `/api/admin/dashboard`. An ad whose folder already has a newer version (same `adInfo()` key,
 higher version) moves to "Sent back to the client, waiting on them" and stops counting; files no
 longer in the `files` table (renamed or deleted in Finder) are skipped. The count on the stat,
-the heading and the client cards is ads, not files.
+the heading and the client cards is ads, not files. A request with no comment gets "↩ Ask what to change", which posts a
+Genvyd comment on the ad; the client sees it on the ad and under "Messages from Genvyd" on her
+home page (`todo` returns Genvyd's replies and Genvyd's own top-level comments).
 
 Top bar (`setupNav()` / `markNav()`): the logo always goes home (on the dashboard it
 refreshes and scrolls to top, since the hash does not change). Admin also gets Dashboard, a
