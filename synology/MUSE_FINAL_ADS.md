@@ -92,6 +92,23 @@ When the ad is revised (v2), update the same `.copy.txt` file instead of making 
 is the one file you may change: the portal keeps approved lines and sends changed lines back
 to the client for approval.
 
+## Carousel ads (several cards people swipe through)
+
+Same steps, but one screenshot per card per placement. In the preview, swipe or click to each
+card in turn and capture it. Put the card number right after the ad name, before " - ":
+
+```
+Holiday Hats card 1 - Facebook Feed.png
+Holiday Hats card 2 - Facebook Feed.png
+Holiday Hats card 3 - Facebook Feed.png
+Holiday Hats card 1 - Instagram Feed.png
+...
+```
+
+The portal shows them as one carousel ad, placement by placement, in card order. Keep the ad
+name identical on every file. If only one card changes, add v2 after its card number and leave
+the others alone: `Holiday Hats card 2 v2 - Instagram Feed.png`.
+
 ## 4. After the client asks for changes
 
 When Anthony has fixed an ad and asks for new screenshots, do not replace the old ones.

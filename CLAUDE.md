@@ -122,6 +122,9 @@ preview (green or amber underline for approved or changes requested). Approve, F
 picks and Trash cover the whole carousel (`also` is capped at 60 paths in `alsoPaths()`); comments
 stay on each card. `copyKey()` ignores the card number, so "<Ad name>.copy.txt" covers every card.
 Rename's "All versions and sizes" works per card, not across the carousel.
+Final ads carousel previews are named "<Ad name> card 2 - <Placement>.png": `finalAdGroups()` strips
+the card number, keeps the newest version per placement and card, labels each shot
+"Instagram Feed · card 2" and shows a "Carousel · N cards" chip.
 
 ## Rename (admin)
 

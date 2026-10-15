@@ -2048,21 +2048,29 @@
       const cut = stem.lastIndexOf(" - ");
       let ad = cut > 0 ? stem.slice(0, cut) : stem;
       const place = cut > 0 ? stem.slice(cut + 3).trim() : "Preview";
+      // Carousel previews: "<Ad name> card 2 - <Placement>.png", one per card per placement.
+      let card = 0;
+      const cm = ad.match(CARD_RE);
+      if (cm) { card = Number(cm[1]) || 0; ad = ad.replace(cm[0], " "); }
       let ver = 1;
       const v = ad.match(VER_RE);
       if (v) { ver = Number(v[1]) || 1; ad = ad.replace(v[0], " "); }
       ad = ad.replace(/\s{2,}/g, " ").replace(/[\s_\-.]+$/, "").trim() || stem;
       const key = ad.toLowerCase();
       if (!groups.has(key)) groups.set(key, { name: ad, all: [] });
-      groups.get(key).all.push({ it, place, ver });
+      groups.get(key).all.push({ it, place, ver, card });
     }
     const rank = (p) => { const i = PLACE_ORDER.indexOf(p.toLowerCase()); return i < 0 ? 99 : i; };
     return [...groups.values()].map((g) => {
       const latest = Math.max(...g.all.map((e) => e.ver));
-      const shots = g.all.filter((e) => e.ver === latest).sort((a, b) => rank(a.place) - rank(b.place) || a.place.localeCompare(b.place));
+      // Newest version of each placement (and each card), so a v2 of one card keeps the others.
+      const newest = new Map();
+      for (const e of g.all) { const k = `${e.place.toLowerCase()}|${e.card}`; if (!newest.has(k) || newest.get(k).ver < e.ver) newest.set(k, e); }
+      const shots = [...newest.values()].sort((a, b) => rank(a.place) - rank(b.place) || a.place.localeCompare(b.place) || a.card - b.card);
+      const cards = new Set(shots.map((e) => e.card).filter(Boolean)).size;
       const st = new Set(shots.map((e) => e.it.status));
       return {
-        name: g.name, ver: latest, versions: new Set(g.all.map((e) => e.ver)).size, shots,
+        name: g.name, ver: latest, versions: new Set(g.all.map((e) => e.ver)).size, shots, cards,
         status: st.size === 1 ? shots[0].it.status : st.has("changes") ? "changes" : "pending",
         comments: shots.reduce((n, e) => n + (e.it.comments || 0), 0),
         openComments: shots.reduce((n, e) => n + (e.it.openComments || 0), 0),
@@ -2139,16 +2147,17 @@
         lazy.observe(img);
         return h("a", { class: "final-shot", href: `#/c/${enc(slug)}/i/${enc(e.it.path)}`, title: "Open full size, with comments" },
           h("div", { class: "final-frame" }, img),
-          h("div", { class: "final-place mono" }, e.place, e.it.comments ? h("span", { class: "muted" }, ` · 💬 ${e.it.comments}`) : null));
+          h("div", { class: "final-place mono" }, e.card ? `${e.place} · card ${e.card}` : e.place, e.it.comments ? h("span", { class: "muted" }, ` · 💬 ${e.it.comments}`) : null));
       });
       return h("div", { class: "card final-card" + (ad.status === "approved" ? " is-approved" : ad.status === "changes" ? " is-changes" : ad.status === "rejected" ? " is-no" : "") },
         h("div", { class: "copy-head" },
           h("h3", { class: "final-name" }, ad.name),
           ad.versions > 1 ? h("span", { class: "size-chip ver-chip" }, `v${ad.ver} · ${ad.versions} versions`) : null,
+          ad.cards > 1 ? h("span", { class: "size-chip car-chip" }, `Carousel · ${ad.cards} cards`) : null,
           h("span", { class: `pill ${ad.status}` }, STATUS_LABEL[ad.status]),
           ad.seen ? null : h("span", { class: "pill new" }, "NEW"),
           h("span", { style: "flex:1" }),
-          h("span", { class: "mono muted" }, `${ad.shots.length} placement${ad.shots.length === 1 ? "" : "s"}`)),
+          h("span", { class: "mono muted" }, (() => { const np = new Set(ad.shots.map((e) => e.place.toLowerCase())).size; return `${np} placement${np === 1 ? "" : "s"}` + (ad.cards > 1 ? ` · ${ad.shots.length} previews` : ""); })())),
         h("div", { class: "final-row" }, shots),
         h("div", { class: "copy-actions" },
           h("button", { class: "btn small" + (ad.status === "approved" ? " on-ok" : ""), type: "button", onclick: () => setStatus(ad.status === "approved" ? "pending" : "approved") }, ad.status === "approved" ? "✓ Approved" : "Approve"),
