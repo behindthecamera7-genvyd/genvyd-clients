@@ -488,7 +488,8 @@
       const inFinal = (it) => it.folder === "Final ads" || it.folder.startsWith("Final ads/");
       const ads = groupAds(d.items.filter((it) => !inFinal(it)));
       const waiting = ads.filter((a) => a.status === "pending" && (a.kind === "image" || a.kind === "video"))
-        .sort((a, b) => (a.seen === b.seen ? 0 : a.seen ? 1 : -1) || String(b.mtime).localeCompare(String(a.mtime)));
+        // Client: ones they haven't opened first, then newest. Admin: newest first (admin's own views don't matter here).
+        .sort((a, b) => (state.me.admin || a.seen === b.seen ? 0 : a.seen ? 1 : -1) || String(b.mtime).localeCompare(String(a.mtime)));
       const changing = ads.filter((a) => a.status === "changes").length;
       const finals = finalAdGroups(d.items.filter(inFinal)).filter((g) => g.status === "pending").length;
       const copyN = d.copy.pending || 0;
