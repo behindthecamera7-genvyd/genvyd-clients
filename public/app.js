@@ -482,7 +482,8 @@
   // awaiting review (sizes and versions folded, so a v2 shows once), final ads and ad copy to
   // check, and Genvyd's recent replies to their comments. Admin sees the same, as "Waiting on <client>".
   function todoPanel(slug, clientName) {
-    const box = h("div", { class: "todo" }, h("p", { class: "muted", style: "margin:0" }, "Checking what is new…"));
+    // Same Fit / Fill choice as the folders (Fit, the whole image, unless they picked Fill).
+    const box = h("div", { class: "todo" + ((loadPrefs().fit || "fit") === "fit" ? " thumbs-fit" : "") }, h("p", { class: "muted", style: "margin:0" }, "Checking what is new…"));
     const st = { all: false };
     api("GET", `/api/c/${enc(slug)}/todo`).then((d) => {
       const inFinal = (it) => it.folder === "Final ads" || it.folder.startsWith("Final ads/");
