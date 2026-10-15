@@ -91,17 +91,17 @@
     while ((m = re.exec(String(text)))) {
       let url = m[0].replace(/[.,;:!?)\]]+$/, "");
       if (m.index > last) out.push(String(text).slice(last, m.index));
-      let label = url, inPortal = false;
+      let label = url, inPortal = false, adLink = false;
       try {
         const u = new URL(url);
         if (u.origin === location.origin) {
           inPortal = true;
           const parts = u.hash.replace(/^#\/?/, "").split("/");
-          if (parts[0] === "c" && parts[2] === "i" && parts[3]) label = "▸ " + baseName(decodeURIComponent(parts.slice(3).join("/")));
-          else label = "▸ Open in the portal";
+          if (parts[0] === "c" && parts[2] === "i" && parts[3]) { label = "Open " + baseName(decodeURIComponent(parts.slice(3).join("/"))) + " →"; adLink = true; }
+          else label = "Open in the portal →";
         }
       } catch { /* not a URL after all */ }
-      out.push(h("a", inPortal ? { class: "comment-link", href: url.includes("#") ? url.slice(url.indexOf("#")) : "#/" } : { class: "comment-link", href: url, target: "_blank", rel: "noopener noreferrer" }, label));
+      out.push(h("a", inPortal ? { class: "comment-link" + (adLink ? " ad-link" : ""), href: url.includes("#") ? url.slice(url.indexOf("#")) : "#/" } : { class: "comment-link", href: url, target: "_blank", rel: "noopener noreferrer" }, label));
       last = m.index + url.length;
       re.lastIndex = last;
     }
