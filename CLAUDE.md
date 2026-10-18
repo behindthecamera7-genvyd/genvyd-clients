@@ -124,7 +124,8 @@ them (`pickable()`), and a sticky bar (`.sel-bar`, `paintBar()`) acts on all tic
 changes, No, Awaiting review, Favorite (`/like` with `liked: true`, so it never un-favorites), + Campaign
 (one client at a time), Trash, Download; in the Trash view Restore, Download and admin Delete for good.
 Each ad covers every size, version and carousel card, one request per ad with a running count, and
-stops at the first error. Clients get the same bar (no Delete).
+stops at the first error. Clients get the same bar (no Delete). It is `selectKit()` in app.js, shared with
+the "Waiting on you" box (`todoPanel()`), which shows all its ads while selecting and recounts after each action.
 
 Every tile has a "..." button (`openTileMenu()`): add to or take out of any campaign (admin
 can name a new campaign right there, it is created and the ad added), Favorite, Approve,

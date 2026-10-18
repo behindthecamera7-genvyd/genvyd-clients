@@ -649,3 +649,5 @@ img.car-mini { width: 100%; height: 100%; object-fit: cover; display: block; opa
   .sel-actions { flex-wrap: nowrap; overflow-x: auto; width: 100%; padding-bottom: 2px; -webkit-overflow-scrolling: touch; }
   .sel-actions .btn { flex: 0 0 auto; }
 }
+.todo-select { margin-left: auto; }
+.todo .sel-bar { margin-left: 0; margin-right: 0; }
