@@ -119,6 +119,13 @@ versions. `saveMany()` fetches the files in the browser; phones get the share sh
 files (Save N Items to Photos), computers get one zip built by the small stored-zip writer
 in app.js (`makeZip`, CRC32, no compression). Nothing zips on the Worker (CPU limits).
 
+**Select mode** (toolbar "☑ Select" in every `mediaBrowser()` list): taps tick ads instead of opening
+them (`pickable()`), and a sticky bar (`.sel-bar`, `paintBar()`) acts on all ticked ads: Approve, Request
+changes, No, Awaiting review, Favorite (`/like` with `liked: true`, so it never un-favorites), + Campaign
+(one client at a time), Trash, Download; in the Trash view Restore, Download and admin Delete for good.
+Each ad covers every size, version and carousel card, one request per ad with a running count, and
+stops at the first error. Clients get the same bar (no Delete).
+
 Every tile has a "..." button (`openTileMenu()`): add to or take out of any campaign (admin
 can name a new campaign right there, it is created and the ad added), Favorite, Approve,
 Open, Download. All of it covers every size of the ad. Popover on desktop, bottom sheet on phones.

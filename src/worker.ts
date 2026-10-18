@@ -1624,9 +1624,10 @@ async function route(req: Request, env: Env): Promise<Response> {
       const existing = await env.DB.prepare("SELECT 1 FROM likes WHERE client_slug = ? AND path = ? AND email = ?")
         .bind(c.slug, p, user.email)
         .first();
-      // Toggle the main file; other sizes follow it.
+      // Toggle the main file; other sizes follow it. `liked: true/false` sets it instead (Select mode).
+      const want = typeof body.liked === "boolean" ? body.liked : !existing;
       for (const q of [p, ...also]) {
-        if (existing) {
+        if (!want) {
           await env.DB.prepare("DELETE FROM likes WHERE client_slug = ? AND path = ? AND email = ?").bind(c.slug, q, user.email).run();
         } else {
           await env.DB.prepare(
@@ -1637,7 +1638,7 @@ async function route(req: Request, env: Env): Promise<Response> {
             .run();
         }
       }
-      if (!existing) await logActivity(env, c.slug, p, user.email, "like", null);
+      if (want && !existing) await logActivity(env, c.slug, p, user.email, "like", null);
       return json(await itemDetail(env, user, c, p));
     }
     if (action === "hide" && method === "POST") {

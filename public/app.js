@@ -871,8 +871,14 @@
 
   function mediaBrowser(items, { tileFn, emptyText, slug, zipName }) {
     const prefs = loadPrefs();
-    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null, seen: "all", fit: prefs.fit || "fit", hidden: false };
+    const st = { type: prefs.type || "all", sort: prefs.sort || "newest", status: "all", tag: null, seen: "all", fit: prefs.fit || "fit", hidden: false, select: false };
     const root = h("div", { class: "browser" });
+    // Select mode: tick several ads, then act on all of them at once (every size and version of each).
+    const picked = new Set();
+    let current = [];
+    let busy = false;
+    let delHidden = null;
+    const selBar = h("div", { class: "sel-bar", role: "toolbar", "aria-label": "Selected ads" });
     // Tiles report hides, unhides and deletes so the grid updates in place.
     root.addEventListener("gv-change", (e) => {
       const { paths, hidden, deleted } = e.detail;
@@ -981,6 +987,7 @@
               ? h("button", { class: "btn small danger", type: "button", onclick: () => deleteHidden(hiddenAds) }, `Delete all ${hiddenAds.length} for good`)
               : null)
         : null;
+      delHidden = deleteHidden;
       async function deleteHidden(list) {
         const paths = list.flatMap((a) => a._paths || [a.path]).map((p) => ({ p, s: (list.find((a) => (a._paths || [a.path]).includes(p)) || {}).clientSlug || slug }));
         if (!confirm(`Delete ${list.length} hidden ad${list.length === 1 ? "" : "s"} (${paths.length} file${paths.length === 1 ? "" : "s"})?\n\nThe files move to "_Deleted files" on the Synology, and their comments and approvals are removed from the portal.`)) return;
@@ -1005,7 +1012,13 @@
             onclick: () => saveMany(files.map((f) => ({ src: mediaUrl(f.clientSlug || slug, f.path), name: f.name, size: f.size })), zipName || "Genvyd ads"),
           }, `↓ Download all ${files.length}`)
         : null;
-      const grid = (list) => h("div", { class: "grid" }, list.map(tileFn));
+      current = shown;
+      for (const k of [...picked]) if (!shown.some((a) => a.path === k)) picked.delete(k);
+      const grid = (list) => h("div", { class: "grid" }, list.map((it) => pickable(tileFn(it), it)));
+      const selectBtn = shown.length
+        ? h("button", { class: "btn small" + (st.select ? " on-warn" : ""), type: "button", title: "Pick several ads and approve, trash or download them together",
+            onclick: () => { st.select = !st.select; picked.clear(); render(); } }, st.select ? "Done selecting" : "☑ Select")
+        : null;
       let body;
       if (!shown.length) {
         body = h("div", { class: "card empty muted" }, ads.length ? "Nothing matches these filters." : grouped.length ? "Everything here is in the trash. Tap Trash to see it." : emptyText || "Nothing here yet.");
@@ -1019,7 +1032,147 @@
       }
 
       fill(root, 
-        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, fitSeg, markAll, hiddenBtn, dlAll)), hiddenNote, tagRow, body].filter(Boolean),
+        ...[h("div", { class: "toolbar" }, typeTabs, h("div", { class: "toolbar-right" }, seenSel, statusSel, sortSel, fitSeg, markAll, hiddenBtn, selectBtn, dlAll)), hiddenNote, tagRow, body, st.select ? selBar : null].filter(Boolean),
+      );
+      root.classList.toggle("selecting", st.select);
+      if (st.select) paintBar();
+    }
+
+    // A tile in select mode: a tap ticks it instead of opening or playing it.
+    function pickable(el, it) {
+      if (!st.select) return el;
+      const box = h("span", { class: "pick-box", "aria-hidden": "true" }, "✓");
+      el.classList.add("pickable");
+      el.classList.toggle("picked", picked.has(it.path));
+      el.setAttribute("role", "checkbox");
+      el.setAttribute("aria-checked", picked.has(it.path) ? "true" : "false");
+      el.append(box);
+      el.addEventListener("click", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (picked.has(it.path)) picked.delete(it.path); else picked.add(it.path);
+        el.classList.toggle("picked", picked.has(it.path));
+        el.setAttribute("aria-checked", picked.has(it.path) ? "true" : "false");
+        paintBar();
+      }, true);
+      return el;
+    }
+
+    const sizesOf = (a) => [a.path, ...(a._approvePaths || (a._sizes || []).map((v) => v.path)).filter((p) => p !== a.path)];
+    const filesOf = (a) => [...new Set([a.path, ...(a._paths || []), ...sizesOf(a)])];
+    const touch = (paths, fn) => { const set = new Set(paths); items.forEach((it) => { if (set.has(it.path)) fn(it); }); };
+    const chosen = () => current.filter((a) => picked.has(a.path));
+
+    // Runs one request per ad, in order, with a running count. Stops at the first error.
+    async function bulk(verb, fn, doneMsg) {
+      const list = chosen();
+      if (!list.length || busy) return;
+      busy = true; paintBar();
+      let done = 0;
+      try {
+        for (const a of list) {
+          toast(`${verb} ${done + 1} of ${list.length}…`);
+          await fn(a, a.clientSlug || slug);
+          done++;
+        }
+        toast(doneMsg(done));
+      } catch (err) {
+        toast(`${err.message} (${done} of ${list.length} done)`);
+      }
+      busy = false;
+      state.listCache.clear();
+      return done;
+    }
+    const setStatus = (status, label) => bulk("Updating", async (a, cs) => {
+      const paths = sizesOf(a);
+      await api("POST", `/api/c/${enc(cs)}/status`, { path: a.path, status, also: paths.slice(1) });
+      touch(paths, (it) => (it.status = status));
+    }, (n) => `${n} ad${n === 1 ? "" : "s"} ${label}.`).then(() => render());
+    const favorite = () => bulk("Adding", async (a, cs) => {
+      const paths = sizesOf(a);
+      await api("POST", `/api/c/${enc(cs)}/like`, { path: a.path, also: paths.slice(1), liked: true });
+      touch(paths, (it) => { if (!it.liked) { it.liked = true; it.likes = (it.likes || 0) + 1; } });
+    }, (n) => `${n} ad${n === 1 ? "" : "s"} added to favorites.`).then(() => render());
+    const trash = (hide) => bulk(hide ? "Moving" : "Restoring", async (a, cs) => {
+      const paths = filesOf(a);
+      await api("POST", `/api/c/${enc(cs)}/hide`, { path: a.path, also: paths.slice(1), hidden: hide });
+      touch(paths, (it) => (it.hidden = hide));
+    }, (n) => hide ? `${n} ad${n === 1 ? "" : "s"} moved to the trash. Tap Trash to get them back.` : `${n} ad${n === 1 ? "" : "s"} restored.`)
+      .then(() => { picked.clear(); render(); });
+    const download = () => {
+      const list = chosen();
+      const files = list.flatMap((a) => (a._sizes ? a._sizes.map((v) => v.item) : a._carousel ? a._carousel.map((c) => c.item) : [a]));
+      if (files.length) saveMany(files.map((f) => ({ src: mediaUrl(f.clientSlug || slug, f.path), name: f.name, size: f.size })), zipName || "Genvyd ads");
+    };
+    async function toCampaign() {
+      const list = chosen();
+      const slugs = [...new Set(list.map((a) => a.clientSlug || slug))];
+      if (slugs.length !== 1) return toast("Pick ads from one client at a time to add them to a campaign.");
+      const cs = slugs[0];
+      const close = () => { layer.remove(); document.removeEventListener("keydown", esc); };
+      const esc = (e) => { if (e.key === "Escape") close(); };
+      const rows = h("div", { class: "menu-camps" }, h("div", { class: "muted menu-loading" }, "Loading campaigns…"));
+      const addTo = async (id, name) => {
+        close();
+        await bulk("Adding", async (a) => {
+          await api("POST", `/api/c/${enc(cs)}/campaigns/${id}/items`, { path: a.path, also: sizesOf(a).slice(1) });
+          touch(sizesOf(a), (it) => { it.campaigns = [...new Set([...(it.campaigns || []), name])]; });
+        }, (n) => `${n} ad${n === 1 ? "" : "s"} added to ${name}.`);
+        render();
+      };
+      const panel = h("div", { class: "tile-menu save-sheet", role: "dialog", "aria-label": "Add to campaign" },
+        h("div", { class: "menu-head" },
+          h("div", { class: "menu-title" }, `Add ${list.length} ad${list.length === 1 ? "" : "s"} to a campaign`),
+          h("button", { class: "menu-x", type: "button", "aria-label": "Close", onclick: close }, "×")),
+        rows);
+      const layer = h("div", { class: "menu-layer save-layer", onclick: (e) => { if (e.target === layer) close(); } }, panel);
+      document.addEventListener("keydown", esc);
+      document.body.append(layer);
+      try {
+        const r = await api("GET", `/api/c/${enc(cs)}/campaigns?path=${enc(list[0].path)}`);
+        let creator = null;
+        if (state.me.admin) {
+          const input = h("input", { class: "menu-input", placeholder: "New campaign name", maxlength: "120", onkeydown: (e) => { if (e.key === "Enter") create(); } });
+          const create = async () => {
+            const name = input.value.trim();
+            if (!name) return input.focus();
+            try { const c = await api("POST", `/api/c/${enc(cs)}/campaigns`, { name }); addTo(c.id, name); } catch (err) { toast(err.message); }
+          };
+          creator = h("div", { class: "menu-create" }, input, h("button", { class: "btn small primary", type: "button", onclick: create }, "Create"));
+        }
+        fill(rows,
+          r.campaigns.length
+            ? r.campaigns.map((cp) => h("button", { class: "menu-item camp-row", type: "button", onclick: () => addTo(cp.id, cp.name) },
+                h("span", { class: "camp-check" }, "+"), h("span", { class: "camp-name" }, cp.name)))
+            : h("div", { class: "muted menu-loading" }, state.me.admin ? "No campaigns yet. Name one below." : "No campaigns set up yet."),
+          creator);
+      } catch (err) { fill(rows, h("div", { class: "muted menu-loading" }, err.message)); }
+    }
+    function paintBar() {
+      const list = chosen();
+      const n = list.length;
+      const none = n === 0 || busy;
+      const b = (label, onclick, cls = "") => h("button", { class: "btn small " + cls, type: "button", disabled: none, onclick }, label);
+      const allOn = n === current.length;
+      fill(selBar,
+        h("div", { class: "sel-count" },
+          h("strong", {}, n ? `${n} selected` : "Tap ads to select them"),
+          h("button", { class: "linkish", type: "button", disabled: busy, onclick: () => {
+            if (allOn) picked.clear(); else current.forEach((a) => picked.add(a.path));
+            render();
+          } }, allOn ? "Clear" : `Select all ${current.length}`)),
+        h("div", { class: "sel-actions" },
+          st.hidden
+            ? [b("↺ Restore", () => trash(false)),
+               state.me.admin ? b("Delete for good", () => delHidden(chosen()).then(() => { picked.clear(); render(); }), "danger") : null,
+               b("↓ Download", download)]
+            : [b("✓ Approve", () => setStatus("approved", "approved"), "sel-ok"),
+               b("Request changes", () => setStatus("changes", "marked changes requested")),
+               b("✕ No", () => setStatus("rejected", "marked No"), "sel-no"),
+               b("Awaiting review", () => setStatus("pending", "set back to awaiting review")),
+               b("♥ Favorite", favorite),
+               b("+ Campaign", toCampaign),
+               b("🗑 Trash", () => trash(true)),
+               b("↓ Download", download)]),
       );
     }
     render();
