@@ -36,6 +36,11 @@ h3 { font-size: 16px; }
 .mono { font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; }
 .muted { color: var(--smoke); }
 .wrap { max-width: 1320px; margin: 0 auto; padding: 32px 16px 80px; }
+/* Long file names (no spaces) must wrap, not stretch the page wider than a phone. */
+.wrap { overflow-wrap: anywhere; }
+.wrap h1, .wrap h2, .wrap .btn { overflow-wrap: normal; }
+/* iPhone zooms the page in on any box with text under 16px; keep them at 16px on phones. */
+@media (max-width: 640px) { input, select, textarea, .mini-select, .tag-input { font-size: 16px; } }
 @media (min-width: 720px) { .wrap { padding: 40px 32px 96px; } }
 
 /* ---- top bar ---------------------------------------------------------- */
@@ -125,7 +130,7 @@ label.check input { width: auto; }
 .tile-stats { display: flex; gap: 14px; margin-top: 6px; }
 
 /* ---- viewer ----------------------------------------------------------- */
-.viewer { display: grid; gap: 20px; grid-template-columns: 1fr; }
+.viewer { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); }
 .viewer > div { min-width: 0; }
 @media (min-width: 1000px) { .viewer { grid-template-columns: minmax(0, 1fr) 380px; } }
 .stage { overflow: hidden; background: var(--panel); display: grid; place-items: center; min-height: 240px; }
@@ -148,10 +153,10 @@ label.check input { width: auto; }
 .composer-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 
 /* ---- admin ------------------------------------------------------------ */
-.admin { display: grid; gap: 20px; grid-template-columns: 1fr; }
+.admin { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 1000px) { .admin { grid-template-columns: minmax(0, 1fr) 420px; } }
 .pad { padding: 20px; }
-.form-row { display: grid; gap: 10px; grid-template-columns: 1fr; }
+.form-row { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 640px) { .form-row { grid-template-columns: 1fr 1fr auto; align-items: center; } }
 .client-block { padding: 18px 20px; border-top: 1px solid var(--line); }
 .client-block:first-of-type { border-top: 0; }
@@ -184,7 +189,7 @@ label.check input { width: auto; }
 .tab:hover { color: var(--bone); }
 .tab.active { color: var(--bone); border-bottom-color: var(--accent); }
 .camp-box { padding-top: 2px; }
-.camp-new { display: grid; gap: 10px; grid-template-columns: 1fr; margin-bottom: 20px; }
+.camp-new { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); margin-bottom: 20px; }
 @media (min-width: 900px) { .camp-new { grid-template-columns: 1fr 1.4fr auto; align-items: center; } }
 .tile-wrap { position: relative; }
 .tile-wrap .tile { height: 100%; }
@@ -219,7 +224,7 @@ label.check input { width: auto; }
 .stat.hot .stat-n { color: var(--accent); }
 .stat.warn .stat-n { color: var(--warn); }
 .stat.ok .stat-n { color: var(--ok); }
-.dash-cols { display: grid; gap: 24px; grid-template-columns: 1fr; }
+.dash-cols { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 1100px) { .dash-cols { grid-template-columns: minmax(0, 1fr) 380px; } }
 .dash-h { margin: 8px 0 14px; }
 .feed-item.fresh { background: rgba(255, 42, 42, 0.06); }
@@ -252,7 +257,7 @@ label.check input { width: auto; }
   label.check { min-height: 40px; }
 
   /* Filters sit two per row instead of a tall stack. */
-  .toolbar { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  .toolbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .toolbar-right { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .toolbar-right > * { width: 100%; min-width: 0; }
   .mini-select { height: 40px; padding-right: 28px; text-overflow: ellipsis; }
@@ -620,4 +625,4 @@ img.car-mini { width: 100%; height: 100%; object-fit: cover; display: block; opa
 .chg-sent summary { cursor: pointer; font-size: 12px; padding: 6px 0; }
 .chg-sent-list { display: grid; gap: 6px; margin-top: 8px; }
 .chg-sent-row { font-size: 14px; }
-@media (max-width: 640px) { .chg-row { grid-template-columns: 1fr; } .chg-thumb { height: 240px; } }
+@media (max-width: 640px) { .chg-row { grid-template-columns: minmax(0, 1fr); } .chg-thumb { height: 240px; } }
