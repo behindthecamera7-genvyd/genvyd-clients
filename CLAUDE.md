@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card. All keep existing data.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only). All keep existing data.
 
 ## Roles
 
@@ -275,6 +275,33 @@ dashboard, digest and Claude feed pick them up as ordinary files. Request change
 the first placement's ad page for the comment. Admin gets Add screenshots (creates the
 folder if needed, uploads there) and Open folder. No D1 changes.
 
+## Campaign summaries and approval
+
+Brief for writing them: `synology/CAMPAIGN_SUMMARY.md`. A file "<Campaign>.summary.md" anywhere in a
+client folder (optional front matter: `ads` list, `budget`, `start`, `end`) is not a file tile: `listDir()`
+and `scanClients()` record it in `campaign_summaries` (`noteSummaries()`) and it shows as `summaryCard()`
+pinned at the top of its folder (and of Ad review when it is in Final ads), with the Markdown rendered by
+`renderMarkdown()` (DOM only, no HTML from the file, no regex lookbehind so older iPhones parse app.js),
+the listed ads as thumbnails with their `.copy.txt` text (`adKeyOf()` on the server), and a two-step
+approval: tick `AGREE_TEXT` + typed name enables "Approve campaign", then the "Final confirmation" dialog
+with `CONFIRM_TEXT` (both texts live in worker.ts and are sent to the page). "Request changes" posts a
+comment too. The client home shows `campaignBanner()` (amber until approved, green "APPROVED by ...").
+
+Server: `loadSummary()` reads the file (SHA-256), resolves the ads, finds copy files (hashed when `full`)
+and builds `sig` from the summary hash plus each listed file's path, size and mtime. `campaign_events`
+(kinds approved / changes / reset) is append only: triggers refuse UPDATE and DELETE, restore only
+INSERT OR IGNOREs it (`APPEND_ONLY`). An approval stores email, typed name, UTC and Phoenix time, IP
+(CF-Connecting-IP), user agent, summary hash, `files_json`, the frozen text and the agreement text, and
+is refused if the page's `sig` is out of date (409), an ad is missing, or the user is admin (Genvyd never
+signs for a client). `summaryStatus()` turns an approval whose `sig` no longer matches into a recorded
+reset ("Changed since approval, needs re-approval", with what changed); it runs on the card, on the
+client home list (`/summaries`) and for 3 campaigns per 15 minute run (`checkApprovals()`). After a
+change request, a changed file shows as "Needs approval" again (no event). Admin gets Approval history
+and "Download record" (`/summary/record`, a PDF from `src/pdf.ts`, written by hand, no library).
+Digest kinds `campaign_approved` / `campaign_changes`. Routes: `GET /api/c/:slug/summaries`,
+`GET /summary?path=`, `POST /summary/approve` {path, name, agreed, confirmed, sig}, `POST /summary/changes`
+{path, comment}, `GET /summary/record?path=&id=` (admin).
+
 ## Claude feed
 
 `writeFeed()` writes `_Claude feed/client-feedback.md` (and `.json`) on the Synology: per
@@ -282,7 +309,9 @@ client, changes requested with every comment and timecode, unanswered comments, 
 with campaigns, campaigns, hidden ads, last 7 days of client activity, each file with its Mac
 path (`/Volumes/GenvydClients/<folder>/<path>`) and portal link. Cron `7,37 * * * *`, only
 when a signature (activity id, comment counts, hidden, campaign picks) changed; Admin >
-Claude feed > Update now forces it. These two files are the only ones the portal overwrites.
+Claude feed > Update now forces it. It also has a "Campaign approvals" section per client, and
+`_Claude feed/approvals-log.md` gets one line per approval (rebuilt from the append-only records).
+These three files are the only ones the portal overwrites.
 A Claude chat linked to the Mac reads them ("check the client feedback") and can open files.
 
 ## Backups

@@ -10,6 +10,8 @@
  * Data:    Likes, comments, approvals and the activity feed live in D1.
  */
 
+import { makePdf, type PdfBlock } from "./pdf";
+
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
@@ -335,7 +337,11 @@ const BACKUP_TABLES = [
   "clients", "members", "item_status", "likes", "comments", "activity",
   "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views", "hidden",
   "copy_items", "copy_campaigns", "copy_imports", "file_ids", "file_renames",
+  "campaign_summaries", "campaign_events",
 ];
+// Approval records are append only (the database refuses to change or delete them), so a restore
+// only adds back records that are missing and never replaces the ones there.
+const APPEND_ONLY = new Set(["campaign_events"]);
 const BACKUP_NAME_RE = /^portal-backup-\d{4}-\d{2}-\d{2}-\d{4}(-[a-z-]{1,20})?\.json$/;
 const SYSTEM_USER: User = { email: "backup@portal", admin: true };
 
@@ -398,7 +404,7 @@ async function restoreBackup(env: Env, name: string) {
   for (const t of BACKUP_TABLES) {
     const rows = data.tables[t];
     if (!Array.isArray(rows)) continue; // tables added after this backup was made are left alone
-    stmts.push(env.DB.prepare(`DELETE FROM ${t}`));
+    if (!APPEND_ONLY.has(t)) stmts.push(env.DB.prepare(`DELETE FROM ${t}`));
     if (!rows.length) continue;
     const cols = Object.keys(rows[0]);
     if (!cols.every((c) => /^[a-z_]+$/.test(c))) throw new HttpError(400, "That backup has unexpected columns.");
@@ -408,7 +414,7 @@ async function restoreBackup(env: Env, name: string) {
     let size = 0;
     const flush = () => {
       if (!chunk.length) return;
-      stmts.push(env.DB.prepare(`INSERT INTO ${t} (${cols.join(", ")}) SELECT ${select} FROM json_each(?)`).bind(JSON.stringify(chunk)));
+      stmts.push(env.DB.prepare(`INSERT ${APPEND_ONLY.has(t) ? "OR IGNORE " : ""}INTO ${t} (${cols.join(", ")}) SELECT ${select} FROM json_each(?)`).bind(JSON.stringify(chunk)));
       chunk = []; size = 0;
     };
     for (const r of rows) {
@@ -428,7 +434,8 @@ async function restoreBackup(env: Env, name: string) {
 // Claude feed: a plain report of what clients said, written to the Synology so
 // Claude (in a chat linked to Anthony's Mac, where the share is mounted) can read
 // it and open the actual files. Rewritten every 30 minutes when something changed,
-// or from Admin. The only files the portal overwrites, and only in this folder.
+// or from Admin. The only files the portal overwrites, and only in this folder
+// (client-feedback.md, client-feedback.json and approvals-log.md).
 // ---------------------------------------------------------------------------
 
 const FEED_DIR = "_Claude feed";
@@ -449,7 +456,7 @@ async function buildFeed(env: Env) {
   const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   const isAdmin = (e: string) => admins.includes(e.toLowerCase());
   const weekAgo = now() - 7 * 86400 * 1000;
-  const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR] = await env.DB.batch([
+  const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR, sumR, evR] = await env.DB.batch([
     env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
     env.DB.prepare("SELECT client_slug, path, status, updated_by, updated_at FROM item_status WHERE status IN ('approved','changes','rejected') ORDER BY updated_at DESC"),
     env.DB.prepare("SELECT id, parent_id, client_slug, path, email, body, timecode, resolved, created_at FROM comments ORDER BY created_at"),
@@ -458,7 +465,11 @@ async function buildFeed(env: Env) {
     env.DB.prepare("SELECT client_slug, path, email, kind, detail, created_at FROM activity WHERE created_at > ? ORDER BY created_at DESC LIMIT 300").bind(weekAgo),
     env.DB.prepare("SELECT * FROM copy_items ORDER BY created_at DESC"),
     env.DB.prepare("SELECT l.copy_id, c.name FROM copy_campaigns l JOIN campaigns c ON c.id = l.campaign_id"),
+    env.DB.prepare("SELECT client_slug, path, last_sig, gone FROM campaign_summaries ORDER BY first_seen"),
+    env.DB.prepare("SELECT id, client_slug, summary_path, campaign, kind, email, typed_name, comment, at, at_utc, at_phoenix, ip, summary_sha256, sig, detail FROM campaign_events ORDER BY id"),
   ]);
+  const sums = sumR.results as { client_slug: string; path: string; last_sig: string | null; gone: number }[];
+  const evs = evR.results as CampaignEvent[];
   const copies = copyR.results as Record<string, any>[];
   const copyCamps = new Map<number, string[]>();
   for (const r of copyCampR.results as { copy_id: number; name: string }[]) copyCamps.set(r.copy_id, [...(copyCamps.get(r.copy_id) ?? []), r.name]);
@@ -520,7 +531,24 @@ async function buildFeed(env: Env) {
       copy_file: r.source ? `${MAC_SHARE}/${c.folder}/${r.source}` : null,
       earlier_wordings: (JSON.parse(r.history || "[]") as { text: string }[]).map((h) => h.text),
     }));
-    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
+    // Campaign approvals: status from the newest event (a change after approval is recorded as a reset).
+    const campaignApprovals = sums.filter((x) => x.client_slug === c.slug && (!x.gone || evs.some((e) => e.client_slug === c.slug && e.summary_path === x.path))).map((x) => {
+      const mine = evs.filter((e) => e.client_slug === c.slug && e.summary_path === x.path);
+      const last = mine[mine.length - 1];
+      const st = !last ? "needs" : last.kind === "approved" ? "approved" : last.kind === "reset" ? "changed" : x.last_sig && x.last_sig !== last.sig ? "needs" : "changes";
+      const lastChange = [...mine].reverse().find((e) => e.kind === "changes");
+      return {
+        campaign: last?.campaign || (x.path.split("/").pop() || x.path).replace(SUMMARY_FILE, ""), ...fileInfo(x.path),
+        link: itemLink(env, c.slug, x.path), removed: !!x.gone,
+        status: STATUS_TEXT[st] + (st === "needs" && last?.kind === "changes" ? " (updated after the change request)" : ""),
+        who: last ? (last.kind === "approved" ? `${last.typed_name} (${last.email})` : last.kind === "changes" ? last.email : "portal") : null,
+        when: last ? last.at_phoenix : null,
+        comment: lastChange?.comment ?? null,
+        reset_reason: last?.kind === "reset" ? last.detail : null,
+        record_id: last?.kind === "approved" ? last.id : null,
+      };
+    });
+    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, campaign_approvals: campaignApprovals, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
 
     const cm = (list: ReturnType<typeof commentsOn>) =>
       list.map((m) => m.reply_to
@@ -528,6 +556,13 @@ async function buildFeed(env: Env) {
         : `    - ${m.open ? (m.answered ? "OPEN (Genvyd replied) " : "OPEN ") : ""}${m.from === "Genvyd" ? "Genvyd" : m.by} (${m.at}): ${tc(m.timecode)}${m.text.replace(/\s+/g, " ")}`).join("\n");
     const file = (f: { path: string; mac_path: string; link: string }) => `**${f.path}**\n  - Mac: \`${f.mac_path}\`\n  - Portal: ${f.link}`;
     md += `\n---\n\n## ${c.name}\n\nSynology folder: \`${c.folder}\` (Mac: \`${MAC_SHARE}/${c.folder}\`)\n`;
+    md += `\n### Campaign approvals (${campaignApprovals.length})\n`;
+    md += campaignApprovals.length ? campaignApprovals.map((a) =>
+      `\n- **${a.campaign}**: ${a.status.toUpperCase()}${a.removed ? " (summary file removed)" : ""}\n  - Summary: \`${a.mac_path}\`\n  - Portal: ${a.link}` +
+      (a.who ? `\n  - ${a.status.startsWith("Approved") ? "Signed by" : a.status.startsWith("Changes") ? "Asked by" : "Last change by"} ${a.who}, ${a.when}` : "") +
+      (a.reset_reason ? `\n  - Why: ${a.reset_reason}` : "") +
+      (a.comment ? `\n  - Change request: ${a.comment.replace(/\s+/g, " ")}` : "") +
+      (a.record_id ? `\n  - Approval record #${a.record_id} (download the PDF from the portal's Approval history)` : "")).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Changes requested (${changes.length})\n`;
     md += changes.length ? changes.map((f) => `\n- ${file(f)}\n  - Requested by ${f.requested_by}, ${f.at}${f.comments.length ? "\n  - Comments:\n" + cm(f.comments) : "\n  - No comment left. Ask what to change."}`).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Said no, do not use (${saidNo.length})\n`;
@@ -564,22 +599,30 @@ async function buildFeed(env: Env) {
     md += `\n### Client activity, last 7 days\n`;
     md += recent.length ? recent.map((a) => `\n- ${a.at}: ${a.by} ${a.did} ${String(a.path).startsWith("copy:") ? `ad copy #${String(a.path).slice(5)}` : a.path}${a.detail && a.did !== "comment" ? ` (${a.detail})` : ""}`).join("") + "\n" : "\nNothing.\n";
   }
-  return { md, json: out };
+  // approvals-log.md: one line per approval, oldest first. Rebuilt from the append-only records,
+  // so it only ever grows.
+  const names = new Map(clients.map((c) => [c.slug, c.name]));
+  const approvals = evs.filter((e) => e.kind === "approved");
+  let log = `# Campaign approvals log\n\nOne line per client approval on clients.genvyd.com, oldest first. Written by the portal from its approval records, which cannot be edited. The full record (frozen summary, file hashes, signature) is a PDF from Approval history in the portal.\n\n`;
+  log += approvals.length ? approvals.map((e) =>
+    `- ${e.at_utc.replace("T", " ").replace(/\.\d+Z$/, " UTC")} (${e.at_phoenix}) | ${names.get(e.client_slug) || e.client_slug} | ${e.campaign} | APPROVED | signed "${e.typed_name}" | ${e.email} | IP ${e.ip ?? "unknown"} | summary sha256 ${e.summary_sha256} | ${e.summary_path} | record #${e.id}`).join("\n") + "\n" : "No approvals yet.\n";
+  return { md, json: out, log };
 }
 
 /** Writes the feed if anything changed since the last one (or always, when forced). */
 async function writeFeed(env: Env, force = false) {
   const sig = await env.DB.prepare(
-    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) || '-' || (SELECT IFNULL(MAX(updated_at),0) || COUNT(*) FROM copy_items) || '-' || (SELECT COUNT(*) FROM copy_campaigns) AS s",
+    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) || '-' || (SELECT IFNULL(MAX(updated_at),0) || COUNT(*) FROM copy_items) || '-' || (SELECT COUNT(*) FROM copy_campaigns) || '-' || (SELECT IFNULL(MAX(id),0) FROM campaign_events) || '-' || (SELECT COUNT(*) || IFNULL(SUM(gone),0) || IFNULL(MAX(last_sig),'') FROM campaign_summaries) AS s",
   ).first<{ s: string }>();
   const last = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'feed_sig'").first<{ value: string }>();
   if (!force && last && sig && last.value === sig.s) return { written: false };
-  const { md, json: data } = await buildFeed(env);
+  const { md, json: data, log } = await buildFeed(env);
   const mk = await nasWrite(env, SYSTEM_USER, "MKCOL", [FEED_DIR]);
   if (![201, 405].includes(mk.status)) throw new HttpError(502, `The Synology answered ${mk.status} when making the feed folder.`);
   for (const [name, body, type] of [
     ["client-feedback.md", md, "text/markdown; charset=utf-8"],
     ["client-feedback.json", JSON.stringify(data, null, 1), "application/json"],
+    ["approvals-log.md", log, "text/markdown; charset=utf-8"],
   ] as const) {
     const res = await nasWrite(env, SYSTEM_USER, "PUT", [FEED_DIR, name], { body, contentType: type });
     if (![200, 201, 204].includes(res.status)) throw new HttpError(502, `The Synology answered ${res.status} to the feed.`);
@@ -827,7 +870,10 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
   // Copy files (".copy.txt") are read into the ad's copy, not shown as files.
   const copyFiles = entries.filter((e) => e.type === "file" && COPY_FILE.test(e.name));
   await syncCopyFiles(env, c, copyFiles.map((f) => ({ path: prefix + f.name, size: f.size, mtime: f.mtime })), 4);
-  const files = entries.filter((e) => e.type === "file" && !COPY_FILE.test(e.name));
+  // Campaign summaries (".summary.md") show as a pinned approval card, not as files.
+  const summaryNames = entries.filter((e) => e.type === "file" && SUMMARY_FILE.test(e.name)).map((e) => e.name);
+  await noteSummaries(env, c.slug, segs.join("/"), summaryNames, true);
+  const files = entries.filter((e) => e.type === "file" && !COPY_FILE.test(e.name) && !SUMMARY_FILE.test(e.name));
   const paths = files.map((f) => prefix + f.name);
   await registerFiles(env, c.slug, paths);
 
@@ -909,7 +955,8 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
     })
     .sort((a, b) => (b.mtime ? Date.parse(b.mtime) : 0) - (a.mtime ? Date.parse(a.mtime) : 0));
 
-  return { client: { slug: c.slug, name: c.name }, dir: segs.join("/"), folders, items, copy, looseCopy };
+  const summaries = summaryNames.map((n) => ({ path: prefix + n, name: n }));
+  return { client: { slug: c.slug, name: c.name }, dir: segs.join("/"), folders, items, copy, looseCopy, summaries };
 }
 
 /** Ad cards for a list of paths that may span several folders (favorites, campaigns). */
@@ -1306,6 +1353,77 @@ async function route(req: Request, env: Env): Promise<Response> {
     throw new HttpError(405, "Method not allowed.");
   }
 
+  // ---- campaign summaries and approvals ------------------------------------
+  const sm = path.match(/^\/api\/c\/([^/]+)\/(summaries|summary)(?:\/(approve|changes|record))?$/);
+  if (sm) {
+    const [, slugRaw, what, sub] = sm;
+    const c = await requireClient(env, user, decodeURIComponent(slugRaw));
+    if (what === "summaries" && !sub && method === "GET") return json({ summaries: await summariesList(env, c) });
+    if (what !== "summary") throw new HttpError(404, "Not found.");
+    if (!sub && method === "GET") return json(await summaryView(env, user, c, url.searchParams.get("path") || ""));
+    if (sub === "record" && method === "GET") {
+      if (!user.admin) throw new HttpError(403, "Only Genvyd can download approval records.");
+      const id = Number(url.searchParams.get("id"));
+      if (!Number.isInteger(id)) throw new HttpError(400, "Which record?");
+      const pdf = await approvalRecordPdf(env, c, id);
+      const e = await env.DB.prepare("SELECT campaign, at FROM campaign_events WHERE id = ?").bind(id).first<{ campaign: string; at: number }>();
+      const day = new Date((e?.at ?? now()) - 7 * 3600 * 1000).toISOString().slice(0, 10);
+      const fname = `${(e?.campaign || "Campaign").replace(/[^\w .()-]+/g, "-")} approval record ${day} #${id}.pdf`;
+      return new Response(pdf, { headers: {
+        "content-type": "application/pdf",
+        "content-disposition": `attachment; filename="${fname.replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(fname)}`,
+        "cache-control": "no-store",
+      } });
+    }
+    if ((sub === "approve" || sub === "changes") && method === "POST") {
+      // The approval is the client's own record that they accepted the campaign, so only a client
+      // login can give it. Genvyd cannot approve on a client's behalf.
+      if (user.admin) throw new HttpError(403, "Only the client can approve or ask for changes here. Genvyd can't sign on their behalf.");
+      const body = await readBody(req);
+      const p = cleanPath(String(body.path ?? "")).join("/");
+      const t = now();
+      const ip = req.headers.get("CF-Connecting-IP") || req.headers.get("X-Forwarded-For") || null;
+      const ua = (req.headers.get("User-Agent") || "").slice(0, 500) || null;
+      if (sub === "approve") {
+        const name = String(body.name ?? "").replace(/\s+/g, " ").trim();
+        if (body.agreed !== true) throw new HttpError(400, "Tick the box to confirm you reviewed everything.");
+        if (body.confirmed !== true) throw new HttpError(400, "Please confirm in the final step.");
+        if (name.length < 2 || name.length > 120 || !/\p{L}/u.test(name)) throw new HttpError(400, "Type your full name to sign.");
+        const cur = await loadSummary(env, c, p, true);
+        if (!cur) throw new HttpError(404, "This campaign summary was removed or renamed.");
+        // They approve exactly what they were shown: if anything changed since the page loaded, show it again.
+        if (cur.ads.some((a) => !a.exists)) throw new HttpError(409, "One of the ads in this campaign is missing, so it can't be approved yet. Genvyd has to fix that first.");
+        if (String(body.sig ?? "") !== cur.sig) throw new HttpError(409, "This campaign was updated while you were reading it. The page now shows the latest version. Please review it again before approving.");
+        const before = await summaryStatus(env, c, p, cur);
+        if (before.status === "approved" && before.approval?.sig === cur.sig) return json(await summaryView(env, user, c, p));
+        await env.DB.prepare(
+          "INSERT INTO campaign_events (client_slug, summary_path, campaign, kind, email, typed_name, at, at_utc, at_phoenix, ip, user_agent, summary_sha256, sig, files_json, frozen_text, agreement_text) " +
+            "VALUES (?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).bind(c.slug, p, cur.campaign, user.email, name, t, new Date(t).toISOString(), phxTime(t), ip, ua, cur.sha, cur.sig,
+          JSON.stringify(cur.files), cur.text, `${AGREE_TEXT}\n\n${CONFIRM_TEXT}`).run();
+        await logActivity(env, c.slug, p, user.email, "campaign_approved", `${cur.campaign}, signed ${name}`);
+      } else {
+        const comment = String(body.comment ?? "").replace(/\r/g, "").trim();
+        if (!comment) throw new HttpError(400, "Say what you would like changed.");
+        if (comment.length > 4000) throw new HttpError(400, "That is too long (4,000 characters max).");
+        const cur = await loadSummary(env, c, p, false);
+        if (!cur) throw new HttpError(404, "This campaign summary was removed or renamed.");
+        await env.DB.batch([
+          env.DB.prepare(
+            "INSERT INTO campaign_events (client_slug, summary_path, campaign, kind, email, comment, at, at_utc, at_phoenix, ip, user_agent, summary_sha256, sig, files_json) " +
+              "VALUES (?, ?, ?, 'changes', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          ).bind(c.slug, p, cur.campaign, user.email, comment, t, new Date(t).toISOString(), phxTime(t), ip, ua, cur.sha, cur.sig, JSON.stringify(cur.files)),
+          // Also a normal comment, so it shows with the other comments on the dashboard and in the feed.
+          env.DB.prepare("INSERT INTO comments (client_slug, path, email, body, timecode, resolved, created_at) VALUES (?, ?, ?, ?, NULL, 0, ?)").bind(c.slug, p, user.email, comment, t),
+        ]);
+        await logActivity(env, c.slug, p, user.email, "campaign_changes", comment.slice(0, 300));
+      }
+      try { await writeFeed(env); } catch { /* the 30 minute run picks it up */ }
+      return json(await summaryView(env, user, c, p));
+    }
+    throw new HttpError(405, "Method not allowed.");
+  }
+
   // ---- client scoped ------------------------------------------------------
   const m = path.match(/^\/api\/c\/([^/]+)\/(list|item|like|status|comments|folder|upload|tags|rename|import|view|hide|delete|where|todo)(?:\/(\d+)(?:\/(resolve))?)?$/);
   if (m) {
@@ -1448,7 +1566,7 @@ async function route(req: Request, env: Env): Promise<Response> {
       const lk = new Map((likesR.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
       const cm = new Map((cmtR.results as { path: string; n: number; open: number }[]).map((r) => [r.path, r]));
       const items = (filesR.results as { path: string; first_seen: number }[])
-        .filter((f) => !hid.has(f.path) && !COPY_FILE.test(f.path) && !/(^|\/)[.@#_]/.test(f.path))
+        .filter((f) => !hid.has(f.path) && !COPY_FILE.test(f.path) && !SUMMARY_FILE.test(f.path) && !/(^|\/)[.@#_]/.test(f.path))
         .map((f) => {
           const name = f.path.split("/").pop() || f.path;
           const s0 = st.get(f.path);
@@ -2068,13 +2186,17 @@ async function sendWelcome(env: Env, slug: string, email: string): Promise<{ sen
 // ---------------------------------------------------------------------------
 
 type ActivityRow = { id: number; client_slug: string; path: string; email: string; kind: string; detail: string | null; created_at: number };
-const DIGEST_KINDS = ["approved", "changes", "rejected", "comment", "campaign_add", "like", "hidden"];
+const DIGEST_KINDS = ["campaign_approved", "campaign_changes", "approved", "changes", "rejected", "comment", "campaign_add", "like", "hidden"];
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
 function itemLink(env: Env, slug: string, path: string) {
   const base = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
   if (path.startsWith("copy:")) return `${base}/#/c/${encodeURIComponent(slug)}/copy`;
+  if (SUMMARY_FILE.test(path)) {
+    const dir = path.split("/").slice(0, -1).join("/");
+    return `${base}/#/c/${encodeURIComponent(slug)}${dir ? "/f/" + encodeURIComponent(dir) : ""}`;
+  }
   return `${base}/#/c/${encodeURIComponent(slug)}/i/${encodeURIComponent(path)}`;
 }
 
@@ -2118,6 +2240,8 @@ async function sendEmail(env: Env, subject: string, html: string, text: string, 
 function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) {
   const count = (k: string) => rows.filter((r) => r.kind === k).length;
   const bits = [
+    count("campaign_approved") && `${count("campaign_approved")} campaign${count("campaign_approved") === 1 ? "" : "s"} approved`,
+    count("campaign_changes") && `${count("campaign_changes")} campaign change request${count("campaign_changes") === 1 ? "" : "s"}`,
     count("approved") && `${count("approved")} approved`,
     count("changes") && `${count("changes")} change request${count("changes") === 1 ? "" : "s"}`,
     count("rejected") && `${count("rejected")} said no`,
@@ -2130,6 +2254,8 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
   const subject = `${clientList.join(", ")}: ${bits.join(", ")}`;
 
   const LABEL: Record<string, string> = {
+    campaign_approved: "Campaign approved and signed (ready to launch)",
+    campaign_changes: "Campaign summary: changes requested",
     changes: "Changes requested",
     rejected: "Said no (don't use these)",
     comment: "New comments",
@@ -2138,7 +2264,7 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
     like: "Favorited",
     hidden: "Moved to trash (they don't want these)",
   };
-  const order = ["changes", "rejected", "comment", "approved", "campaign_add", "like", "hidden"];
+  const order = ["campaign_approved", "campaign_changes", "changes", "rejected", "comment", "approved", "campaign_add", "like", "hidden"];
   let html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:620px">`;
   let text = "";
   for (const slug of [...new Set(rows.map((r) => r.client_slug))]) {
@@ -2148,12 +2274,12 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
     for (const kind of order) {
       const list = rows.filter((r) => r.client_slug === slug && r.kind === kind);
       if (!list.length) continue;
-      html += `<p style="margin:14px 0 6px;font-weight:bold;color:${kind === "changes" ? "#b26a00" : kind === "rejected" ? "#c4161c" : kind === "approved" ? "#127a3f" : "#111"}">${LABEL[kind]}</p><ul style="margin:0;padding-left:18px">`;
+      html += `<p style="margin:14px 0 6px;font-weight:bold;color:${kind === "changes" || kind === "campaign_changes" ? "#b26a00" : kind === "rejected" ? "#c4161c" : kind === "approved" || kind === "campaign_approved" ? "#127a3f" : "#111"}">${LABEL[kind]}</p><ul style="margin:0;padding-left:18px">`;
       text += `  ${LABEL[kind]}:\n`;
       for (const r of list) {
         const file = r.path.startsWith("copy:") ? (kind === "comment" ? "Ad copy" : `Ad copy "${r.detail ?? ""}"`) : r.path.split("/").pop() || r.path;
         const link = itemLink(env, slug, r.path);
-        const extra = kind === "comment" && r.detail ? `: "${r.detail}"` : kind === "campaign_add" && r.detail && !r.path.startsWith("copy:") ? ` (${r.detail})` : "";
+        const extra = (kind === "comment" || kind === "campaign_changes" || kind === "campaign_approved") && r.detail ? `: "${r.detail}"` : kind === "campaign_add" && r.detail && !r.path.startsWith("copy:") ? ` (${r.detail})` : "";
         html += `<li style="margin:4px 0"><a href="${esc(link)}" style="color:#d4141a">${esc(file)}</a> <span style="color:#555">by ${esc(r.email)}${esc(extra)}</span></li>`;
         text += `   - ${file} by ${r.email}${extra}\n     ${link}\n`;
       }
@@ -2224,6 +2350,7 @@ async function scanClients(env: Env) {
     // Breadth first: client folder, its projects, then one more level, until the budget runs out.
     const found: string[] = [];
     const copyFiles: { path: string; size?: number; mtime?: string }[] = [];
+    const summaries: string[] = [];
     let queue: string[][] = [[]];
     let complete = true;
     while (queue.length) {
@@ -2235,6 +2362,7 @@ async function scanClients(env: Env) {
         try { entries = await listNas(env, c.folder, segs); } catch { complete = false; continue; }
         for (const e of entries) {
           if (e.type === "file" && COPY_FILE.test(e.name)) copyFiles.push({ path: [...segs, e.name].join("/"), size: e.size, mtime: e.mtime });
+          else if (e.type === "file" && SUMMARY_FILE.test(e.name)) summaries.push([...segs, e.name].join("/"));
           else if (e.type === "file") found.push([...segs, e.name].join("/"));
           else if (segs.length < 3) next.push([...segs, e.name]);
         }
@@ -2243,6 +2371,7 @@ async function scanClients(env: Env) {
       queue = next;
     }
     await registerFiles(env, c.slug, found);
+    if (summaries.length) await noteSummaries(env, c.slug, "", summaries, false);
     if (copyFiles.length && budget >= 3) budget -= await syncCopyFiles(env, c, copyFiles, 2);
     if (complete && !(await baselineDone(env, c.slug))) {
       // First full scan of this client: everything already there is old news.
@@ -2334,6 +2463,389 @@ async function runClientAlerts(env: Env) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Campaign summaries and approvals.
+//
+// Anthony (or Claude) saves "<Campaign name>.summary.md" in a client folder: the ads, copy,
+// price, budget, dates and audience, written out. Optional front matter lists the ads:
+//   ---
+//   ads: [Final ads/Golf Polo - Instagram Feed.png, October Ads/golf 4x5.png]
+//   budget: "$500 lifetime"
+//   start: "On approval"
+//   end: "2026-11-06"
+//   ---
+// The client reads it on a pinned card and approves it in two steps (tick + typed name, then a
+// final confirmation). Every approval is stored with who, when, IP, device, a SHA-256 of the
+// summary, the name, size and modified time of each listed ad and copy file (copy files are
+// hashed too) and a frozen copy of the text. If any of that changes later the approval no
+// longer applies: a "reset" is recorded and the client is asked again. campaign_events is
+// append only (database triggers refuse UPDATE and DELETE). Nothing is written in client folders.
+// ---------------------------------------------------------------------------
+
+const SUMMARY_FILE = /\.summary\.md$/i;
+const AGREE_TEXT =
+  "I have reviewed every ad, image, video and line of copy in this campaign, including the price, links, budget, dates and audience, and everything is correct.";
+const CONFIRM_TEXT =
+  "By approving, I confirm on behalf of my business that I have reviewed and accept the ads, images, videos, copy, pricing, links, budget and schedule exactly as shown in this summary. Genvyd will publish the campaign as approved. Genvyd is not responsible for errors in content I approved, for advertising results or sales, or for decisions made by the ad platform (such as ad review, delivery, or how quickly the approved budget is spent). Any change after approval requires a new approval.";
+const MAX_SUMMARY_ADS = 40;
+
+async function sha256Hex(data: string | ArrayBuffer) {
+  const buf = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  const d = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** "Oct 21, 2026, 2:15 PM MST". Phoenix has no daylight saving, so it is always UTC-7. */
+function phxTime(ms: number) {
+  const d = new Date(ms - 7 * 3600 * 1000);
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  let hr = d.getUTCHours();
+  const ap = hr >= 12 ? "PM" : "AM";
+  hr = hr % 12 || 12;
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}, ${hr}:${String(d.getUTCMinutes()).padStart(2, "0")} ${ap} MST`;
+}
+
+/** Splits optional front matter ("---" lines at the very top) from the Markdown body. */
+function parseFrontMatter(text: string) {
+  const src = text.replace(/^﻿/, "").replace(/\r/g, "");
+  const meta: Record<string, string | string[]> = {};
+  const m = src.match(/^---[ \t]*\n([\s\S]*?)\n---[ \t]*(?:\n|$)/);
+  if (!m) return { meta, body: src };
+  const unq = (s: string) => s.trim().replace(/^"([\s\S]*)"$/, "$1").replace(/^'([\s\S]*)'$/, "$1").trim();
+  let listKey: string | null = null;
+  for (const raw of m[1].split("\n")) {
+    if (!raw.trim() || /^\s*#/.test(raw)) continue;
+    const item = raw.match(/^\s+-\s+(.*)$/) || (listKey ? raw.match(/^-\s+(.*)$/) : null);
+    if (item && listKey) { (meta[listKey] as string[]).push(unq(item[1])); continue; }
+    const kv = raw.match(/^([A-Za-z][\w -]{0,30}):\s*(.*)$/);
+    if (!kv) continue;
+    const key = kv[1].trim().toLowerCase();
+    const val = kv[2].trim();
+    listKey = null;
+    if (!val) { meta[key] = []; listKey = key; continue; }
+    if (val.startsWith("[") && val.endsWith("]")) {
+      const parts: string[] = [];
+      const re = /"([^"]*)"|'([^']*)'|([^,]+)/g;
+      let x: RegExpExecArray | null;
+      while ((x = re.exec(val.slice(1, -1)))) { const v = (x[1] ?? x[2] ?? x[3] ?? "").trim(); if (v) parts.push(v); }
+      meta[key] = parts;
+    } else meta[key] = unq(val);
+  }
+  return { meta, body: src.slice(m[0].length) };
+}
+
+// The copy file that belongs to an ad: same name once size, version, card, placement and
+// extension are taken off (the same idea as the portal's copyKey()).
+function adKeyOf(name: string, inFinal: boolean) {
+  let s = name.replace(COPY_FILE, "").replace(/\.[^.]+$/, "");
+  if (inFinal) s = s.replace(/\s+-\s+[^-]+$/, "");
+  return s
+    .replace(/(?:^|[\s_\-.(\[])(?:card|slide)\s*#?\s*\d{1,2}(?=$|[\s_\-.)\]])/gi, " ")
+    .replace(/(?:^|[\s_\-.(\[])\d{1,2}\s*[x×:]\s*\d{1,2}(?=$|[\s_\-.)\]])/gi, " ")
+    .replace(/(?:^|[\s_\-.(\[])(?:v|ver|version|rev)\s*\.?\s*\d{1,3}(?=$|[\s_\-.)\]])/gi, " ")
+    .replace(/\s*\(\d{1,2}\)\s*$/, "")
+    .replace(/\b(feed|stories|story|reels?|post|square|vertical|portrait|landscape|horizontal)\b/gi, " ")
+    .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+type SummaryFile = { role: "summary" | "ad" | "copy"; path: string; name: string; mtime: string | null; size: number | null; exists: boolean; sha256?: string };
+type LoadedSummary = {
+  path: string; name: string; dir: string; campaign: string; exists: boolean;
+  text: string; body: string; sha: string; mtime: string | null; size: number | null;
+  meta: { budget: string | null; start: string | null; end: string | null };
+  ads: { raw: string; path: string; name: string; kind: string; exists: boolean; mtime: string | null; size: number | null; copy: { path: string; text?: string; sha256?: string; mtime: string | null; size: number | null } | null }[];
+  files: SummaryFile[]; sig: string;
+};
+
+/** Reads a summary and everything it lists. `full` also reads (and hashes) each copy file. */
+async function loadSummary(env: Env, c: Client, path: string, full: boolean): Promise<LoadedSummary | null> {
+  const segs = cleanPath(path);
+  const name = segs[segs.length - 1];
+  if (!SUMMARY_FILE.test(name)) throw new HttpError(400, "That is not a campaign summary.");
+  const dir = segs.slice(0, -1).join("/");
+  const listings = new Map<string, NasEntry[] | null>();
+  const ls = async (d: string) => {
+    if (listings.has(d)) return listings.get(d)!;
+    if (listings.size >= 8) return null; // keep each check to a handful of Synology calls
+    let e: NasEntry[] | null = null;
+    try { e = await listNas(env, c.folder, d ? d.split("/") : []); } catch (err) { if (!(err instanceof HttpError && err.status === 404)) throw err; }
+    listings.set(d, e);
+    return e;
+  };
+  const here = await ls(dir);
+  const entry = here?.find((e) => e.type === "file" && e.name === name);
+  if (!entry) return null;
+  const res = await fetch(originUrl(env, c.folder, segs), { headers: originHeaders(env) });
+  if (!res.ok) throw new HttpError(502, `The Synology answered ${res.status} for the summary.`);
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength > 300_000) throw new HttpError(413, "That summary file is too big (300 KB max).");
+  const text = new TextDecoder().decode(buf);
+  const sha = await sha256Hex(buf);
+  const { meta, body } = parseFrontMatter(text);
+  const str = (v: unknown) => (Array.isArray(v) ? v.join(", ") : v ? String(v) : null);
+  const rawAds = (Array.isArray(meta.ads) ? meta.ads : meta.ads ? [String(meta.ads)] : []).slice(0, MAX_SUMMARY_ADS);
+
+  const ads: LoadedSummary["ads"] = [];
+  for (const raw of rawAds) {
+    const clean = raw.replace(/^\.?\/+/, "").replace(/^\/Volumes\/GenvydClients\/[^/]+\//, "");
+    // A path is relative to the client folder; a bare name is looked for next to the summary first.
+    const tries = [...new Set([clean.includes("/") ? clean : (dir ? `${dir}/${clean}` : clean), clean, dir ? `${dir}/${clean}` : clean])];
+    let found: { path: string; e: NasEntry } | null = null;
+    for (const t of tries) {
+      let s: string[];
+      try { s = cleanPath(t); } catch { continue; }
+      const list = await ls(s.slice(0, -1).join("/"));
+      const e = list?.find((x) => x.type === "file" && x.name === s[s.length - 1]);
+      if (e) { found = { path: s.join("/"), e }; break; }
+    }
+    const p = found?.path ?? (tries[0] || clean);
+    const nm = p.split("/").pop() || p;
+    let copy: LoadedSummary["ads"][number]["copy"] = null;
+    if (found) {
+      const fdir = p.split("/").slice(0, -1).join("/");
+      const inFinal = fdir === "Final ads" || fdir.startsWith("Final ads/");
+      const key = adKeyOf(nm, inFinal);
+      const cf = (listings.get(fdir) ?? []).find((x) => x.type === "file" && COPY_FILE.test(x.name) && adKeyOf(x.name, inFinal) === key);
+      if (cf) copy = { path: fdir ? `${fdir}/${cf.name}` : cf.name, mtime: cf.mtime ?? null, size: cf.size ?? null };
+    }
+    ads.push({ raw, path: p, name: nm, kind: kindOf(nm), exists: !!found, mtime: found?.e.mtime ?? null, size: found?.e.size ?? null, copy });
+  }
+  if (full) {
+    const texts = new Map<string, { text: string; sha256: string }>();
+    for (const a of ads) {
+      if (!a.copy) continue;
+      if (!texts.has(a.copy.path)) {
+        try {
+          const r = await fetch(originUrl(env, c.folder, a.copy.path.split("/")), { headers: originHeaders(env) });
+          if (r.ok) { const b = await r.arrayBuffer(); texts.set(a.copy.path, { text: new TextDecoder().decode(b).slice(0, 20000), sha256: await sha256Hex(b) }); }
+        } catch { /* shown without its text */ }
+      }
+      Object.assign(a.copy, texts.get(a.copy.path) ?? {});
+    }
+  }
+  const files: SummaryFile[] = [
+    { role: "summary", path: segs.join("/"), name, mtime: entry.mtime ?? null, size: entry.size ?? null, exists: true, sha256: sha },
+    ...ads.map((a) => ({ role: "ad" as const, path: a.path, name: a.name, mtime: a.mtime, size: a.size, exists: a.exists })),
+  ];
+  for (const a of ads) {
+    if (a.copy && !files.some((f) => f.path === a.copy!.path)) {
+      files.push({ role: "copy", path: a.copy.path, name: a.copy.path.split("/").pop()!, mtime: a.copy.mtime, size: a.copy.size, exists: true, ...(a.copy.sha256 ? { sha256: a.copy.sha256 } : {}) });
+    }
+  }
+  // What an approval is tied to: the summary's exact text, and each listed file's name, size and date.
+  const sig = await sha256Hex(JSON.stringify([sha, files.filter((f) => f.role !== "summary").map((f) => [f.role, f.path, f.mtime ?? "", f.size ?? "", f.exists])]));
+  return {
+    path: segs.join("/"), name, dir, campaign: str(meta.campaign) || str(meta.name) || name.replace(SUMMARY_FILE, ""), exists: true,
+    text, body, sha, mtime: entry.mtime ?? null, size: entry.size ?? null,
+    meta: { budget: str(meta.budget), start: str(meta.start), end: str(meta.end) },
+    ads, files, sig,
+  };
+}
+
+type CampaignEvent = {
+  id: number; client_slug: string; summary_path: string; campaign: string | null; kind: "approved" | "changes" | "reset";
+  email: string | null; typed_name: string | null; comment: string | null; at: number; at_utc: string; at_phoenix: string;
+  ip: string | null; user_agent: string | null; summary_sha256: string | null; sig: string | null; files_json: string | null;
+  frozen_text: string | null; agreement_text: string | null; detail: string | null;
+};
+
+const STATUS_TEXT: Record<string, string> = {
+  needs: "Needs approval",
+  approved: "Approved",
+  changes: "Changes requested",
+  changed: "Changed since approval, needs re-approval",
+};
+
+/** What changed between the files an approval covered and the files now. */
+function describeChanges(before: SummaryFile[], cur: LoadedSummary | null) {
+  if (!cur) return "The summary file was removed or renamed.";
+  const out: string[] = [];
+  const b0 = before.find((f) => f.role === "summary");
+  if (b0 && b0.sha256 !== cur.sha) out.push("The summary text changed.");
+  const now0 = new Map(cur.files.map((f) => [f.path, f]));
+  for (const f of before.filter((x) => x.role !== "summary")) {
+    const n = now0.get(f.path);
+    if (!n) out.push(`${f.name} is no longer listed.`);
+    else if (!n.exists && f.exists) out.push(`${f.name} is missing.`);
+    else if (n.mtime !== f.mtime || n.size !== f.size) out.push(`${f.name} changed.`);
+  }
+  for (const f of cur.files.filter((x) => x.role !== "summary")) if (!before.some((b) => b.path === f.path)) out.push(`${f.name} was added.`);
+  return out.join(" ") || "Something in the campaign changed.";
+}
+
+/**
+ * The campaign's current status. When `cur` (the files as they are now) is given and the
+ * campaign was approved for different files, records a reset first (once).
+ */
+async function summaryStatus(env: Env, c: Client, path: string, cur?: LoadedSummary | null): Promise<{ status: string; statusText: string; updatedAfterChanges: boolean; approval: CampaignEvent | null; lastChange: CampaignEvent | null; lastReset: CampaignEvent | null; events: CampaignEvent[] }> {
+  const events = (await env.DB.prepare("SELECT * FROM campaign_events WHERE client_slug = ? AND summary_path = ? ORDER BY id")
+    .bind(c.slug, path).all<CampaignEvent>()).results;
+  const last = events[events.length - 1];
+  if (last && last.kind === "approved" && cur !== undefined && (!cur || cur.sig !== last.sig)) {
+    const t = now();
+    const detail = describeChanges(JSON.parse(last.files_json || "[]"), cur);
+    // Only if nothing was recorded since we read the list (two page loads at once record one reset).
+    await env.DB.prepare(
+      "INSERT INTO campaign_events (client_slug, summary_path, campaign, kind, email, at, at_utc, at_phoenix, summary_sha256, sig, files_json, detail) " +
+        "SELECT ?, ?, ?, 'reset', 'portal', ?, ?, ?, ?, ?, ?, ? WHERE (SELECT MAX(id) FROM campaign_events WHERE client_slug = ? AND summary_path = ?) = ?",
+    ).bind(c.slug, path, cur?.campaign ?? last.campaign, t, new Date(t).toISOString(), phxTime(t), cur?.sha ?? null, cur?.sig ?? null,
+      cur ? JSON.stringify(cur.files) : null, detail, c.slug, path, last.id).run();
+    return summaryStatus(env, c, path);
+  }
+  let status = "needs";
+  let updatedAfterChanges = false;
+  if (last?.kind === "approved") status = "approved";
+  else if (last?.kind === "reset") status = "changed";
+  else if (last?.kind === "changes") {
+    if (cur && cur.sig !== last.sig) { status = "needs"; updatedAfterChanges = true; } else status = "changes";
+  }
+  const approval = status === "approved" ? last : null;
+  const lastChange = [...events].reverse().find((e) => e.kind === "changes") ?? null;
+  return { status, statusText: STATUS_TEXT[status], updatedAfterChanges, approval, lastChange, lastReset: last?.kind === "reset" ? last : null, events };
+}
+
+/** Remembers summary files the portal has come across, and forgets ones gone from a folder. */
+async function noteSummaries(env: Env, slug: string, dir: string, names: string[], prune: boolean) {
+  const prefix = dir ? dir + "/" : "";
+  const t = now();
+  const stmts = names.map((n) =>
+    env.DB.prepare("INSERT INTO campaign_summaries (client_slug, path, first_seen, last_seen) VALUES (?, ?, ?, ?) ON CONFLICT (client_slug, path) DO UPDATE SET last_seen = excluded.last_seen, gone = 0")
+      .bind(slug, prefix + n, t, t));
+  // Summaries were plain files before this feature: take them out of the file list.
+  for (const n of names) stmts.push(env.DB.prepare("DELETE FROM files WHERE client_slug = ? AND path = ?").bind(slug, prefix + n));
+  if (prune) {
+    const like = prefix.replace(/[%_\\]/g, (x) => "\\" + x) + "%";
+    const known = (await env.DB.prepare("SELECT path FROM campaign_summaries WHERE client_slug = ? AND gone = 0 AND path LIKE ? ESCAPE '\\'").bind(slug, like).all<{ path: string }>()).results;
+    for (const k of known) {
+      const rest = k.path.slice(prefix.length);
+      if (!rest.includes("/") && !names.includes(rest)) stmts.push(env.DB.prepare("UPDATE campaign_summaries SET gone = 1 WHERE client_slug = ? AND path = ?").bind(slug, k.path));
+    }
+  }
+  if (stmts.length) await env.DB.batch(stmts.slice(0, 90));
+}
+
+const eventView = (e: CampaignEvent, admin: boolean) => ({
+  id: e.id, kind: e.kind, email: e.email, name: e.typed_name, comment: e.comment, at: e.at, atPhoenix: e.at_phoenix, atUtc: e.at_utc,
+  detail: e.detail, campaign: e.campaign,
+  ...(admin ? { ip: e.ip, userAgent: e.user_agent, summarySha256: e.summary_sha256 } : {}),
+});
+
+/** Everything the summary card needs. */
+async function summaryView(env: Env, user: User, c: Client, path: string) {
+  const cur = await loadSummary(env, c, path, true);
+  const p = cleanPath(path).join("/");
+  if (!cur) {
+    await env.DB.prepare("UPDATE campaign_summaries SET gone = 1 WHERE client_slug = ? AND path = ?").bind(c.slug, p).run();
+    const st = await summaryStatus(env, c, p, null);
+    throw new HttpError(404, st.events.length ? "This campaign summary was removed or renamed." : "That campaign summary is not on the Synology.");
+  }
+  await noteSummaries(env, c.slug, cur.dir, [cur.name], false);
+  await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ? WHERE client_slug = ? AND path = ?").bind(cur.sig, now(), c.slug, p).run();
+  const st = await summaryStatus(env, c, p, cur);
+  const comments = (await itemDetail(env, user, c, p)).comments;
+  return {
+    path: p, name: cur.name, dir: cur.dir, campaign: cur.campaign, body: cur.body, meta: cur.meta, sig: cur.sig, sha256: cur.sha,
+    ads: cur.ads.map((a) => ({ raw: a.raw, path: a.path, name: a.name, kind: a.kind, exists: a.exists, copy: a.copy ? { path: a.copy.path, text: a.copy.text ?? null } : null })),
+    status: st.status, statusText: st.statusText, updatedAfterChanges: st.updatedAfterChanges,
+    approval: st.approval ? eventView(st.approval, user.admin) : null,
+    lastChange: st.lastChange ? eventView(st.lastChange, user.admin) : null,
+    lastReset: st.lastReset ? eventView(st.lastReset, user.admin) : null,
+    history: user.admin ? st.events.map((e) => eventView(e, true)).reverse() : [],
+    comments,
+    agreeText: AGREE_TEXT, confirmText: CONFIRM_TEXT,
+    canApprove: !user.admin,
+  };
+}
+
+/** The client's campaigns and their status, for the banner on their home page. */
+async function summariesList(env: Env, c: Client) {
+  const rows = (await env.DB.prepare("SELECT path FROM campaign_summaries WHERE client_slug = ? AND gone = 0 ORDER BY first_seen DESC LIMIT 8").bind(c.slug).all<{ path: string }>()).results;
+  const out = await Promise.all(rows.map(async (r) => {
+    try {
+      const cur = await loadSummary(env, c, r.path, false);
+      if (!cur) {
+        await env.DB.prepare("UPDATE campaign_summaries SET gone = 1 WHERE client_slug = ? AND path = ?").bind(c.slug, r.path).run();
+        await summaryStatus(env, c, r.path, null); // an approval of a removed summary no longer stands
+        return null;
+      }
+      await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ? WHERE client_slug = ? AND path = ?").bind(cur.sig, now(), c.slug, r.path).run();
+      const st = await summaryStatus(env, c, r.path, cur);
+      return { path: r.path, dir: cur.dir, campaign: cur.campaign, status: st.status, statusText: st.statusText, approval: st.approval ? { name: st.approval.typed_name, atPhoenix: st.approval.at_phoenix } : null };
+    } catch { return null; }
+  }));
+  return out.filter(Boolean);
+}
+
+/** The 15 minute run: re-check a few approved campaigns so a changed file resets them even if nobody looks. */
+async function checkApprovals(env: Env) {
+  const rows = (await env.DB.prepare(
+    "SELECT s.client_slug, s.path, c.name, c.folder FROM campaign_summaries s JOIN clients c ON c.slug = s.client_slug " +
+      "WHERE s.gone = 0 AND EXISTS (SELECT 1 FROM campaign_events e WHERE e.client_slug = s.client_slug AND e.summary_path = s.path) " +
+      "ORDER BY IFNULL(s.last_checked, 0) LIMIT 3",
+  ).all<{ client_slug: string; path: string; name: string; folder: string }>()).results;
+  for (const r of rows) {
+    const c: Client = { slug: r.client_slug, name: r.name, folder: r.folder };
+    try {
+      const cur = await loadSummary(env, c, r.path, false);
+      if (!cur) await env.DB.prepare("UPDATE campaign_summaries SET gone = 1 WHERE client_slug = ? AND path = ?").bind(c.slug, r.path).run();
+      await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ? WHERE client_slug = ? AND path = ?").bind(cur?.sig ?? null, now(), c.slug, r.path).run();
+      await summaryStatus(env, c, r.path, cur);
+    } catch (err) { console.error("approval check failed", r.path, err); }
+  }
+}
+
+/** The approval record as a PDF: signature, what was agreed, every file with hashes, the frozen summary. */
+async function approvalRecordPdf(env: Env, c: Client, id: number) {
+  const e = await env.DB.prepare("SELECT * FROM campaign_events WHERE id = ? AND client_slug = ?").bind(id, c.slug).first<CampaignEvent>();
+  if (!e || e.kind !== "approved") throw new HttpError(404, "That approval record is not here.");
+  const history = (await env.DB.prepare("SELECT * FROM campaign_events WHERE client_slug = ? AND summary_path = ? ORDER BY id").bind(c.slug, e.summary_path).all<CampaignEvent>()).results;
+  const files = JSON.parse(e.files_json || "[]") as SummaryFile[];
+  const frozenSha = await sha256Hex(e.frozen_text ?? "");
+  const blocks: PdfBlock[] = [
+    { kind: "title", text: "Campaign approval record" },
+    { kind: "text", text: `Record #${e.id} from clients.genvyd.com (Genvyd). This record was stored when the client approved and cannot be edited.` },
+    { kind: "heading", text: "Campaign" },
+    { kind: "field", label: "Client", value: c.name },
+    { kind: "field", label: "Campaign", value: e.campaign ?? "" },
+    { kind: "field", label: "Summary file", value: e.summary_path },
+    { kind: "field", label: "On the Synology", value: `${MAC_SHARE}/${c.folder}/${e.summary_path}` },
+    { kind: "heading", text: "Signature" },
+    { kind: "field", label: "Typed name", value: e.typed_name ?? "" },
+    { kind: "field", label: "Login email", value: e.email ?? "" },
+    { kind: "field", label: "Approved (UTC)", value: e.at_utc },
+    { kind: "field", label: "Approved (Phoenix)", value: e.at_phoenix },
+    { kind: "field", label: "IP address", value: e.ip ?? "not recorded" },
+    { kind: "field", label: "Device", value: e.user_agent ?? "not recorded" },
+    { kind: "field", label: "Login", value: "Cloudflare Access one-time code sent to the login email" },
+    { kind: "heading", text: "What the client agreed to" },
+    { kind: "text", text: "Step 1. Ticked the box:", bold: true },
+    { kind: "text", text: `"${AGREE_TEXT}"` },
+    { kind: "space", size: 4 },
+    { kind: "text", text: 'Step 2. In the "Final confirmation" dialog, pressed "Yes, approve and launch" after this text:', bold: true },
+    { kind: "text", text: `"${CONFIRM_TEXT}"` },
+    ...(e.agreement_text && e.agreement_text !== `${AGREE_TEXT}\n\n${CONFIRM_TEXT}` ? [{ kind: "text" as const, text: `Text shown at the time: ${e.agreement_text}` }] : []),
+    { kind: "heading", text: "Files at the moment of approval" },
+    { kind: "text", text: "The summary and copy files are identified by a SHA-256 hash of their exact contents. Ads (images and videos) are identified by file name, size and modified time on the Synology. If any of these change, the approval no longer applies and the client is asked again." },
+    { kind: "space", size: 4 },
+  ];
+  for (const f of files) {
+    blocks.push({ kind: "text", text: `${f.role === "summary" ? "Summary" : f.role === "copy" ? "Ad copy" : "Ad"}: ${f.path}`, bold: true });
+    blocks.push({ kind: "mono", text: `  modified ${f.mtime ?? "unknown"}   size ${f.size ?? "unknown"} bytes${f.exists ? "" : "   (MISSING when approved)"}${f.sha256 ? `\n  sha256 ${f.sha256}` : ""}` });
+  }
+  blocks.push({ kind: "heading", text: "History of this campaign" });
+  for (const h of history) {
+    const what = h.kind === "approved" ? `Approved by ${h.typed_name} (${h.email})` : h.kind === "changes" ? `Changes requested by ${h.email}` : "Reset: changed since approval, needs re-approval";
+    blocks.push({ kind: "text", text: `#${h.id}  ${h.at_phoenix}: ${what}${h.id === e.id ? "  (this record)" : ""}` });
+    if (h.comment) blocks.push({ kind: "text", text: `     Comment: ${h.comment}` });
+    if (h.detail) blocks.push({ kind: "text", text: `     ${h.detail}` });
+  }
+  blocks.push({ kind: "heading", text: "The summary exactly as approved" });
+  blocks.push({ kind: "text", text: `SHA-256 of the text below: ${frozenSha}${e.summary_sha256 && e.summary_sha256 !== frozenSha ? ` (file hash recorded: ${e.summary_sha256})` : ""}` });
+  blocks.push({ kind: "space", size: 6 });
+  blocks.push({ kind: "mono", text: e.frozen_text ?? "" });
+  return makePdf(blocks, `Genvyd campaign approval record #${e.id} · ${c.name} · ${e.campaign ?? ""} · generated ${phxTime(now())}`);
+}
+
 export default {
   async scheduled(ctrl: ScheduledController, env: Env, ctx: ExecutionContext) {
     if (ctrl.cron === FEED_CRON) {
@@ -2348,6 +2860,7 @@ export default {
       (async () => {
         await runDigest(env).catch((err) => console.error("digest failed", err));
         await runClientAlerts(env).catch((err) => console.error("client alerts failed", err));
+        await checkApprovals(env).catch((err) => console.error("approval checks failed", err));
       })(),
     );
   },

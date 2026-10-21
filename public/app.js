@@ -408,7 +408,7 @@
     }
     renderApproved(null);
 
-    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted" };
+    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted", campaign_approved: "approved and signed the campaign", campaign_changes: "asked for changes to the campaign" };
     const feed = fromClients.slice(0, 15).map((a) =>
       h("div", { class: "feed-item" + (a.created_at > lastSeen ? " fresh" : "") },
         h("div", { class: "mono muted" }, `${a.client_name || a.client_slug} · ${fmtDate(a.created_at)}${a.created_at > lastSeen ? " · NEW" : ""}`),
@@ -573,6 +573,9 @@
         h("div", { class: "actions" }, newFolderBtn, uploadBtn),
       ),
       uploadPanel,
+      dir ? null : campaignBanner(slug),
+      // Campaign summaries in this folder are pinned above everything else.
+      (data.summaries || []).map((x) => summaryCard(slug, x.path)),
       dir ? null : todoPanel(slug, data.client.name),
     ];
 
@@ -605,10 +608,342 @@
       parts.push(h("label", { class: "check alerts-toggle" }, box, "Email me when there is new work"));
     }
 
-    if (!data.folders.length && !data.items.length) {
+    if (!data.folders.length && !data.items.length && !(data.summaries || []).length) {
       parts.push(h("div", { class: "card empty" }, h("h2", {}, "Nothing here yet"), h("p", { class: "muted" }, state.me.admin ? "Click Upload, or drag files onto this page." : "New work will show up here as soon as it is ready.")));
     }
     show(...parts.filter(Boolean));
+  }
+
+  // ---- Campaign summaries: written summary + two-step client approval ---------------------
+  // "<Campaign>.summary.md" in a client folder shows as a card pinned above everything in that
+  // folder (and on Ad review when it lives in Final ads). The client ticks a box, types their
+  // name, then confirms in a dialog. The server keeps the audit record; this only shows it.
+  const SUMMARY_RE = /\.summary\.md$/i;
+
+  // Markdown for summaries: headings, bold and italics, lists (numbered and bulleted, nested),
+  // blockquotes, links, rules, simple tables. Built as DOM nodes, so nothing in the file can
+  // inject HTML.
+  function mdInline(text) {
+    const out = [];
+    // No lookbehind (older iPhones cannot parse it): italics capture the character before them.
+    const re = /(\*\*|__)(.+?)\1|(^|[^\w*])\*(?!\s)([^*\n]+?)\*(?!\w)|(^|[^\w])_(?!\s)([^_\n]+?)_(?!\w)|`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) out.push(text.slice(last, m.index));
+      if (m[2] !== undefined) out.push(h("strong", {}, mdInline(m[2])));
+      else if (m[4] !== undefined) out.push(m[3], h("em", {}, mdInline(m[4])));
+      else if (m[6] !== undefined) out.push(m[5], h("em", {}, mdInline(m[6])));
+      else if (m[7] !== undefined) out.push(h("code", {}, m[7]));
+      else if (m[8] !== undefined) {
+        const url = m[9];
+        out.push(/^(https?:|mailto:)/i.test(url) ? h("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, mdInline(m[8])) : m[8]);
+      } else if (m[10] !== undefined) out.push(h("a", { href: m[10], target: "_blank", rel: "noopener noreferrer" }, m[10]));
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) out.push(text.slice(last));
+    return out;
+  }
+  function renderMarkdown(src) {
+    const lines = String(src).replace(/\r/g, "").split("\n");
+    const root = h("div", { class: "md" });
+    const LIST = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/;
+    let i = 0;
+    const isBreak = (l) => !l.trim() || /^#{1,6}\s/.test(l) || /^\s*>/.test(l) || LIST.test(l) || /^\s*([-*_])(\s*\1){2,}\s*$/.test(l) || /^\s*```/.test(l);
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) { i++; continue; }
+      let m;
+      if ((m = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/))) {
+        const lvl = Math.min(6, m[1].length + 1); // the card title is the h2, so "# Heading" reads as h2/h3
+        root.append(h("h" + Math.max(3, lvl), {}, mdInline(m[2])));
+        i++; continue;
+      }
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { root.append(h("hr")); i++; continue; }
+      if (/^\s*```/.test(l)) {
+        const buf = [];
+        i++;
+        while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]);
+        i++;
+        root.append(h("pre", {}, buf.join("\n")));
+        continue;
+      }
+      if (/^\s*>/.test(l)) {
+        const buf = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ""));
+        root.append(h("blockquote", {}, [...renderMarkdown(buf.join("\n")).childNodes]));
+        continue;
+      }
+      if (l.includes("|") && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(lines[i + 1])) {
+        const cells = (row) => row.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+        const head = cells(l);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+        root.append(h("div", { class: "md-table" }, h("table", {},
+          h("thead", {}, h("tr", {}, head.map((c) => h("th", {}, mdInline(c))))),
+          h("tbody", {}, rows.map((r) => h("tr", {}, head.map((_, k) => h("td", {}, mdInline(r[k] || "")))))))));
+        continue;
+      }
+      if (LIST.test(l)) {
+        // Nested lists by indentation.
+        const top = { indent: -1, el: null, kids: [] };
+        const stack = [top];
+        while (i < lines.length && (LIST.test(lines[i]) || (lines[i].trim() && /^\s{2,}/.test(lines[i]) && stack.length > 1))) {
+          const lm = lines[i].match(LIST);
+          if (!lm) { // a wrapped line continues the item above
+            const cur = stack[stack.length - 1];
+            cur.li.append(h("br"), ...mdInline(lines[i].trim()));
+            i++; continue;
+          }
+          const indent = lm[1].replace(/\t/g, "    ").length;
+          const ordered = /\d/.test(lm[2]);
+          while (stack.length > 1 && indent < stack[stack.length - 1].indent) stack.pop();
+          let cur = stack[stack.length - 1];
+          if (indent > cur.indent) {
+            const list = h(ordered ? "ol" : "ul", ordered && parseInt(lm[2], 10) !== 1 ? { start: parseInt(lm[2], 10) } : {});
+            if (cur === top) root.append(list); else cur.li.append(list);
+            cur = { indent, list, li: null };
+            stack.push(cur);
+          }
+          const li = h("li", {}, mdInline(lm[3]));
+          cur.list.append(li);
+          cur.li = li;
+          i++;
+        }
+        continue;
+      }
+      const buf = [];
+      while (i < lines.length && !isBreak(lines[i])) buf.push(lines[i++]);
+      root.append(h("p", {}, buf.flatMap((t, k) => (k ? [h("br"), ...mdInline(t.trim())] : mdInline(t.trim())))));
+    }
+    return root;
+  }
+
+  const summaryDir = (p) => p.split("/").slice(0, -1).join("/");
+  const summaryHref = (slug, p) => `#/c/${enc(slug)}${summaryDir(p) ? "/f/" + enc(summaryDir(p)) : ""}`;
+  const summaryId = (p) => "sum-" + Array.from(p).reduce((a, ch) => (Math.imul(a, 31) + ch.charCodeAt(0)) | 0, 7).toString(36).replace("-", "n");
+  // Open a summary card: go to its folder and scroll to it once it has loaded.
+  function openSummary(slug, p) {
+    state.focusSummary = p;
+    const href = summaryHref(slug, p);
+    if (location.hash === href || (href === `#/c/${enc(slug)}` && /^#\/c\/[^/]+\/?$/.test(location.hash))) {
+      const el = document.getElementById(summaryId(p));
+      if (el) { el.scrollIntoView({ behavior: "smooth", block: "start" }); state.focusSummary = null; }
+    } else location.hash = href;
+  }
+
+  function summaryBadge(d) {
+    const admin = state.me.admin;
+    if (d.status === "approved" && d.approval) {
+      return h("div", { class: "sum-badge ok" }, `✓ APPROVED by ${d.approval.name} on ${d.approval.atPhoenix}`);
+    }
+    const text = d.status === "changed" ? "CHANGED SINCE APPROVAL, NEEDS RE-APPROVAL"
+      : d.status === "changes" ? "CHANGES REQUESTED"
+      : admin ? "NEEDS CLIENT APPROVAL" : "NEEDS YOUR APPROVAL";
+    return h("div", { class: "sum-badge warn" }, text);
+  }
+
+  function confirmDialog({ title, body, cancel, yes }) {
+    return new Promise((resolve) => {
+      const close = (v) => { layer.remove(); document.removeEventListener("keydown", esc); resolve(v); };
+      const esc = (e) => { if (e.key === "Escape") close(false); };
+      const yesBtn = h("button", { class: "btn primary", type: "button", onclick: () => close(true) }, yes);
+      const panel = h("div", { class: "tile-menu save-sheet sum-dialog", role: "alertdialog", "aria-modal": "true", "aria-labelledby": "sum-dlg-title" },
+        h("h2", { id: "sum-dlg-title" }, title),
+        h("p", {}, body),
+        h("div", { class: "sum-dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => close(false) }, cancel), yesBtn));
+      const layer = h("div", { class: "menu-layer save-layer", onclick: (e) => { if (e.target === layer) close(false); } }, panel);
+      document.addEventListener("keydown", esc);
+      document.body.append(layer);
+      yesBtn.focus();
+    });
+  }
+
+  function summaryCard(slug, path) {
+    const card = h("section", { class: "card sum-card", id: summaryId(path) }, h("p", { class: "muted", style: "margin:0" }, "Loading the campaign summary…"));
+    const ui = { name: "", agreed: false, asking: false, ask: "" };
+    let d = null;
+    const load = async (keep) => {
+      try { d = await api("GET", `/api/c/${enc(slug)}/summary?path=${enc(path)}`); paint(); }
+      catch (err) { fill(card, h("p", { class: "muted", style: "margin:0" }, `Campaign summary ${baseName(path)}: ${err.message}`)); }
+      if (!keep && state.focusSummary === path) {
+        state.focusSummary = null;
+        requestAnimationFrame(() => card.scrollIntoView({ behavior: "smooth", block: "start" }));
+      }
+    };
+    const post = async (what, body) => {
+      try { d = await api("POST", `/api/c/${enc(slug)}/summary/${what}`, { path, ...body }); paint(); state.listCache.clear(); return true; }
+      catch (err) {
+        toast(err.message);
+        if (/updated while you were reading/i.test(err.message)) { ui.agreed = false; await load(true); }
+        return false;
+      }
+    };
+
+    function adsBlock() {
+      if (!d.ads.length) return null;
+      return h("div", { class: "sum-ads" },
+        h("div", { class: "section-label mono muted" }, `ADS IN THIS CAMPAIGN · ${d.ads.length}`),
+        h("div", { class: "sum-ad-grid" }, d.ads.map((a) => {
+          if (!a.exists) {
+            return h("div", { class: "sum-ad missing" },
+              h("div", { class: "sum-ad-thumb" }, h("span", { class: "mono" }, "MISSING")),
+              h("div", { class: "sum-ad-name" }, a.name),
+              h("div", { class: "muted", style: "font-size:13px" }, state.me.admin ? `Not found on the Synology: ${a.raw}` : "This file is not available yet. Please ask Genvyd before approving."));
+          }
+          const src = mediaUrl(slug, a.path);
+          const media = a.kind === "video"
+            ? h("video", { "data-src": src + "#t=0.5", preload: "metadata", muted: true, playsinline: true, onloadeddata: (e) => e.target.classList.add("loaded") })
+            : a.kind === "image" ? h("img", { "data-src": src, alt: "", loading: "lazy", onload: (e) => e.target.classList.add("loaded") })
+            : h("div", { class: "ftype" }, a.name.split(".").pop());
+          if (media.dataset && media.dataset.src) lazy.observe(media);
+          return h("div", { class: "sum-ad" },
+            h("a", { class: "sum-ad-thumb", href: `#/c/${enc(slug)}/i/${enc(a.path)}`, title: "Open full size" }, media,
+              a.kind === "video" ? h("span", { class: "sum-ad-play", html: ICON_PLAY }) : null),
+            h("a", { class: "sum-ad-name", href: `#/c/${enc(slug)}/i/${enc(a.path)}` }, a.name),
+            a.copy && a.copy.text != null
+              ? h("div", { class: "sum-ad-copy" }, h("div", { class: "mono muted" }, "AD COPY"), h("div", { class: "sum-copy-text" }, a.copy.text.trim()))
+              : state.me.admin ? h("div", { class: "muted", style: "font-size:12px" }, `No copy file next to it (${a.name.replace(/\.[^.]+$/, "")}.copy.txt)`) : null);
+        })));
+    }
+
+    function approveBlock() {
+      if (d.status === "approved" && d.approval) {
+        return h("div", { class: "sum-approved" },
+          h("strong", {}, `Approved by ${d.approval.name}`), ` (${d.approval.email}) on ${d.approval.atPhoenix}.`,
+          h("div", { class: "muted", style: "margin-top:4px;font-size:13px" }, "Any change to this campaign after approval needs a new approval."));
+      }
+      if (d.canApprove && d.ads.some((a) => !a.exists)) {
+        return h("div", { class: "sum-note warn", style: "margin-top:24px" }, h("strong", {}, "Not ready to approve yet. "), "One of the ads listed in this campaign is missing. Genvyd will fix it, then you can approve.");
+      }
+      if (!d.canApprove) {
+        return h("div", { class: "sum-admin-note muted" },
+          d.ads.some((a) => !a.exists) ? h("strong", { style: "color:var(--warn)" }, "An ad listed in the front matter is missing, so the client can't approve yet. ") : null,
+          "Only the client can approve. They tick the box, type their name, then confirm in a final dialog. Their approval, or any change request, shows here and in the history below.");
+      }
+      const box = h("input", { type: "checkbox", id: summaryId(path) + "-agree", checked: ui.agreed });
+      const nameIn = h("input", { class: "sum-name", type: "text", autocomplete: "name", maxlength: "120", placeholder: "Type your full name to sign", "aria-label": "Type your full name to sign", value: ui.name });
+      const go = h("button", { class: "btn primary sum-go", type: "button" }, "Approve campaign");
+      const sync = () => { go.disabled = !(box.checked && nameIn.value.trim().length >= 2); };
+      box.onchange = () => { ui.agreed = box.checked; sync(); };
+      nameIn.oninput = () => { ui.name = nameIn.value; sync(); };
+      sync();
+      go.onclick = async () => {
+        if (go.disabled) return;
+        const ok = await confirmDialog({ title: "Final confirmation", body: d.confirmText, cancel: "Cancel", yes: "Yes, approve and launch" });
+        if (!ok) return;
+        go.disabled = true; go.textContent = "Approving…";
+        if (await post("approve", { name: nameIn.value.trim(), agreed: true, confirmed: true, sig: d.sig })) {
+          toast("Approved. Genvyd has been told and will launch the campaign as approved.");
+        } else { go.textContent = "Approve campaign"; sync(); }
+      };
+      let asker = null;
+      if (ui.asking) {
+        const ta = h("textarea", { class: "reply-box", rows: 3, maxlength: "4000", placeholder: "What would you like changed? Be as specific as you can (which ad, which line, what it should say)." });
+        ta.value = ui.ask;
+        ta.oninput = () => { ui.ask = ta.value; };
+        asker = h("div", { class: "sum-ask" }, ta,
+          h("div", { class: "composer-row" },
+            h("button", { class: "btn small", type: "button", onclick: () => { ui.asking = false; paint(); } }, "Cancel"),
+            h("button", { class: "btn small primary", type: "button", onclick: async () => {
+              if (!ta.value.trim()) return ta.focus();
+              if (await post("changes", { comment: ta.value.trim() })) { ui.asking = false; ui.ask = ""; toast("Sent. Genvyd will update the campaign and ask you to approve it again."); }
+            } }, "Send change request")));
+        setTimeout(() => ta.focus(), 0);
+      }
+      return h("div", { class: "sum-approve" },
+        h("h3", {}, "Approve this campaign"),
+        h("label", { class: "sum-check", for: box.id }, box, h("span", {}, d.agreeText)),
+        h("label", { class: "sum-sign" }, h("span", { class: "mono muted" }, "TYPE YOUR FULL NAME TO SIGN"), nameIn),
+        h("div", { class: "sum-actions" }, go,
+          ui.asking ? null : h("button", { class: "btn", type: "button", onclick: () => { ui.asking = true; paint(); } }, "Request changes")),
+        asker);
+    }
+
+    function commentsBlock() {
+      if (!d.comments.length) return null;
+      const roots = d.comments.filter((m) => !m.parent_id);
+      return h("div", { class: "sum-comments" },
+        h("div", { class: "section-label mono muted" }, "CHANGE REQUESTS AND REPLIES"),
+        roots.map((m) => h("div", { class: "sum-comment" + (m.resolved ? " done" : "") },
+          h("div", { class: "mono muted", style: "font-size:12px" }, `${m.genvyd ? "Genvyd" : who(m.email)} · ${fmtDate(m.created_at)}${m.resolved ? " · done" : ""}`),
+          h("div", {}, linkify(m.body)),
+          d.comments.filter((r) => r.parent_id === m.id).map((r) => h("div", { class: "sum-reply" },
+            h("strong", {}, r.genvyd ? "Genvyd: " : `${who(r.email)}: `), linkify(r.body))))));
+    }
+
+    function historyBlock() {
+      if (!state.me.admin) return null;
+      const KIND = { approved: "Approved", changes: "Changes requested", reset: "Reset: changed since approval" };
+      return h("details", { class: "sum-history" },
+        h("summary", {}, `Approval history (${d.history.length})`),
+        d.history.length ? d.history.map((e) => h("div", { class: "sum-event " + e.kind },
+          h("div", { class: "sum-event-head" },
+            h("strong", {}, `#${e.id} ${KIND[e.kind] || e.kind}`),
+            h("span", { class: "muted" }, ` · ${e.atPhoenix}`),
+            h("span", { style: "flex:1" }),
+            e.kind === "approved" ? h("button", { class: "btn small", type: "button", onclick: () =>
+              saveFile(`/api/c/${enc(slug)}/summary/record?path=${enc(path)}&id=${e.id}`, `${d.campaign} approval record #${e.id}.pdf`) }, "↓ Download record") : null),
+          e.kind === "approved" ? h("div", { class: "muted sum-event-meta" }, `Signed "${e.name}" · ${e.email} · IP ${e.ip || "unknown"} · ${String(e.userAgent || "").slice(0, 90)}`) : null,
+          e.kind === "approved" ? h("div", { class: "mono muted sum-event-meta" }, `summary sha256 ${e.summarySha256}`) : null,
+          e.kind === "changes" ? h("div", { class: "sum-event-meta" }, `${e.email}: "${e.comment}"`) : null,
+          e.kind === "reset" ? h("div", { class: "muted sum-event-meta" }, e.detail) : null))
+          : h("p", { class: "muted", style: "margin:8px 0 0" }, "Nothing yet. The client has not approved or asked for changes."));
+    }
+
+    function paint() {
+      const m = d.meta || {};
+      const chips = [["Budget", m.budget], ["Start", m.start], ["End", m.end]].filter(([, v]) => v);
+      card.className = `card sum-card st-${d.status}`;
+      fill(card,
+        h("div", { class: "sum-head" },
+          summaryBadge(d),
+          h("div", { class: "mono muted sum-kicker" }, "CAMPAIGN SUMMARY"),
+          h("h2", { class: "sum-title" }, d.campaign),
+          chips.length ? h("div", { class: "sum-chips" }, chips.map(([k, v]) => h("span", { class: "sum-chip" }, h("span", { class: "mono muted" }, k.toUpperCase() + " "), v))) : null),
+        d.status === "changed" && d.lastReset
+          ? h("div", { class: "sum-note warn" }, h("strong", {}, "This campaign changed after it was approved. "), d.lastReset.detail || "", " Please review everything again and approve it if it is right.")
+          : null,
+        d.updatedAfterChanges ? h("div", { class: "sum-note" }, h("strong", {}, state.me.admin ? "Updated after the client's change request. " : "Updated after your change request. "), state.me.admin ? "Waiting for them to approve it." : "Please review it again.") : null,
+        d.status === "changes" && d.lastChange
+          ? h("div", { class: "sum-note" }, h("strong", {}, `${state.me.admin ? who(d.lastChange.email) : "You"} asked for changes on ${d.lastChange.atPhoenix}: `), `"${d.lastChange.comment}"`, state.me.admin ? null : " Genvyd is updating it and will ask you to approve it again.")
+          : null,
+        renderMarkdown(d.body),
+        adsBlock(),
+        commentsBlock(),
+        approveBlock(),
+        historyBlock());
+    }
+    load();
+    return card;
+  }
+
+  // The client's home: one line per campaign, amber until approved, green after.
+  function campaignBanner(slug) {
+    const box = h("div", { class: "sum-banners" });
+    api("GET", `/api/c/${enc(slug)}/summaries`).then((r) => {
+      const admin = state.me.admin;
+      const order = { needs: 0, changed: 0, changes: 1, approved: 2 };
+      fill(box, r.summaries.sort((a, b) => order[a.status] - order[b.status]).map((s) => {
+        const go = (e) => { e.preventDefault(); openSummary(slug, s.path); };
+        if (s.status === "approved") {
+          return h("a", { class: "sum-banner ok", href: summaryHref(slug, s.path), onclick: go },
+            h("span", { class: "sum-banner-badge" }, "✓ APPROVED"),
+            h("span", {}, h("strong", {}, s.campaign), ` · by ${s.approval.name} on ${s.approval.atPhoenix}`));
+        }
+        if (s.status === "changes") {
+          return h("a", { class: "sum-banner", href: summaryHref(slug, s.path), onclick: go },
+            h("span", { class: "sum-banner-badge" }, "CHANGES REQUESTED"),
+            h("span", {}, admin ? `${s.campaign}: the client asked for changes. Update the summary, then they approve again.` : h("span", {}, "You asked for changes on ", h("strong", {}, s.campaign), ". Genvyd is updating it.")));
+        }
+        return h("a", { class: "sum-banner warn", href: summaryHref(slug, s.path), onclick: go },
+          h("span", { class: "sum-banner-badge" }, s.status === "changed" ? "CHANGED, NEEDS RE-APPROVAL" : admin ? "NEEDS CLIENT APPROVAL" : "NEEDS YOUR APPROVAL"),
+          h("span", {}, admin ? h("span", {}, "Campaign ", h("strong", {}, s.campaign), s.status === "changed" ? " changed after approval and needs the client's approval again" : " is waiting for the client's approval")
+            : h("span", {}, "Your campaign ", h("strong", {}, s.campaign), s.status === "changed" ? " changed after you approved it and needs your approval again" : " needs your approval")),
+          h("span", { class: "sum-banner-go" }, "Review →"));
+      }));
+    }).catch(() => box.remove());
+    return box;
   }
 
   // Client home: what is waiting on the client, across every project, newest first. Ads still
@@ -1891,6 +2226,8 @@
   window.addEventListener("hashchange", closeTileMenu);
 
   async function viewItem(slug, path) {
+    // A campaign summary is a card in its folder, not a file page.
+    if (SUMMARY_RE.test(path)) { state.focusSummary = path; location.replace(summaryHref(slug, path)); return; }
     const dir = parentOf(path);
     show(h("p", { class: "muted" }, "Loading…"));
 
@@ -2448,8 +2785,8 @@
     try { root = await api("GET", `/api/c/${enc(slug)}/list?dir=${enc(FINAL_DIR)}`); }
     catch (err) { if (/not on the Synology/i.test(err.message)) return null; throw err; }
     const subs = await Promise.all(root.folders.slice(0, 12).map((f) =>
-      api("GET", `/api/c/${enc(slug)}/list?dir=${enc(f.path)}`).then((d) => ({ title: f.name, dir: f.path, items: d.items })).catch(() => null)));
-    return [{ title: null, dir: FINAL_DIR, items: root.items }, ...subs.filter(Boolean)];
+      api("GET", `/api/c/${enc(slug)}/list?dir=${enc(f.path)}`).then((d) => ({ title: f.name, dir: f.path, items: d.items, summaries: d.summaries || [] })).catch(() => null)));
+    return [{ title: null, dir: FINAL_DIR, items: root.items, summaries: root.summaries || [] }, ...subs.filter(Boolean)];
   }
   function finalAdsSection(slug, sections, reload, copyFor) {
     const wrap = h("div", { class: "final-ads" });
@@ -2808,6 +3145,8 @@
       clientTabs(slug, "copy"),
       h("div", { class: "page-head" }, h("h1", {}, "Ad review"),
         h("p", { class: "muted", style: "margin:6px 0 0;max-width:640px" }, state.me.admin ? "The final look of each ad, plus the wording, for the client to approve." : "Check how each ad will look, and the wording. Approve what you like, or ask for changes.")),
+      // Campaign summaries kept with the final ads are pinned at the top here too.
+      Array.isArray(finals) ? finals.flatMap((s) => s.summaries || []).map((x) => summaryCard(slug, x.path)) : null,
       finalBox,
       h("div", { class: "section-head", style: "margin-top:36px" }, h("div", {}, h("h2", {}, shownUnder.size ? "Other ad copy" : "Ad copy"),
         h("p", { class: "muted", style: "margin:4px 0 0;max-width:640px" }, shownUnder.size
@@ -3218,7 +3557,7 @@
     }
     loadFeed();
 
-    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted" };
+    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted", campaign_approved: "approved and signed the campaign", campaign_changes: "asked for changes to the campaign" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
           h("div", { class: "feed-item" },
