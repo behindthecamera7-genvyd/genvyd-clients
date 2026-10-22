@@ -3164,6 +3164,12 @@
       const body = shown.length
         ? h("div", { class: "copy-list" }, shown.map(card))
         : h("div", { class: "card empty muted" }, shownUnder.size && !visible.length ? "All the copy is shown under its ad above." : d.items.length ? "Nothing matches these filters." : state.me.admin ? "No copy yet. Add taglines, headlines or ad text above and the client can approve them here." : "No ad copy to review yet.");
+      // A client with no copy left to review here (it is all shown with its ad above) doesn't need
+      // an empty "Ad copy" section. Admin keeps it for adding copy.
+      const nothingLeft = !state.me.admin && !visible.length && !hiddenCount && shownUnder.size > 0;
+      listHolder.hidden = nothingLeft;
+      const headEl = listHolder.previousElementSibling;
+      if (headEl && headEl.classList.contains("section-head")) headEl.hidden = nothingLeft;
       fill(listHolder, toolbar,
         st.hidden ? h("div", { class: "card hidden-note" }, h("div", {}, h("strong", {}, "Copy in the trash. "), "Only shown here. Restore to bring a line back.")) : null,
         body);
@@ -3185,6 +3191,7 @@
       adder,
       listHolder,
     );
+    render(); // again now that it is on the page, so an empty copy section can hide its heading
   }
   viewCopy.state = {};
 
