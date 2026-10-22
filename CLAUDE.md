@@ -280,7 +280,8 @@ folder if needed, uploads there) and Open folder. No D1 changes.
 Brief for writing them: `synology/CAMPAIGN_SUMMARY.md`. A file "<Campaign>.summary.md" anywhere in a
 client folder (optional front matter: `ads` list, `budget`, `start`, `end`) is not a file tile: `listDir()`
 and `scanClients()` record it in `campaign_summaries` (`noteSummaries()`) and it shows as `summaryCard()`
-pinned at the top of its folder (and of Ad review when it is in Final ads), with the Markdown rendered by
+pinned at the top of its folder (and of Ad review when it is in Final ads, where final ads listed in the summary are
+not shown again in Final ads and their copy is claimed so it is not repeated under Other ad copy), with the Markdown rendered by
 `renderMarkdown()` (DOM only, no HTML from the file, no regex lookbehind so older iPhones parse app.js),
 the listed ads as thumbnails with their `.copy.txt` text (`adKeyOf()` on the server), and a two-step
 approval: tick `AGREE_TEXT` + typed name enables "Approve campaign", then the "Final confirmation" dialog

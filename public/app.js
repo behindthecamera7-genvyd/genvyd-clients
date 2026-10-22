@@ -759,13 +759,13 @@
     });
   }
 
-  function summaryCard(slug, path) {
+  function summaryCard(slug, path, opts = {}) {
     const card = h("section", { class: "card sum-card", id: summaryId(path) }, h("p", { class: "muted", style: "margin:0" }, "Loading the campaign summary…"));
     const ui = { name: "", agreed: false, asking: false, ask: "" };
     let d = null;
     const load = async (keep) => {
-      try { d = await api("GET", `/api/c/${enc(slug)}/summary?path=${enc(path)}`); paint(); }
-      catch (err) { fill(card, h("p", { class: "muted", style: "margin:0" }, `Campaign summary ${baseName(path)}: ${err.message}`)); }
+      try { d = await api("GET", `/api/c/${enc(slug)}/summary?path=${enc(path)}`); paint(); if (opts.onLoad) opts.onLoad(d); }
+      catch (err) { fill(card, h("p", { class: "muted", style: "margin:0" }, `Campaign summary ${baseName(path)}: ${err.message}`)); if (opts.onLoad) opts.onLoad(null); }
       if (!keep && state.focusSummary === path) {
         state.focusSummary = null;
         requestAnimationFrame(() => card.scrollIntoView({ behavior: "smooth", block: "start" }));
@@ -2788,9 +2788,21 @@
       api("GET", `/api/c/${enc(slug)}/list?dir=${enc(f.path)}`).then((d) => ({ title: f.name, dir: f.path, items: d.items, summaries: d.summaries || [] })).catch(() => null)));
     return [{ title: null, dir: FINAL_DIR, items: root.items, summaries: root.summaries || [] }, ...subs.filter(Boolean)];
   }
-  function finalAdsSection(slug, sections, reload, copyFor) {
+  function finalAdsSection(slug, sections, reload, copyFor, covered) {
     const wrap = h("div", { class: "final-ads" });
-    const all = (sections || []).map((s) => ({ ...s, ads: finalAdGroups(s.items) })).filter((s) => s.ads.length);
+    // Ads listed in a campaign summary are reviewed on its card (with their copy), so they are not
+    // shown again here. Their copy is still claimed, so it does not reappear under "Other ad copy".
+    const isCovered = (ad) => !!covered && ad.shots.some((e) => covered.has(e.it.path));
+    let coveredN = 0;
+    const all = (sections || []).map((s) => {
+      const ads = finalAdGroups(s.items).filter((ad) => {
+        if (!isCovered(ad)) return true;
+        coveredN++;
+        if (copyFor) copyFor(ad, s.dir);
+        return false;
+      });
+      return { ...s, ads };
+    }).filter((s) => s.ads.length);
     const count = all.reduce((n, s) => n + s.ads.length, 0);
     const approvedN = all.reduce((n, s) => n + s.ads.filter((a) => a.status === "approved").length, 0);
 
@@ -2876,12 +2888,20 @@
       );
     };
 
+    if (!count && coveredN) {
+      // Everything is in the campaign summary above: nothing more to review here.
+      if (!state.me.admin) return null;
+      fill(wrap, head, h("p", { class: "muted", style: "margin:0 0 8px" }, `All ${coveredN} final ad${coveredN === 1 ? " is" : "s are"} in the campaign summary above, so the client reviews ${coveredN === 1 ? "it" : "them"} there.`));
+      return wrap;
+    }
     const body = count
       ? all.map((s) => [s.title ? h("div", { class: "section-label mono muted" }, `${s.title.toUpperCase()} · ${s.ads.length}`) : null, h("div", { class: "final-list" }, s.ads.map((ad) => card(ad, s.dir)))])
       : h("div", { class: "card empty muted" }, state.me.admin
           ? (sections ? `No screenshots yet. Muse saves them in "${FINAL_DIR}", or tap Add screenshots.` : `No "${FINAL_DIR}" folder yet. Tap Add screenshots, or have Muse save them in the client's folder under "${FINAL_DIR}".`)
           : "No final ads to review yet. They show up here when they are ready.");
-    fill(wrap, head, body);
+    fill(wrap, head,
+      coveredN ? h("p", { class: "muted", style: "margin:0 0 12px" }, `${coveredN} more ${coveredN === 1 ? "is" : "are"} in the campaign summary above.`) : null,
+      body);
     return wrap;
   }
 
@@ -3061,11 +3081,21 @@
       return { el, perCard };
     }
     const finalBox = h("div");
+    // Campaign summaries kept with the final ads: their ads are reviewed on the summary card.
+    const covered = new Set();
+    const sumPaths = Array.isArray(finals) ? finals.flatMap((s) => s.summaries || []).map((x) => x.path) : [];
+    let sumPending = sumPaths.length;
+    const sumCards = sumPaths.map((p) => summaryCard(slug, p, { onLoad: (sd) => {
+      if (sd) sd.ads.forEach((a) => a.exists && covered.add(a.path));
+      sumPending = Math.max(0, sumPending - 1);
+      repaint();
+    } }));
     const paintFinal = () => {
       shownUnder = new Set();
+      if (sumPending) { fill(finalBox); return; } // wait for the summary so ads in it don't flash here first
       fill(finalBox, finals && finals.error
         ? h("div", { class: "card empty muted" }, `Could not load the final ads: ${finals.error}`)
-        : finalAdsSection(slug, finals, async () => { try { finals = await loadFinalAds(slug); } catch (err) { finals = { error: err.message }; } repaint(); }, copyFor));
+        : finalAdsSection(slug, finals, async () => { try { finals = await loadFinalAds(slug); } catch (err) { finals = { error: err.message }; } repaint(); }, copyFor, covered));
     };
     const repaint = () => { paintFinal(); render(); };
     const campName = new Map(d.campaigns.map((c) => [c.id, c.name]));
@@ -3146,7 +3176,7 @@
       h("div", { class: "page-head" }, h("h1", {}, "Ad review"),
         h("p", { class: "muted", style: "margin:6px 0 0;max-width:640px" }, state.me.admin ? "The final look of each ad, plus the wording, for the client to approve." : "Check how each ad will look, and the wording. Approve what you like, or ask for changes.")),
       // Campaign summaries kept with the final ads are pinned at the top here too.
-      Array.isArray(finals) ? finals.flatMap((s) => s.summaries || []).map((x) => summaryCard(slug, x.path)) : null,
+      sumCards,
       finalBox,
       h("div", { class: "section-head", style: "margin-top:36px" }, h("div", {}, h("h2", {}, shownUnder.size ? "Other ad copy" : "Ad copy"),
         h("p", { class: "muted", style: "margin:4px 0 0;max-width:640px" }, shownUnder.size
