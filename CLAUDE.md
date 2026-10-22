@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only). All keep existing data.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only), 0014 campaign_summaries.covered. All keep existing data.
 
 ## Roles
 
@@ -299,7 +299,10 @@ reset ("Changed since approval, needs re-approval", with what changed); it runs 
 client home list (`/summaries`) and for 3 campaigns per 15 minute run (`checkApprovals()`). After a
 change request, a changed file shows as "Needs approval" again (no event). Admin gets Approval history
 and "Download record" (`/summary/record`, a PDF from `src/pdf.ts`, written by hand, no library).
-Digest kinds `campaign_approved` / `campaign_changes`. Routes: `GET /api/c/:slug/summaries`,
+`covered` (saved on every read) lists every file of the listed ads (all placements, sizes, versions, by
+`adKeyOf()`) and their copy files: the client home `todo` leaves those out (the banner points to the card),
+and approving the campaign also sets them all to approved (item_status and the copy lines from those copy
+files, no separate activity rows). Digest kinds `campaign_approved` / `campaign_changes`. Routes: `GET /api/c/:slug/summaries`,
 `GET /summary?path=`, `POST /summary/approve` {path, name, agreed, confirmed, sig}, `POST /summary/changes`
 {path, comment}, `GET /summary/record?path=&id=` (admin).
 

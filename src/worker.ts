@@ -1402,6 +1402,17 @@ async function route(req: Request, env: Env): Promise<Response> {
         ).bind(c.slug, p, cur.campaign, user.email, name, t, new Date(t).toISOString(), phxTime(t), ip, ua, cur.sha, cur.sig,
           JSON.stringify(cur.files), cur.text, `${AGREE_TEXT}\n\n${CONFIRM_TEXT}`).run();
         await logActivity(env, c.slug, p, user.email, "campaign_approved", `${cur.campaign}, signed ${name}`);
+        // Approving the campaign approves its ads (every placement, size and version) and their copy,
+        // so they don't sit in Final ads, Ad review or "Waiting on you" as separate things to approve.
+        const stmts: D1PreparedStatement[] = cur.covered.ads.map((q) => env.DB.prepare(
+          "INSERT INTO item_status (client_slug, path, status, updated_by, updated_at) VALUES (?, ?, 'approved', ?, ?) " +
+            "ON CONFLICT(client_slug, path) DO UPDATE SET status = excluded.status, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+        ).bind(c.slug, q, user.email, t));
+        for (const cf of cur.covered.copy) {
+          stmts.push(env.DB.prepare("UPDATE copy_items SET status = 'approved', status_by = ?, status_at = ? WHERE client_slug = ? AND source = ? AND hidden = 0")
+            .bind(user.email, t, c.slug, cf));
+        }
+        for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
       } else {
         const comment = String(body.comment ?? "").replace(/\r/g, "").trim();
         if (!comment) throw new HttpError(400, "Say what you would like changed.");
@@ -1547,26 +1558,33 @@ async function route(req: Request, env: Env): Promise<Response> {
       // for ad copy and Genvyd's recent replies to the client's comments. A few queries in total.
       const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
       const since = now() - 21 * 86400 * 1000;
-      const [filesR, statusR, hiddenR, viewsR, likesR, cmtR, copyR, repliesR] = await env.DB.batch([
+      const [filesR, statusR, hiddenR, viewsR, likesR, cmtR, copyR, repliesR, coveredR] = await env.DB.batch([
         env.DB.prepare("SELECT path, first_seen FROM files WHERE client_slug = ? ORDER BY first_seen DESC LIMIT 600").bind(c.slug),
         env.DB.prepare("SELECT path, status, updated_by, updated_at FROM item_status WHERE client_slug = ?").bind(c.slug),
         env.DB.prepare("SELECT path FROM hidden WHERE client_slug = ?").bind(c.slug),
         env.DB.prepare("SELECT path FROM views WHERE client_slug = ? AND email = ?").bind(c.slug, user.email),
         env.DB.prepare("SELECT path, COUNT(*) AS n, SUM(CASE WHEN email = ? THEN 1 ELSE 0 END) AS mine FROM likes WHERE client_slug = ? GROUP BY path").bind(user.email, c.slug),
         env.DB.prepare("SELECT path, COUNT(*) AS n, SUM(CASE WHEN resolved = 0 THEN 1 ELSE 0 END) AS open FROM comments WHERE client_slug = ? AND path NOT LIKE 'copy:%' GROUP BY path").bind(c.slug),
-        env.DB.prepare("SELECT status, COUNT(*) AS n FROM copy_items WHERE client_slug = ? AND hidden = 0 GROUP BY status").bind(c.slug),
+        env.DB.prepare("SELECT status, source, COUNT(*) AS n FROM copy_items WHERE client_slug = ? AND hidden = 0 GROUP BY status, source").bind(c.slug),
         env.DB.prepare(
           "SELECT r.id, r.path, r.email, r.body, r.created_at, p.body AS parent_body, p.email AS parent_email FROM comments r LEFT JOIN comments p ON p.id = r.parent_id " +
             "WHERE r.client_slug = ? AND r.created_at > ? AND r.path NOT LIKE 'copy:%' ORDER BY r.created_at DESC LIMIT 30",
         ).bind(c.slug, since),
+        env.DB.prepare("SELECT covered FROM campaign_summaries WHERE client_slug = ? AND gone = 0 AND covered IS NOT NULL").bind(c.slug),
       ]);
+      // Ads and copy in a campaign summary are reviewed on its card (the banner points there), not one by one.
+      const covAds = new Set<string>();
+      const covCopy = new Set<string>();
+      for (const r of coveredR.results as { covered: string }[]) {
+        try { const cv = JSON.parse(r.covered); (cv.ads || []).forEach((x: string) => covAds.add(x)); (cv.copy || []).forEach((x: string) => covCopy.add(x)); } catch { /* ignore */ }
+      }
       const st = new Map((statusR.results as { path: string; status: string; updated_by: string; updated_at: number }[]).map((r) => [r.path, r]));
       const hid = new Set((hiddenR.results as { path: string }[]).map((r) => r.path));
       const seen = new Set((viewsR.results as { path: string }[]).map((r) => r.path));
       const lk = new Map((likesR.results as { path: string; n: number; mine: number }[]).map((r) => [r.path, r]));
       const cm = new Map((cmtR.results as { path: string; n: number; open: number }[]).map((r) => [r.path, r]));
       const items = (filesR.results as { path: string; first_seen: number }[])
-        .filter((f) => !hid.has(f.path) && !COPY_FILE.test(f.path) && !SUMMARY_FILE.test(f.path) && !/(^|\/)[.@#_]/.test(f.path))
+        .filter((f) => !hid.has(f.path) && !covAds.has(f.path) && !COPY_FILE.test(f.path) && !SUMMARY_FILE.test(f.path) && !/(^|\/)[.@#_]/.test(f.path))
         .map((f) => {
           const name = f.path.split("/").pop() || f.path;
           const s0 = st.get(f.path);
@@ -1579,7 +1597,11 @@ async function route(req: Request, env: Env): Promise<Response> {
             tags: [], seen: seen.has(f.path), hidden: false,
           };
         });
-      const copy = Object.fromEntries((copyR.results as { status: string; n: number }[]).map((r) => [r.status, r.n]));
+      const copy: Record<string, number> = {};
+      for (const r of copyR.results as { status: string; source: string | null; n: number }[]) {
+        if (r.source && covCopy.has(r.source)) continue;
+        copy[r.status] = (copy[r.status] ?? 0) + r.n;
+      }
       const replies = (repliesR.results as Record<string, any>[])
         // Genvyd's replies to the client's comments, and Genvyd's own new comments on an ad (a question).
         .filter((r) => admins.includes(String(r.email).toLowerCase()) && (r.parent_email == null || !admins.includes(String(r.parent_email).toLowerCase())))
@@ -2555,6 +2577,8 @@ type LoadedSummary = {
   meta: { budget: string | null; start: string | null; end: string | null };
   ads: { raw: string; path: string; name: string; kind: string; exists: boolean; mtime: string | null; size: number | null; copy: { path: string; text?: string; sha256?: string; mtime: string | null; size: number | null } | null }[];
   files: SummaryFile[]; sig: string;
+  /** Every file of the listed ads (all placements, sizes and versions) and their copy files. */
+  covered: { ads: string[]; copy: string[] };
 };
 
 /** Reads a summary and everything it lists. `full` also reads (and hashes) each copy file. */
@@ -2586,6 +2610,7 @@ async function loadSummary(env: Env, c: Client, path: string, full: boolean): Pr
   const rawAds = (Array.isArray(meta.ads) ? meta.ads : meta.ads ? [String(meta.ads)] : []).slice(0, MAX_SUMMARY_ADS);
 
   const ads: LoadedSummary["ads"] = [];
+  const coveredAds = new Set<string>();
   for (const raw of rawAds) {
     const clean = raw.replace(/^\.?\/+/, "").replace(/^\/Volumes\/GenvydClients\/[^/]+\//, "");
     // A path is relative to the client folder; a bare name is looked for next to the summary first.
@@ -2607,6 +2632,9 @@ async function loadSummary(env: Env, c: Client, path: string, full: boolean): Pr
       const key = adKeyOf(nm, inFinal);
       const cf = (listings.get(fdir) ?? []).find((x) => x.type === "file" && COPY_FILE.test(x.name) && adKeyOf(x.name, inFinal) === key);
       if (cf) copy = { path: fdir ? `${fdir}/${cf.name}` : cf.name, mtime: cf.mtime ?? null, size: cf.size ?? null };
+      for (const x of listings.get(fdir) ?? []) {
+        if (x.type === "file" && !COPY_FILE.test(x.name) && !SUMMARY_FILE.test(x.name) && adKeyOf(x.name, inFinal) === key) coveredAds.add(fdir ? `${fdir}/${x.name}` : x.name);
+      }
     }
     ads.push({ raw, path: p, name: nm, kind: kindOf(nm), exists: !!found, mtime: found?.e.mtime ?? null, size: found?.e.size ?? null, copy });
   }
@@ -2639,6 +2667,7 @@ async function loadSummary(env: Env, c: Client, path: string, full: boolean): Pr
     text, body, sha, mtime: entry.mtime ?? null, size: entry.size ?? null,
     meta: { budget: str(meta.budget), start: str(meta.start), end: str(meta.end) },
     ads, files, sig,
+    covered: { ads: [...coveredAds].slice(0, 200), copy: [...new Set(ads.map((a) => a.copy?.path).filter((p): p is string => !!p))] },
   };
 }
 
@@ -2740,7 +2769,7 @@ async function summaryView(env: Env, user: User, c: Client, path: string) {
     throw new HttpError(404, st.events.length ? "This campaign summary was removed or renamed." : "That campaign summary is not on the Synology.");
   }
   await noteSummaries(env, c.slug, cur.dir, [cur.name], false);
-  await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ? WHERE client_slug = ? AND path = ?").bind(cur.sig, now(), c.slug, p).run();
+  await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ?, covered = ? WHERE client_slug = ? AND path = ?").bind(cur.sig, now(), JSON.stringify(cur.covered), c.slug, p).run();
   const st = await summaryStatus(env, c, p, cur);
   const comments = (await itemDetail(env, user, c, p)).comments;
   return {
@@ -2768,7 +2797,7 @@ async function summariesList(env: Env, c: Client) {
         await summaryStatus(env, c, r.path, null); // an approval of a removed summary no longer stands
         return null;
       }
-      await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ? WHERE client_slug = ? AND path = ?").bind(cur.sig, now(), c.slug, r.path).run();
+      await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ?, covered = ? WHERE client_slug = ? AND path = ?").bind(cur.sig, now(), JSON.stringify(cur.covered), c.slug, r.path).run();
       const st = await summaryStatus(env, c, r.path, cur);
       return { path: r.path, dir: cur.dir, campaign: cur.campaign, status: st.status, statusText: st.statusText, approval: st.approval ? { name: st.approval.typed_name, atPhoenix: st.approval.at_phoenix } : null };
     } catch { return null; }
@@ -2788,7 +2817,7 @@ async function checkApprovals(env: Env) {
     try {
       const cur = await loadSummary(env, c, r.path, false);
       if (!cur) await env.DB.prepare("UPDATE campaign_summaries SET gone = 1 WHERE client_slug = ? AND path = ?").bind(c.slug, r.path).run();
-      await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ? WHERE client_slug = ? AND path = ?").bind(cur?.sig ?? null, now(), c.slug, r.path).run();
+      await env.DB.prepare("UPDATE campaign_summaries SET last_sig = ?, last_checked = ?, covered = ? WHERE client_slug = ? AND path = ?").bind(cur?.sig ?? null, now(), cur ? JSON.stringify(cur.covered) : null, c.slug, r.path).run();
       await summaryStatus(env, c, r.path, cur);
     } catch (err) { console.error("approval check failed", r.path, err); }
   }
