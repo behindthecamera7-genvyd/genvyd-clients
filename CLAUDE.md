@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only), 0014 campaign_summaries.covered. All keep existing data.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only), 0014 campaign_summaries.covered, 0015 results_views. All keep existing data.
 
 ## Roles
 
@@ -305,6 +305,31 @@ and approving the campaign also sets them all to approved (item_status and the c
 files, no separate activity rows). Digest kinds `campaign_approved` / `campaign_changes`. Routes: `GET /api/c/:slug/summaries`,
 `GET /summary?path=`, `POST /summary/approve` {path, name, agreed, confirmed, sig}, `POST /summary/changes`
 {path, comment}, `GET /summary/record?path=&id=` (admin).
+
+## Results (campaign analytics)
+
+Brief for writing them: `synology/RESULTS_FILES.md`. Claude writes "<Campaign>.analytics.json" in
+`<client folder>/Results/` (the portal only reads; admin's first visit to the tab MKCOLs the folder). The
+`Results` folder is hidden from the client root listing, and analytics files are never registered as
+files (no NEW alerts). `loadResults()` reads every file (24 max, 2 MB each, bad files listed for admin
+only) and `enrichResults()` cleans every value (non-numbers become null, shown "n/a") and adds the
+ratings once for every view: `rateMetric()` against `benchmarks` (defaults in `DEFAULT_BENCH`), "early"
+(gray) under $10 spend or 500 impressions, `overall` = worst of click rate and cost per click, Leading /
+Underperforming badges, pace (within 15% of even spend), day X of Y, early-days banner (under 3 days or
+500 impressions). Routes: `GET /api/c/:slug/results`, `POST /results/view` {file} (client visits only,
+`results_views`, migration 0015), `GET /results/report?file=&tz=` (one-page color PDF from
+`resultsReportPdf()` on `PdfCanvas` in src/pdf.ts), `GET /api/admin/results` (every client).
+
+Pages (app.js): Results tab (`viewResults()`: current campaign cards, "Past campaigns"; a single
+current campaign opens directly), campaign page (`viewResultsDetail()`: header, `budgetBar()`, note from
+Genvyd, early banner, 8 tiles that show their explanation on tap, legend, `dailyChart()` SVG with tap/hover
+tooltip and "By ad" when ads have `daily`, `leaderboard()` sortable cards, `moneyWent()`, Meta vs Shopify,
+`resultsComments()` on the file path). Client home `resultsHome()` card per Active campaign; admin
+dashboard `resultsAdminList()` sortable by spend or end date. Identity colors per ad by file order
+(`ID_COLORS`); traffic-light hues are the dark-mode ones (--rt-*) since the portal is dark; the PDF uses
+the light ones with darker text shades for AA contrast. Comments and links on an analytics path open the
+results page (`viewItem()` redirect, `itemLink()`); the feed lists them under "Campaign results" with
+"Results viewed" lines.
 
 ## Claude feed
 

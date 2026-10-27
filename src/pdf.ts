@@ -159,3 +159,91 @@ export function makePdf(blocks: PdfBlock[], footer: string): Uint8Array {
   for (let i = 0; i < pdf.length; i++) bytes[i] = pdf.charCodeAt(i) & 0xff;
   return bytes;
 }
+
+// ---------------------------------------------------------------------------
+// A one-page drawing surface for color reports (the client Results report). Coordinates are
+// from the top left in points (612 x 792), and converted to PDF's bottom-left system here.
+// ---------------------------------------------------------------------------
+
+export type RGB = [number, number, number];
+export const hex = (h: string): RGB => {
+  const m = h.replace("#", "");
+  return [parseInt(m.slice(0, 2), 16) / 255, parseInt(m.slice(2, 4), 16) / 255, parseInt(m.slice(4, 6), 16) / 255];
+};
+/** The color mixed with white, e.g. tint(green, 0.12) for a 12% tinted background. */
+export const tint = (c: RGB, a: number): RGB => [1 - (1 - c[0]) * a, 1 - (1 - c[1]) * a, 1 - (1 - c[2]) * a];
+const col = (c: RGB) => c.map((v) => v.toFixed(3)).join(" ");
+
+export class PdfCanvas {
+  readonly W = 612;
+  readonly H = 792;
+  private ops: string[] = [];
+  private Y = (y: number) => (this.H - y).toFixed(1);
+
+  rect(x: number, y: number, w: number, h: number, fill: RGB, stroke?: RGB, lw = 0.75) {
+    this.ops.push(`${col(fill)} rg ${stroke ? `${col(stroke)} RG ${lw} w ` : ""}${x.toFixed(1)} ${(this.H - y - h).toFixed(1)} ${w.toFixed(1)} ${h.toFixed(1)} re ${stroke ? "B" : "f"}`);
+  }
+  /** Rounded rectangle (r = corner radius). */
+  round(x: number, y: number, w: number, h: number, r: number, fill: RGB, stroke?: RGB, lw = 0.75) {
+    const k = 0.5523 * r, X = x, Yt = this.H - y, B = Yt - h, R = x + w;
+    const p = [
+      `${X + r} ${Yt} m`, `${R - r} ${Yt} l`, `${R - r + k} ${Yt} ${R} ${Yt - r + k} ${R} ${Yt - r} c`,
+      `${R} ${B + r} l`, `${R} ${B + r - k} ${R - r + k} ${B} ${R - r} ${B} c`, `${X + r} ${B} l`,
+      `${X + r - k} ${B} ${X} ${B + r - k} ${X} ${B + r} c`, `${X} ${Yt - r} l`, `${X} ${Yt - r + k} ${X + r - k} ${Yt} ${X + r} ${Yt} c`,
+    ].join(" ");
+    this.ops.push(`${col(fill)} rg ${stroke ? `${col(stroke)} RG ${lw} w ` : ""}${p} h ${stroke ? "B" : "f"}`);
+  }
+  circle(cx: number, cy: number, r: number, fill: RGB) { this.round(cx - r, cy - r, r * 2, r * 2, r, fill); }
+  line(x1: number, y1: number, x2: number, y2: number, color: RGB, lw = 1) {
+    this.ops.push(`${col(color)} RG ${lw} w ${x1.toFixed(1)} ${this.Y(y1)} m ${x2.toFixed(1)} ${this.Y(y2)} l S`);
+  }
+  polyline(pts: [number, number][], color: RGB, lw = 1.5) {
+    if (pts.length < 2) return;
+    this.ops.push(`${col(color)} RG ${lw} w 1 J 1 j ${pts.map(([x, y], i) => `${x.toFixed(1)} ${this.Y(y)} ${i ? "l" : "m"}`).join(" ")} S`);
+  }
+  width(s: string, size: number, bold = false) { return width(winAnsi(s), size, bold ? "bold" : "helv"); }
+  /** Text with its baseline at y. align: left, right or center around x. */
+  text(x: number, y: number, s: string, size: number, color: RGB, opts: { bold?: boolean; mono?: boolean; align?: "left" | "right" | "center" } = {}) {
+    const t = winAnsi(s).replace(/\n/g, " ");
+    const w = opts.mono ? t.length * 0.6 * size : width(t, size, opts.bold ? "bold" : "helv");
+    const x0 = opts.align === "right" ? x - w : opts.align === "center" ? x - w / 2 : x;
+    this.ops.push(`BT ${col(color)} rg /${opts.mono ? "F3" : opts.bold ? "F2" : "F1"} ${size} Tf ${x0.toFixed(1)} ${this.Y(y)} Td (${esc(t)}) Tj ET`);
+    return w;
+  }
+  /** Wrapped text block. Returns the y after the last line. Stops at maxLines (adds "..."). */
+  para(x: number, y: number, s: string, size: number, color: RGB, maxW: number, opts: { bold?: boolean; lead?: number; maxLines?: number } = {}) {
+    let lines = wrap(winAnsi(s), size, opts.bold ? "bold" : "helv", maxW);
+    if (opts.maxLines && lines.length > opts.maxLines) { lines = lines.slice(0, opts.maxLines); lines[lines.length - 1] = lines[lines.length - 1].replace(/\s*\S{0,12}$/, "") + "..."; }
+    const lead = opts.lead ?? size * 1.35;
+    for (const l of lines) { y += lead; this.text(x, y - lead * 0.25, l, size, color, { bold: opts.bold }); }
+    return y;
+  }
+  /** Truncates to fit a width, adding "..." when cut. */
+  fit(s: string, size: number, maxW: number, bold = false) {
+    let t = winAnsi(s);
+    if (width(t, size, bold ? "bold" : "helv") <= maxW) return t;
+    while (t.length > 1 && width(t + "...", size, bold ? "bold" : "helv") > maxW) t = t.slice(0, -1);
+    return t + "...";
+  }
+  toBytes(): Uint8Array {
+    const stream = this.ops.join("\n") + "\n";
+    const objs: string[] = [];
+    objs[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+    objs[2] = "<< /Type /Pages /Kids [6 0 R] /Count 1 >>";
+    objs[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+    objs[4] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>";
+    objs[5] = "<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>";
+    objs[6] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${this.W} ${this.H}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 7 0 R >>`;
+    objs[7] = `<< /Length ${stream.length} >>\nstream\n${stream}endstream`;
+    let pdf = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+    const offsets: number[] = [];
+    for (let i = 1; i < objs.length; i++) { offsets[i] = pdf.length; pdf += `${i} 0 obj\n${objs[i]}\nendobj\n`; }
+    const xref = pdf.length;
+    pdf += `xref\n0 ${objs.length}\n0000000000 65535 f \n`;
+    for (let i = 1; i < objs.length; i++) pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+    pdf += `trailer\n<< /Size ${objs.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    const bytes = new Uint8Array(pdf.length);
+    for (let i = 0; i < pdf.length; i++) bytes[i] = pdf.charCodeAt(i) & 0xff;
+    return bytes;
+  }
+}

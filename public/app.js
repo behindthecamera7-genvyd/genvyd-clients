@@ -133,8 +133,14 @@
       tab("favorites", "♥ Favorites", `#/c/${enc(slug)}/favorites`),
       tab("campaigns", "Campaigns", `#/c/${enc(slug)}/campaigns`),
       tab("copy", "Ad review", `#/c/${enc(slug)}/copy`),
+      tab("results", "Results", `#/c/${enc(slug)}/results`),
     );
   }
+  // On a phone the tabs scroll sideways: keep the current one in view.
+  new MutationObserver(() => {
+    const t = document.querySelector(".tabs .tab.active");
+    if (t && !t.dataset.seen) { t.dataset.seen = "1"; t.scrollIntoView({ block: "nearest", inline: "center" }); }
+  }).observe(document.getElementById("app"), { childList: true });
 
   // Lazy-load thumbnails so a big folder does not hammer the Synology at once.
   const lazy = new IntersectionObserver((entries) => {
@@ -451,6 +457,7 @@
       h("h2", { id: "dash-changes", class: "dash-h" }, changesCount ? `Changes to make (${changesCount})` : "Changes to make"),
       changesCount ? h("p", { class: "muted", style: "margin:-6px 0 14px" }, "What each client asked for, newest first. Upload the fix as a new version and it moves to Sent back.") : null,
       changesBox,
+      resultsAdminList(),
       h("div", { class: "dash-h mono muted", style: "font-size:12px;margin:32px 0 12px" }, "YOUR CLIENTS"),
       h("div", { class: "grid client-grid" }, clientCards.length ? clientCards : h("div", { class: "card empty muted" }, "No clients yet. Add one on the Admin page.")),
       h("div", { class: "stats", style: "margin-top:28px" },
@@ -574,6 +581,7 @@
       ),
       uploadPanel,
       dir ? null : campaignBanner(slug),
+      dir ? null : resultsHome(slug),
       // Campaign summaries in this folder are pinned above everything else.
       (data.summaries || []).map((x) => summaryCard(slug, x.path)),
       dir ? null : todoPanel(slug, data.client.name),
@@ -942,6 +950,393 @@
             : h("span", {}, "Your campaign ", h("strong", {}, s.campaign), s.status === "changed" ? " changed after you approved it and needs your approval again" : " needs your approval")),
           h("span", { class: "sum-banner-go" }, "Review →"));
       }));
+    }).catch(() => box.remove());
+    return box;
+  }
+
+  // ---- Results: campaign analytics in plain language and traffic-light colors -------------
+  // Claude writes "<Campaign>.analytics.json" in the client's "Results" folder; the server reads
+  // it, adds the ratings (good / ok / bad / early), and these pages only display it.
+  const RT_LABEL = { good: "Doing well", ok: "Okay", bad: "Needs work", early: "Too early to tell" };
+  const ID_COLORS = ["#F8016F", "#2563EB", "#0D9488", "#7C3AED", "#EA580C", "#CA8A04"];
+  const idColor = (ad) => ID_COLORS[ad.index % ID_COLORS.length];
+  const RICON = {
+    good: '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+    ok: '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"><path d="M6 12h12"/></svg>',
+    bad: '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></svg>',
+    early: '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+  };
+  const KICON = {
+    eye: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
+    cursor: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M5 3l14 7-6 2-2 6z"/></svg>',
+    rate: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 5L5 19"/><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="17" r="2.5"/></svg>',
+    coin: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M14.5 9.5c-.5-1-1.4-1.5-2.5-1.5-1.5 0-2.5.8-2.5 2s1 1.7 2.5 2 2.5.8 2.5 2-1 2-2.5 2c-1.2 0-2.1-.5-2.6-1.5M12 6.5v1.5M12 16v1.5"/></svg>',
+    cart: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="20" r="1.4"/><circle cx="18" cy="20" r="1.4"/><path d="M2.5 3h3l2.6 12.2a1.5 1.5 0 0 0 1.5 1.3h8.3a1.5 1.5 0 0 0 1.5-1.2L21 8H6.2"/></svg>',
+    bag: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8h14l-1 13H6z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/></svg>',
+    dollar: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+    tag: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 12V3h9l9 9-9 9z"/><circle cx="7.5" cy="7.5" r="1.5"/></svg>',
+    trophy: '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4h8v5a4 4 0 0 1-8 0zM8 6H4.5a3 3 0 0 0 3.5 4M16 6h3.5a3 3 0 0 1-3.5 4M12 13v4M8.5 20h7M10 17h4"/></svg>',
+    speech: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>',
+    seed: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21v-9M12 12C12 7 8.5 4.5 4 5c0 4.5 3 7 8 7zM12 14c0-3.5 2.5-6 7-6 0 3.5-2.5 6-7 6z"/></svg>',
+  };
+  const rMoney = (v, cur, dec = 2) => (v == null ? "n/a" : new Intl.NumberFormat(undefined, { style: "currency", currency: cur || "USD", minimumFractionDigits: dec, maximumFractionDigits: dec }).format(v));
+  const rNum = (v) => (v == null ? "n/a" : new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(v));
+  const rPct = (v) => (v == null ? "n/a" : `${v.toFixed(2)}%`);
+  const rX = (v) => (v == null ? "n/a" : `${v.toFixed(2)}x`);
+  const rDay = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "?");
+  const rStamp = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }) : "unknown");
+  const statusPill = (st) => h("span", { class: "res-pill st-" + String(st || "unknown").toLowerCase() }, st || "Unknown");
+  // The rating icon with its word: always on hover, and on tap (phones have no hover).
+  function rtMark(rt, withWord) {
+    if (!rt) return null;
+    return h("span", { class: "rt-mark rt-" + rt, title: RT_LABEL[rt], role: "img", "aria-label": RT_LABEL[rt],
+      onclick: (e) => { e.stopPropagation(); toast(RT_LABEL[rt]); } },
+      h("span", { class: "rt-icon", html: RICON[rt] }), withWord ? h("span", { class: "rt-word" }, RT_LABEL[rt]) : null);
+  }
+  const rtDot = (rt) => h("span", { class: "rt-dot rt-" + (rt || "none"), title: rt ? RT_LABEL[rt] : "Not enough numbers yet", "aria-label": rt ? RT_LABEL[rt] : "Not rated" });
+
+  function budgetBar(r, compact) {
+    const spend = r.totals.spend;
+    const frac = r.budget && spend != null ? Math.min(1, spend / r.budget) : 0;
+    const pace = r.pace;
+    const paceText = !pace ? null : pace.state === "on" ? "On pace" : pace.state === "ahead" ? "Spending faster than planned" : "Spending slower than planned";
+    return h("div", { class: "res-budget" + (compact ? " compact" : "") },
+      h("div", { class: "res-budget-top" },
+        h("strong", {}, r.budget != null ? `${rMoney(spend, r.currency, 0)} of ${rMoney(r.budget, r.currency, 0)} spent` : `${rMoney(spend, r.currency, 0)} spent`),
+        paceText ? h("span", { class: "res-pace " + (pace.state === "on" ? "on" : "off"), title: `If spent evenly, about ${rMoney(pace.expected, r.currency, 0)} would be spent by now.` }, paceText) : null),
+      h("div", { class: "res-bar", role: "img", "aria-label": `${Math.round(frac * 100)}% of the budget spent` },
+        h("span", { class: "res-bar-fill", style: `width:${(frac * 100).toFixed(1)}%` }),
+        pace ? h("span", { class: "res-bar-pace", style: `left:${(pace.fraction * 100).toFixed(1)}%`, title: "Where spend should be today if paced evenly" }) : null));
+  }
+
+  function resultsHref(slug, r) { return `#/c/${enc(slug)}/results/${enc(r.file)}`; }
+
+  // Small card per active campaign (client home and the Results tab).
+  function resultsCard(slug, r) {
+    return h("a", { class: "card res-card", href: resultsHref(slug, r) },
+      h("div", { class: "res-card-head" }, rtDot(r.overall), h("strong", { class: "res-card-name" }, r.campaign), statusPill(r.status)),
+      h("div", { class: "mono muted res-card-days" }, r.status === "Ended" ? `Ended ${rDay(r.end)}` : r.daysLeft != null ? `${r.daysLeft} day${r.daysLeft === 1 ? "" : "s"} left` : ""),
+      budgetBar(r, true),
+      h("div", { class: "res-card-nums" },
+        h("span", {}, h("strong", {}, rNum(r.totals.link_clicks)), " link clicks"),
+        h("span", {}, h("strong", {}, rNum(r.totals.purchases)), ` sale${r.totals.purchases === 1 ? "" : "s"}`)),
+      h("span", { class: "btn small primary res-card-go" }, "View results"));
+  }
+
+  // On the client's home page: one card per active campaign.
+  function resultsHome(slug) {
+    const box = h("div", { class: "res-home" });
+    api("GET", `/api/c/${enc(slug)}/results`).then((d) => {
+      const live = d.campaigns.filter((r) => r.status === "Active");
+      if (!live.length) { box.remove(); return; }
+      fill(box, h("div", { class: "section-label mono muted" }, "YOUR CAMPAIGNS RIGHT NOW"), h("div", { class: "res-cards" }, live.map((r) => resultsCard(slug, r))));
+    }).catch(() => box.remove());
+    return box;
+  }
+
+  async function viewResults(slug) {
+    show(h("p", { class: "muted" }, "Loading results…"));
+    let d, client;
+    try {
+      [d, client] = await Promise.all([api("GET", `/api/c/${enc(slug)}/results`), clientInfo(slug)]);
+    } catch (err) { show(errorCard(err)); return; }
+    const current = d.campaigns.filter((r) => r.status !== "Ended");
+    const past = d.campaigns.filter((r) => r.status === "Ended");
+    if (current.length === 1 && !past.length && !(d.problems || []).length) { location.replace(resultsHref(slug, current[0])); return; }
+    show(
+      crumbs(client, "", "Results"),
+      clientTabs(slug, "results"),
+      h("div", { class: "page-head" }, h("h1", {}, "Results"),
+        h("p", { class: "muted", style: "margin:6px 0 0;max-width:640px" }, "How your ad campaigns are doing, in plain language. Green is doing well, amber is okay, red needs work.")),
+      (d.problems || []).length ? h("div", { class: "card sum-note warn" }, h("strong", {}, "Some results files could not be read (only you see this): "),
+        d.problems.map((p) => h("div", { class: "mono", style: "font-size:12px;margin-top:4px" }, `${p.file}: ${p.error}`))) : null,
+      !d.campaigns.length ? resultsEmpty() : null,
+      current.length ? h("div", { class: "res-cards" }, current.map((r) => resultsCard(slug, r))) : null,
+      past.length ? pastCampaigns(slug, past) : null);
+  }
+  async function clientInfo(slug) {
+    const c = (state.me.clients || []).find((x) => x.slug === slug);
+    return c ? { slug, name: c.name } : { slug, name: slug };
+  }
+  function resultsEmpty() {
+    return h("div", { class: "card res-empty" },
+      h("div", { html: '<svg viewBox="0 0 120 80" width="140" height="94" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="8" width="108" height="66" rx="10" stroke="#3a3a3a" stroke-width="2"/><path d="M20 60V48M36 60V40M52 60V44M68 60V30M84 60V36M100 60V22" stroke="#555" stroke-width="7"/><path d="M18 50l18-12 16 6 16-16 16 8 16-16" stroke="#ff2a2a" stroke-width="3"/><circle cx="100" cy="20" r="4" fill="#22C55E"/></svg>' }),
+      h("h2", {}, "No results yet"),
+      h("p", { class: "muted" }, "Results will appear here after the campaign's first full day."));
+  }
+  function pastCampaigns(slug, list) {
+    return h("div", { class: "res-past" },
+      h("div", { class: "section-label mono muted" }, `PAST CAMPAIGNS · ${list.length}`),
+      list.map((r) => h("a", { class: "card res-past-row", href: resultsHref(slug, r) },
+        rtDot(r.overall),
+        h("div", { class: "res-past-name" }, h("strong", {}, r.campaign), h("div", { class: "mono muted" }, `${rDay(r.start)} to ${rDay(r.end)}`)),
+        h("div", { class: "res-past-nums" },
+          h("span", {}, h("strong", {}, rMoney(r.totals.spend, r.currency, 0)), " spent"),
+          h("span", {}, h("strong", {}, rNum(r.totals.link_clicks)), " clicks"),
+          h("span", {}, h("strong", {}, rNum(r.totals.purchases)), " sales"),
+          h("span", { class: "res-past-rate" }, "Click rate ", h("strong", {}, rPct(r.totals.ctr)), rtMark(r.rating.ctr))))));
+  }
+
+  // The daily chart: spend as soft gray bars, link clicks as a bold red line; "By ad" draws one
+  // line per ad (when the file has each ad's daily numbers). Tap or hover a day for its numbers.
+  function dailyChart(r) {
+    const byAdOk = r.ads.some((a) => a.daily && a.daily.length);
+    const st = { mode: "total" };
+    const wrap = h("div", { class: "res-chart" });
+    const tip = h("div", { class: "res-tip", hidden: true });
+    const svgBox = h("div", { class: "res-chart-svg" });
+    const legend = h("div", { class: "res-legend" });
+    const toggle = byAdOk ? h("div", { class: "seg res-chart-seg" },
+      [["total", "All ads"], ["byad", "By ad"]].map(([k, l]) => h("button", { class: "seg-btn" + (st.mode === k ? " active" : ""), type: "button", onclick: () => { st.mode = k; draw(); [...toggle.children].forEach((b, i) => b.classList.toggle("active", (i === 0) === (k === "total"))); } }, l))) : null;
+    const NS = "http://www.w3.org/2000/svg";
+    const el = (tag, attrs, kids = []) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); kids.forEach((k) => n.append(k)); return n; };
+    function draw() {
+      const days = [...new Set([...r.daily.map((d) => d.date), ...(st.mode === "byad" ? r.ads.flatMap((a) => (a.daily || []).map((d) => d.date)) : [])])].sort();
+      if (!days.length) { fill(svgBox, h("p", { class: "muted", style: "margin:20px 0" }, "No daily numbers yet.")); fill(legend); return; }
+      const W = Math.max(280, svgBox.clientWidth || wrap.clientWidth || 680), H = W < 500 ? 220 : 260;
+      const L = 48, R = 40, T = 14, B = 28, cw = W - L - R, chh = H - T - B;
+      const byDate = new Map(r.daily.map((d) => [d.date, d]));
+      const step = cw / days.length, bw = Math.max(3, Math.min(34, step * 0.62));
+      const maxS = Math.max(1, ...days.map((d) => byDate.get(d)?.spend ?? 0));
+      const series = st.mode === "byad"
+        ? r.ads.filter((a) => a.daily && a.daily.length).map((a) => ({ name: a.name, color: idColor(a), by: new Map(a.daily.map((d) => [d.date, d.link_clicks])) }))
+        : [{ name: "Link clicks", color: "#ff2a2a", by: new Map(r.daily.map((d) => [d.date, d.link_clicks])) }];
+      const maxC = Math.max(1, ...series.flatMap((s) => [...s.by.values()].map((v) => v ?? 0)));
+      const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Spend and link clicks by day" });
+      // Grid and axes
+      for (let i = 0; i <= 4; i++) {
+        const y = T + chh - (chh * i) / 4;
+        svg.append(el("line", { x1: L, x2: W - R, y1: y, y2: y, stroke: "rgba(255,255,255,0.07)" }));
+        svg.append(el("text", { x: L - 6, y: y + 4, "text-anchor": "end", class: "res-axis" }, [document.createTextNode(rMoney((maxS * i) / 4, r.currency, 0))]));
+        svg.append(el("text", { x: W - R + 6, y: y + 4, class: "res-axis res-axis-c" }, [document.createTextNode(String(Math.round((maxC * i) / 4)))]));
+      }
+      days.forEach((d, i) => {
+        const x = L + i * step + step / 2;
+        const sp = byDate.get(d)?.spend ?? 0;
+        const bh = (sp / maxS) * chh;
+        svg.append(el("rect", { x: x - bw / 2, y: T + chh - bh, width: bw, height: bh, rx: 3, fill: "rgba(255,255,255,0.16)" }));
+        const every = Math.ceil(days.length / Math.max(2, Math.floor(cw / 56)));
+        if (i % every === 0 || i === days.length - 1) svg.append(el("text", { x, y: H - 8, "text-anchor": "middle", class: "res-axis" }, [document.createTextNode(rDay(d + "T12:00:00"))]));
+      });
+      for (const s of series) {
+        const pts = days.map((d, i) => [L + i * step + step / 2, s.by.get(d)]).filter(([, v]) => v != null).map(([x, v]) => [x, T + chh - (v / maxC) * chh]);
+        if (pts.length > 1) svg.append(el("polyline", { points: pts.map((p) => p.join(",")).join(" "), fill: "none", stroke: s.color, "stroke-width": st.mode === "byad" ? 2.5 : 3, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+        for (const [x, y] of pts) svg.append(el("circle", { cx: x, cy: y, r: 3.5, fill: s.color, stroke: "#151515", "stroke-width": 1.5 }));
+      }
+      // Hit areas: one per day, for the tooltip.
+      const cursor = el("line", { x1: 0, x2: 0, y1: T, y2: T + chh, stroke: "rgba(255,255,255,0.35)", "stroke-dasharray": "3 3", visibility: "hidden" });
+      svg.append(cursor);
+      days.forEach((d, i) => {
+        const x = L + i * step;
+        const hit = el("rect", { x, y: T, width: step, height: chh, fill: "transparent", class: "res-hit" });
+        const showTip = () => {
+          const day = byDate.get(d) || {};
+          cursor.setAttribute("x1", x + step / 2); cursor.setAttribute("x2", x + step / 2); cursor.setAttribute("visibility", "visible");
+          fill(tip, h("strong", {}, new Date(d + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })),
+            h("div", {}, `Spend: ${rMoney(day.spend, r.currency)}`),
+            st.mode === "byad"
+              ? series.map((s) => h("div", {}, h("span", { class: "res-swatch", style: `background:${s.color}` }), `${s.name}: ${rNum(s.by.get(d) ?? null)} clicks`))
+              : [h("div", {}, `Link clicks: ${rNum(day.link_clicks)}`), h("div", {}, `Added to cart: ${rNum(day.add_to_cart)}`), h("div", {}, `Sales: ${rNum(day.purchases)}`), h("div", {}, `Revenue: ${rMoney(day.revenue, r.currency)}`)]);
+          tip.hidden = false;
+          const left = Math.min(Math.max(0, x + step / 2 - 90), W - 190);
+          tip.style.left = left + "px";
+        };
+        hit.addEventListener("pointerenter", showTip);
+        hit.addEventListener("click", showTip);
+        svg.append(hit);
+      });
+      svg.addEventListener("pointerleave", () => { tip.hidden = true; cursor.setAttribute("visibility", "hidden"); });
+      fill(svgBox, svg);
+      fill(legend, h("span", {}, h("span", { class: "res-swatch bar" }), "Spend"),
+        series.map((s) => h("span", {}, h("span", { class: "res-swatch", style: `background:${s.color}` }), s.name)));
+    }
+    fill(wrap, h("div", { class: "res-section-head" }, h("h2", {}, "Day by day"), toggle), legend, h("div", { class: "res-chart-area" }, svgBox, tip));
+    requestAnimationFrame(draw);
+    let lastW = 0;
+    const onResize = () => { if (!wrap.isConnected) { window.removeEventListener("resize", onResize); return; } const w = svgBox.clientWidth; if (Math.abs(w - lastW) > 20) { lastW = w; draw(); } };
+    window.addEventListener("resize", onResize);
+    return wrap;
+  }
+
+  function leaderboard(slug, r) {
+    const st = { sort: "ctr" };
+    const SORTS = [["ctr", "Click rate", -1], ["spend", "Spend", -1], ["link_clicks", "Clicks", -1], ["cpc", "Cost per click", 1], ["add_to_cart", "Added to cart", -1], ["purchases", "Sales", -1], ["name", "Name", 1]];
+    const box = h("div", { class: "res-board" });
+    const list = h("div", { class: "res-ads" });
+    const sel = h("select", { class: "mini-select", "aria-label": "Sort ads by", onchange: () => { st.sort = sel.value; paint(); } },
+      SORTS.map(([k, l]) => h("option", { value: k, selected: k === st.sort }, `Sort: ${l}`)));
+    const cell = (label, value, rt) => h("div", { class: "res-cell" + (rt ? " rt-bg-" + rt : "") }, h("span", { class: "mono muted" }, label), h("strong", { class: rt ? "rt-text-" + rt : "" }, value, " ", rtMark(rt)));
+    function paint() {
+      const [k, , dir] = SORTS.find((s) => s[0] === st.sort);
+      const ads = [...r.ads].sort((a, b) => k === "name" ? a.name.localeCompare(b.name) : (a[k] == null) - (b[k] == null) || dir * ((a[k] ?? 0) - (b[k] ?? 0)));
+      fill(list, ads.map((a) => {
+        const color = idColor(a);
+        const pv = a.preview;
+        const kind = pv ? (/\.(mp4|mov|m4v|webm)$/i.test(pv) ? "video" : /\.(jpe?g|png|webp|gif|avif)$/i.test(pv) ? "image" : null) : null;
+        let media = h("div", { class: "res-ad-noimg mono" }, "No preview");
+        if (kind === "image") { media = h("img", { "data-src": mediaUrl(slug, pv), alt: "", loading: "lazy", onload: (e) => e.target.classList.add("loaded") }); lazy.observe(media); }
+        if (kind === "video") { media = h("video", { "data-src": mediaUrl(slug, pv) + "#t=0.5", preload: "metadata", muted: true, playsinline: true, onloadeddata: (e) => e.target.classList.add("loaded") }); lazy.observe(media); }
+        return h("div", { class: "card res-ad", style: `--id:${color}` },
+          kind ? h("a", { class: "res-ad-thumb", href: `#/c/${enc(slug)}/i/${enc(pv)}`, title: "Open the ad" }, media) : h("div", { class: "res-ad-thumb" }, media),
+          h("div", { class: "res-ad-body" },
+            h("div", { class: "res-ad-head" },
+              h("span", { class: "res-swatch", style: `background:${color}` }),
+              h("strong", { class: "res-ad-name" }, a.name),
+              a.status ? statusPill(a.status) : null,
+              a.leading ? h("span", { class: "res-badge lead" }, h("span", { html: KICON.trophy }), "Leading") : null,
+              a.underperforming ? h("span", { class: "res-badge under" }, h("span", { html: RICON.bad }), "Underperforming") : null),
+            h("div", { class: "res-cells" },
+              cell("SPEND", rMoney(a.spend, r.currency)),
+              cell("CLICKS", rNum(a.link_clicks)),
+              cell("CLICK RATE", rPct(a.ctr), a.rating.ctr),
+              cell("PER CLICK", rMoney(a.cpc, r.currency), a.rating.cpc),
+              cell("TO CART", rNum(a.add_to_cart)),
+              cell("SALES", rNum(a.purchases)))));
+      }));
+    }
+    paint();
+    fill(box, h("div", { class: "res-section-head" }, h("h2", {}, "Your ads"), r.ads.length > 1 ? sel : null),
+      r.ads.length ? list : h("p", { class: "muted" }, "No numbers by ad yet."));
+    return box;
+  }
+
+  function moneyWent(r) {
+    const ads = r.ads.filter((a) => (a.spend ?? 0) > 0);
+    if (!ads.length) return null;
+    const total = ads.reduce((s, a) => s + a.spend, 0);
+    const max = Math.max(...ads.map((a) => a.spend));
+    return h("div", { class: "res-money" },
+      h("div", { class: "res-section-head" }, h("h2", {}, "Where the money went")),
+      [...ads].sort((a, b) => b.spend - a.spend).map((a) => h("div", { class: "res-money-row" },
+        h("div", { class: "res-money-label" }, h("span", { class: "res-swatch", style: `background:${idColor(a)}` }), h("span", {}, a.name)),
+        h("div", { class: "res-money-bar" }, h("span", { style: `width:${((a.spend / max) * 100).toFixed(1)}%;background:${idColor(a)}` })),
+        h("div", { class: "res-money-val mono" }, `${rMoney(a.spend, r.currency, 0)} · ${Math.round((a.spend / total) * 100)}%`))));
+  }
+
+  // Comments on a campaign's results (same comments as on ads; replies from Genvyd).
+  function resultsComments(slug, path) {
+    const box = h("div", { class: "res-comments" });
+    const st = { replyTo: null };
+    const load = async () => {
+      let d;
+      try { d = await api("GET", `/api/c/${enc(slug)}/item?path=${enc(path)}`); } catch (err) { fill(box, h("p", { class: "muted" }, err.message)); return; }
+      const roots = d.comments.filter((m) => !m.parent_id);
+      const ta = h("textarea", { class: "reply-box", rows: 3, maxlength: "4000", placeholder: st.replyTo ? "Your reply…" : "Questions or thoughts about these results? Genvyd will see them." });
+      const send = async () => {
+        if (!ta.value.trim()) return ta.focus();
+        try {
+          await api("POST", `/api/c/${enc(slug)}/comments`, { path, body: ta.value.trim(), ...(st.replyTo ? { parentId: st.replyTo } : {}) });
+          st.replyTo = null; toast("Sent."); load();
+        } catch (err) { toast(err.message); }
+      };
+      fill(box,
+        h("div", { class: "res-section-head" }, h("h2", {}, "Comments")),
+        roots.length ? roots.map((m) => h("div", { class: "sum-comment" + (m.resolved ? " done" : "") },
+          h("div", { class: "mono muted", style: "font-size:12px" }, `${m.genvyd ? "Genvyd" : who(m.email)} · ${fmtDate(m.created_at)}`),
+          h("div", {}, linkify(m.body)),
+          d.comments.filter((x) => x.parent_id === m.id).map((x) => h("div", { class: "sum-reply" }, h("strong", {}, x.genvyd ? "Genvyd: " : `${who(x.email)}: `), linkify(x.body))),
+          state.me.admin ? h("button", { class: "linkish", type: "button", style: "margin-top:6px", onclick: () => { st.replyTo = m.id; load(); } }, "↩ Reply") : null))
+          : h("p", { class: "muted", style: "margin:0 0 10px" }, "No comments yet."),
+        st.replyTo ? h("div", { class: "mono muted", style: "font-size:12px;margin:8px 0 4px" }, "Replying to a comment. ", h("button", { class: "linkish", type: "button", onclick: () => { st.replyTo = null; load(); } }, "Cancel")) : null,
+        ta,
+        h("div", { class: "composer-row", style: "margin-top:8px" }, h("span"), h("button", { class: "btn small primary", type: "button", onclick: send }, st.replyTo ? "Send reply" : "Send comment")));
+    };
+    load();
+    return box;
+  }
+
+  async function viewResultsDetail(slug, file) {
+    show(h("p", { class: "muted" }, "Loading results…"));
+    let d;
+    try { d = await api("GET", `/api/c/${enc(slug)}/results`); } catch (err) { show(errorCard(err)); return; }
+    const client = await clientInfo(slug);
+    const r = d.campaigns.find((x) => x.file === file);
+    if (!r) {
+      show(crumbs(client, "", "Results"), clientTabs(slug, "results"), resultsEmpty(),
+        d.campaigns.length ? h("p", {}, h("a", { href: `#/c/${enc(slug)}/results` }, "← All results")) : null);
+      return;
+    }
+    if (!state.me.admin) api("POST", `/api/c/${enc(slug)}/results/view`, { file }).catch(() => {});
+    const T = r.totals;
+    const tz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return ""; } })();
+    const tile = (icon, label, value, rt, help, extra) => {
+      const t = h("button", { class: "res-tile" + (rt ? " rt-top-" + rt : ""), type: "button", "aria-expanded": "false",
+        onclick: () => { const on = !t.classList.contains("show-help"); t.classList.toggle("show-help", on); t.setAttribute("aria-expanded", String(on)); } },
+        h("div", { class: "res-tile-top" }, h("span", { class: "res-tile-icon" + (rt ? " rt-text-" + rt : ""), html: KICON[icon] }), h("span", { class: "res-tile-label" }, label)),
+        h("div", { class: "res-tile-num" + (rt ? " rt-text-" + rt : "") }, value),
+        rt ? rtMark(rt, true) : extra || null,
+        h("div", { class: "res-tile-help" }, help));
+      t.title = help;
+      return t;
+    };
+    const others = d.campaigns.filter((x) => x.file !== file);
+    const sales = T.shopify_orders != null && T.purchases != null
+      ? h("div", { class: "res-sales-compare" },
+          h("div", {}, h("span", { class: "mono muted" }, "SALES COUNTED BY META"), h("strong", {}, rNum(T.purchases)), h("span", { class: "muted" }, rMoney(T.revenue, r.currency, 0))),
+          h("div", {}, h("span", { class: "mono muted" }, "SHOPIFY ORDERS"), h("strong", {}, rNum(T.shopify_orders)), h("span", { class: "muted" }, rMoney(T.shopify_revenue, r.currency, 0))))
+      : null;
+    show(
+      crumbs(client, "", "Results"),
+      clientTabs(slug, "results"),
+      h("div", { class: "res-head" },
+        h("div", {},
+          h("div", { class: "res-head-row" }, statusPill(r.status), r.dayNum && r.totalDays ? h("span", { class: "mono muted" }, `DAY ${r.dayNum} OF ${r.totalDays}`) : null),
+          h("h1", {}, r.campaign),
+          h("div", { class: "muted" }, `${rDay(r.start)} to ${rDay(r.end)}${r.end ? ", " + new Date(r.end).getFullYear() : ""} · Last updated ${rStamp(r.updated || r.mtime)}`)),
+        h("div", { class: "res-head-actions" },
+          others.length ? h("a", { class: "btn small", href: `#/c/${enc(slug)}/results` }, "All results") : null,
+          h("button", { class: "btn small primary", type: "button", onclick: () => saveFile(`/api/c/${enc(slug)}/results/report?file=${enc(file)}&tz=${enc(tz)}`, `${r.campaign} results.pdf`) }, "↓ Download report"))),
+      budgetBar(r),
+      r.summary || r.recommendation
+        ? h("div", { class: "res-note" }, h("span", { class: "res-note-icon", html: KICON.speech }),
+            h("div", {}, h("div", { class: "mono res-note-from" }, "A NOTE FROM GENVYD"),
+              r.summary ? h("p", {}, r.summary) : null,
+              r.recommendation ? h("p", { class: "res-note-next" }, h("strong", {}, "Next step: "), r.recommendation) : null))
+        : null,
+      r.earlyCampaign ? h("div", { class: "res-early" }, h("span", { html: KICON.seed }), h("div", {}, h("strong", {}, "Early days. "), "Meta is still learning who to show these ads to, so numbers will move a lot.")) : null,
+      h("div", { class: "res-tiles" },
+        tile("eye", "People reached", rNum(T.reach), null, "How many different people saw your ads at least once."),
+        tile("cursor", "Link clicks", rNum(T.link_clicks), null, "Times someone tapped through to your website."),
+        tile("rate", "Click rate", rPct(T.ctr), r.rating.ctr, "Out of every 100 times an ad was shown, how many led to a click. Higher is better."),
+        tile("coin", "Cost per click", rMoney(T.cpc, r.currency), r.rating.cpc, "What each click to your website cost on average. Lower is better."),
+        tile("cart", "Added to cart", rNum(T.add_to_cart), null, "Times someone added a product to their cart after an ad."),
+        tile("bag", "Sales", rNum(T.purchases), null, "Purchases Meta counted after someone saw or clicked an ad."),
+        tile("dollar", "Revenue", rMoney(T.revenue, r.currency, 0), null, "Money from those sales. \"Return\" is revenue divided by what the ads cost: 2x means $2 back for every $1 spent.",
+          T.roas != null ? h("span", { class: "res-roas" }, "Return ", h("strong", { class: r.rating.roas ? "rt-text-" + r.rating.roas : "" }, rX(T.roas)), " ", rtMark(r.rating.roas)) : null),
+        tile("tag", "Cost per sale", rMoney(T.cost_per_purchase, r.currency), r.rating.cost_per_purchase, "What the ads cost for each sale on average. Lower is better.")),
+      h("div", { class: "res-key" }, h("span", { class: "mono muted" }, "HOW TO READ THIS"),
+        ["good", "ok", "bad", "early"].map((k) => h("span", { class: "res-key-item" }, rtMark(k), RT_LABEL[k])),
+        h("span", { class: "muted" }, "Tap a box to see what it means.")),
+      dailyChart(r),
+      leaderboard(slug, r),
+      moneyWent(r),
+      h("div", { class: "res-foot" }, sales, h("p", { class: "muted" }, "Meta and Shopify can count sales differently; Shopify orders are the actual sales.")),
+      resultsComments(slug, r.path));
+  }
+
+  // Admin dashboard: every client's campaigns in one list, sortable by spend or end date.
+  function resultsAdminList() {
+    const box = h("div", { class: "res-admin" });
+    const st = { sort: "spend" };
+    api("GET", "/api/admin/results").then((d) => {
+      if (!d.campaigns.length) { box.remove(); return; }
+      const paint = () => {
+        // By end date: running campaigns ending soonest first, finished ones after (most recent first).
+        const endKey = (x) => (x.end ? Date.parse(x.end) : Infinity);
+        const list = [...d.campaigns].sort((a, b) => st.sort === "spend" ? (b.spend ?? -1) - (a.spend ?? -1)
+          : (a.status === "Ended") - (b.status === "Ended") || (a.status === "Ended" ? endKey(b) - endKey(a) : endKey(a) - endKey(b)));
+        fill(box,
+          h("div", { class: "res-section-head", style: "margin-top:32px" }, h("div", { class: "dash-h mono muted", style: "font-size:12px" }, "CAMPAIGN RESULTS"),
+            h("div", { class: "seg" }, [["spend", "By spend"], ["end", "By end date"]].map(([k, l]) => h("button", { class: "seg-btn" + (st.sort === k ? " active" : ""), type: "button", onclick: () => { st.sort = k; paint(); } }, l)))),
+          h("div", { class: "card res-admin-list" }, list.map((x) => h("a", { class: "res-admin-row", href: `#/c/${enc(x.client.slug)}/results/${enc(x.file)}` },
+            rtDot(x.overall),
+            h("div", { class: "res-admin-name" }, h("strong", {}, x.campaign), h("div", { class: "mono muted" }, x.client.name)),
+            statusPill(x.status),
+            h("span", {}, h("strong", {}, rMoney(x.spend, x.currency, 0)), x.budget != null ? h("span", { class: "muted" }, ` of ${rMoney(x.budget, x.currency, 0)}`) : null),
+            h("span", { class: "muted" }, `${rNum(x.clicks)} clicks · ${rNum(x.sales)} sales`),
+            h("span", { class: "mono muted" }, x.end ? `Ends ${rDay(x.end)}` : "")))));
+      };
+      paint();
     }).catch(() => box.remove());
     return box;
   }
@@ -2228,6 +2623,7 @@
   async function viewItem(slug, path) {
     // A campaign summary is a card in its folder, not a file page.
     if (SUMMARY_RE.test(path)) { state.focusSummary = path; location.replace(summaryHref(slug, path)); return; }
+    if (/\.analytics\.json$/i.test(path)) { location.replace(`#/c/${enc(slug)}/results/${enc(baseName(path))}`); return; }
     const dir = parentOf(path);
     show(h("p", { class: "muted" }, "Loading…"));
 
@@ -3716,6 +4112,8 @@
         if (parts[2] === "i" && parts[3]) return viewItem(slug, decodeURIComponent(parts.slice(3).join("/")));
         if (parts[2] === "favorites") return viewFavorites(slug);
         if (parts[2] === "copy") return viewCopy(slug);
+        if (parts[2] === "results" && parts[3]) return viewResultsDetail(slug, decodeURIComponent(parts.slice(3).join("/")));
+        if (parts[2] === "results") return viewResults(slug);
         if (parts[2] === "campaigns") return viewCampaigns(slug);
         if (parts[2] === "campaign" && /^\d+$/.test(parts[3] || "")) return viewCampaign(slug, parts[3]);
         if (parts[2] === "f" && parts[3]) return viewFolder(slug, decodeURIComponent(parts.slice(3).join("/")));

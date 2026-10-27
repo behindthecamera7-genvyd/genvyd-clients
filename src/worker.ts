@@ -10,7 +10,7 @@
  * Data:    Likes, comments, approvals and the activity feed live in D1.
  */
 
-import { makePdf, type PdfBlock } from "./pdf";
+import { makePdf, PdfCanvas, hex, tint, type PdfBlock } from "./pdf";
 
 export interface Env {
   DB: D1Database;
@@ -337,7 +337,7 @@ const BACKUP_TABLES = [
   "clients", "members", "item_status", "likes", "comments", "activity",
   "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views", "hidden",
   "copy_items", "copy_campaigns", "copy_imports", "file_ids", "file_renames",
-  "campaign_summaries", "campaign_events",
+  "campaign_summaries", "campaign_events", "results_views",
 ];
 // Approval records are append only (the database refuses to change or delete them), so a restore
 // only adds back records that are missing and never replaces the ones there.
@@ -456,7 +456,7 @@ async function buildFeed(env: Env) {
   const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   const isAdmin = (e: string) => admins.includes(e.toLowerCase());
   const weekAgo = now() - 7 * 86400 * 1000;
-  const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR, sumR, evR] = await env.DB.batch([
+  const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR, sumR, evR, rvR] = await env.DB.batch([
     env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
     env.DB.prepare("SELECT client_slug, path, status, updated_by, updated_at FROM item_status WHERE status IN ('approved','changes','rejected') ORDER BY updated_at DESC"),
     env.DB.prepare("SELECT id, parent_id, client_slug, path, email, body, timecode, resolved, created_at FROM comments ORDER BY created_at"),
@@ -467,7 +467,9 @@ async function buildFeed(env: Env) {
     env.DB.prepare("SELECT l.copy_id, c.name FROM copy_campaigns l JOIN campaigns c ON c.id = l.campaign_id"),
     env.DB.prepare("SELECT client_slug, path, last_sig, gone FROM campaign_summaries ORDER BY first_seen"),
     env.DB.prepare("SELECT id, client_slug, summary_path, campaign, kind, email, typed_name, comment, at, at_utc, at_phoenix, ip, summary_sha256, sig, detail FROM campaign_events ORDER BY id"),
+    env.DB.prepare("SELECT client_slug, path, email, first_viewed, last_viewed, views FROM results_views ORDER BY last_viewed DESC"),
   ]);
+  const rviews = rvR.results as { client_slug: string; path: string; email: string; first_viewed: number; last_viewed: number; views: number }[];
   const sums = sumR.results as { client_slug: string; path: string; last_sig: string | null; gone: number }[];
   const evs = evR.results as CampaignEvent[];
   const copies = copyR.results as Record<string, any>[];
@@ -518,7 +520,7 @@ async function buildFeed(env: Env) {
     const saidNo = mine.filter((r) => r.status === "rejected").map((r) => ({ ...fileInfo(r.path), by: r.updated_by, at: azTime(r.updated_at), comments: commentsOn(r.path) }));
     const noPaths = new Set(saidNo.map((x) => x.path));
     const approved = mine.filter((r) => r.status === "approved").map((r) => ({ ...fileInfo(r.path), approved_by: r.updated_by, at: azTime(r.updated_at), campaigns: campsByPath.get(r.path) ?? [], comments: commentsOn(r.path) }));
-    const openElsewhere = [...new Set(comments.filter((m) => m.client_slug === c.slug && !m.resolved && !isAdmin(m.email) && !String(m.path).startsWith("copy:") && !changePaths.has(m.path) && !noPaths.has(m.path) && !hiddenSet.has(key(m.path))).map((m) => m.path))]
+    const openElsewhere = [...new Set(comments.filter((m) => m.client_slug === c.slug && !m.resolved && !isAdmin(m.email) && !String(m.path).startsWith("copy:") && !ANALYTICS_FILE.test(String(m.path)) && !changePaths.has(m.path) && !noPaths.has(m.path) && !hiddenSet.has(key(m.path))).map((m) => m.path))]
       .map((p) => ({ ...fileInfo(p), comments: commentsOn(p) }));
     const hid = hidden.filter((r) => r.client_slug === c.slug).map((r) => ({ ...fileInfo(r.path), hidden_by: r.hidden_by, at: azTime(r.hidden_at) }));
     const recent = acts.filter((a) => a.client_slug === c.slug).slice(0, 60).map((a) => ({ at: azTime(a.created_at), by: a.email, did: a.kind, path: a.path, detail: a.detail }));
@@ -548,7 +550,17 @@ async function buildFeed(env: Env) {
         record_id: last?.kind === "approved" ? last.id : null,
       };
     });
-    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, campaign_approvals: campaignApprovals, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
+    // Results pages: who opened which campaign's results and when, and comments left there.
+    const resultPaths = [...new Set([
+      ...rviews.filter((v) => v.client_slug === c.slug).map((v) => v.path),
+      ...comments.filter((m) => m.client_slug === c.slug && ANALYTICS_FILE.test(String(m.path))).map((m) => String(m.path)),
+    ])];
+    const results = resultPaths.map((p) => ({
+      campaign: (p.split("/").pop() || p).replace(ANALYTICS_FILE, ""), path: p, mac_path: `${MAC_SHARE}/${c.folder}/${p}`, link: itemLink(env, c.slug, p),
+      viewed: rviews.filter((v) => v.client_slug === c.slug && v.path === p).map((v) => ({ by: v.email, last_viewed: azTime(v.last_viewed), first_viewed: azTime(v.first_viewed), times: v.views })),
+      comments: commentsOn(p),
+    }));
+    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, campaign_approvals: campaignApprovals, campaign_results: results, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
 
     const cm = (list: ReturnType<typeof commentsOn>) =>
       list.map((m) => m.reply_to
@@ -563,6 +575,11 @@ async function buildFeed(env: Env) {
       (a.reset_reason ? `\n  - Why: ${a.reset_reason}` : "") +
       (a.comment ? `\n  - Change request: ${a.comment.replace(/\s+/g, " ")}` : "") +
       (a.record_id ? `\n  - Approval record #${a.record_id} (download the PDF from the portal's Approval history)` : "")).join("\n") + "\n" : "\nNone.\n";
+    md += `\n### Campaign results (${results.length})\n`;
+    md += results.length ? results.map((x) =>
+      `\n- **${x.campaign}**\n  - File: \`${x.mac_path}\`\n  - Portal: ${x.link}` +
+      (x.viewed.length ? x.viewed.map((v) => `\n  - Results viewed by ${v.by}, last ${v.last_viewed} (${v.times} time${v.times === 1 ? "" : "s"})`).join("") : "\n  - Results not viewed by the client yet") +
+      (x.comments.length ? "\n  - Comments:\n" + cm(x.comments) : "")).join("\n") + "\n" : "\nNo results viewed or commented on yet.\n";
     md += `\n### Changes requested (${changes.length})\n`;
     md += changes.length ? changes.map((f) => `\n- ${file(f)}\n  - Requested by ${f.requested_by}, ${f.at}${f.comments.length ? "\n  - Comments:\n" + cm(f.comments) : "\n  - No comment left. Ask what to change."}`).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Said no, do not use (${saidNo.length})\n`;
@@ -612,7 +629,7 @@ async function buildFeed(env: Env) {
 /** Writes the feed if anything changed since the last one (or always, when forced). */
 async function writeFeed(env: Env, force = false) {
   const sig = await env.DB.prepare(
-    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) || '-' || (SELECT IFNULL(MAX(updated_at),0) || COUNT(*) FROM copy_items) || '-' || (SELECT COUNT(*) FROM copy_campaigns) || '-' || (SELECT IFNULL(MAX(id),0) FROM campaign_events) || '-' || (SELECT COUNT(*) || IFNULL(SUM(gone),0) || IFNULL(MAX(last_sig),'') FROM campaign_summaries) AS s",
+    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) || '-' || (SELECT IFNULL(MAX(updated_at),0) || COUNT(*) FROM copy_items) || '-' || (SELECT COUNT(*) FROM copy_campaigns) || '-' || (SELECT IFNULL(MAX(id),0) FROM campaign_events) || '-' || (SELECT COUNT(*) || IFNULL(SUM(gone),0) || IFNULL(MAX(last_sig),'') FROM campaign_summaries) || '-' || (SELECT IFNULL(SUM(views),0) FROM results_views) AS s",
   ).first<{ s: string }>();
   const last = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'feed_sig'").first<{ value: string }>();
   if (!force && last && sig && last.value === sig.s) return { written: false };
@@ -863,7 +880,8 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
   const prefix = segs.length ? segs.join("/") + "/" : "";
 
   const folders = entries
-    .filter((e) => e.type === "directory")
+    // The Results folder holds Claude's analytics files: shown on the Results tab, not as a project.
+    .filter((e) => e.type === "directory" && !(segs.length === 0 && e.name === RESULTS_DIR))
     .map((e) => ({ name: e.name, path: prefix + e.name, mtime: e.mtime ?? null }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -873,7 +891,7 @@ async function listDir(env: Env, user: User, c: Client, dir: string) {
   // Campaign summaries (".summary.md") show as a pinned approval card, not as files.
   const summaryNames = entries.filter((e) => e.type === "file" && SUMMARY_FILE.test(e.name)).map((e) => e.name);
   await noteSummaries(env, c.slug, segs.join("/"), summaryNames, true);
-  const files = entries.filter((e) => e.type === "file" && !COPY_FILE.test(e.name) && !SUMMARY_FILE.test(e.name));
+  const files = entries.filter((e) => e.type === "file" && !COPY_FILE.test(e.name) && !SUMMARY_FILE.test(e.name) && !ANALYTICS_FILE.test(e.name));
   const paths = files.map((f) => prefix + f.name);
   await registerFiles(env, c.slug, paths);
 
@@ -1349,6 +1367,58 @@ async function route(req: Request, env: Env): Promise<Response> {
         }
         return json({ ok: true });
       }
+    }
+    throw new HttpError(405, "Method not allowed.");
+  }
+
+  // ---- Results (campaign analytics) ------------------------------------------
+  if (path === "/api/admin/results" && method === "GET") {
+    if (!user.admin) throw new HttpError(403, "Admins only.");
+    const all = (await env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name").all<Client>()).results;
+    const out = [];
+    for (const c of all.slice(0, 12)) {
+      try {
+        const r = await loadResults(env, user, c);
+        for (const x of r.campaigns) out.push({ client: { slug: c.slug, name: c.name }, file: x.file, campaign: x.campaign, status: x.status, end: x.end, start: x.start,
+          budget: x.budget, currency: x.currency, spend: x.totals.spend, clicks: x.totals.link_clicks, sales: x.totals.purchases, overall: x.overall, daysLeft: x.daysLeft, updated: x.updated });
+      } catch { /* that client's Synology folder is unreachable */ }
+    }
+    return json({ campaigns: out });
+  }
+  const rm = path.match(/^\/api\/c\/([^/]+)\/results(?:\/(view|report))?$/);
+  if (rm) {
+    const [, slugRaw, sub] = rm;
+    const c = await requireClient(env, user, decodeURIComponent(slugRaw));
+    if (!sub && method === "GET") return json(await loadResults(env, user, c));
+    const fileName = (v: unknown) => {
+      const f = String(v ?? "");
+      if (!ANALYTICS_FILE.test(f) || f.includes("/") || /^[.@#]/.test(f)) throw new HttpError(400, "Which campaign?");
+      return f;
+    };
+    if (sub === "view" && method === "POST") {
+      // Remember that the client opened it (Genvyd's own visits don't count).
+      const f = fileName((await readBody(req)).file);
+      if (!user.admin) {
+        const t = now();
+        await env.DB.prepare(
+          "INSERT INTO results_views (client_slug, path, email, first_viewed, last_viewed, views) VALUES (?, ?, ?, ?, ?, 1) " +
+            "ON CONFLICT (client_slug, path, email) DO UPDATE SET last_viewed = excluded.last_viewed, views = views + 1",
+        ).bind(c.slug, `${RESULTS_DIR}/${f}`, user.email, t, t).run();
+      }
+      return json({ ok: true });
+    }
+    if (sub === "report" && method === "GET") {
+      const f = fileName(url.searchParams.get("file"));
+      const tz = (url.searchParams.get("tz") || "").slice(0, 60) || null;
+      const r = (await loadResults(env, user, c)).campaigns.find((x) => x.file === f);
+      if (!r) throw new HttpError(404, "Those results are not on the Synology.");
+      const day = new Date(now() - 7 * 3600 * 1000).toISOString().slice(0, 10);
+      const fname = `${r.campaign.replace(/[^\w .()-]+/g, "-")} results ${day}.pdf`;
+      return new Response(resultsReportPdf(r, c, tz), { headers: {
+        "content-type": "application/pdf",
+        "content-disposition": `attachment; filename="${fname.replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(fname)}`,
+        "cache-control": "no-store",
+      } });
     }
     throw new HttpError(405, "Method not allowed.");
   }
@@ -2215,6 +2285,7 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "
 function itemLink(env: Env, slug: string, path: string) {
   const base = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
   if (path.startsWith("copy:")) return `${base}/#/c/${encodeURIComponent(slug)}/copy`;
+  if (ANALYTICS_FILE.test(path)) return `${base}/#/c/${encodeURIComponent(slug)}/results/${encodeURIComponent(path.split("/").pop() || path)}`;
   if (SUMMARY_FILE.test(path)) {
     const dir = path.split("/").slice(0, -1).join("/");
     return `${base}/#/c/${encodeURIComponent(slug)}${dir ? "/f/" + encodeURIComponent(dir) : ""}`;
@@ -2385,6 +2456,7 @@ async function scanClients(env: Env) {
         for (const e of entries) {
           if (e.type === "file" && COPY_FILE.test(e.name)) copyFiles.push({ path: [...segs, e.name].join("/"), size: e.size, mtime: e.mtime });
           else if (e.type === "file" && SUMMARY_FILE.test(e.name)) summaries.push([...segs, e.name].join("/"));
+          else if (e.type === "file" && ANALYTICS_FILE.test(e.name)) continue; // Results files are not "new work"
           else if (e.type === "file") found.push([...segs, e.name].join("/"));
           else if (segs.length < 3) next.push([...segs, e.name]);
         }
@@ -2873,6 +2945,336 @@ async function approvalRecordPdf(env: Env, c: Client, id: number) {
   blocks.push({ kind: "space", size: 6 });
   blocks.push({ kind: "mono", text: e.frozen_text ?? "" });
   return makePdf(blocks, `Genvyd campaign approval record #${e.id} · ${c.name} · ${e.campaign ?? ""} · generated ${phxTime(now())}`);
+}
+
+// ---------------------------------------------------------------------------
+// Results: campaign analytics written by Claude as "<Campaign>.analytics.json" in each
+// client's "Results" folder. The portal only reads them. Ratings (traffic lights) are worked
+// out here once, so the page, the home card, the admin list and the PDF all agree.
+// ---------------------------------------------------------------------------
+
+const RESULTS_DIR = "Results";
+const ANALYTICS_FILE = /\.analytics\.json$/i;
+const DEFAULT_BENCH = { ctr: { good: 1.0, ok: 0.5 }, cpc: { good: 1.0, ok: 2.0 }, cost_per_purchase: { good: 25.0, ok: 45.0 }, roas: { good: 2.0, ok: 1.0 } };
+const EARLY_SPEND = 10;
+const EARLY_IMPRESSIONS = 500;
+type Rating = "good" | "ok" | "bad" | "early" | null;
+type N = number | null;
+type DayRow = { date: string; spend: N; impressions: N; link_clicks: N; add_to_cart: N; purchases: N; revenue: N };
+type AdNums = { spend: N; impressions: N; link_clicks: N; ctr: N; cpc: N; add_to_cart: N; purchases: N; revenue: N };
+
+const rNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : null);
+const rStr = (v: unknown, max = 400): string | null => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+const rDate = (v: unknown): string | null => { const s = rStr(v, 40); return s && !Number.isNaN(Date.parse(s)) ? s : null; };
+const STATUSES = ["Active", "Paused", "Ended", "Scheduled"];
+const rStatus = (v: unknown) => { const s = rStr(v, 20); const m = s && STATUSES.find((x) => x.toLowerCase() === s.toLowerCase()); return m ?? null; };
+
+/** Traffic light for one number. Higher is better for click rate and return; lower for costs. */
+function rateMetric(metric: "ctr" | "cpc" | "cost_per_purchase" | "roas", v: number | null, bench: typeof DEFAULT_BENCH, early: boolean): Rating {
+  if (v == null) return null;
+  if (early) return "early";
+  const b = bench[metric];
+  if (metric === "ctr" || metric === "roas") return v >= b.good ? "good" : v >= b.ok ? "ok" : "bad";
+  return v <= b.good ? "good" : v <= b.ok ? "ok" : "bad";
+}
+const WORST: Record<string, number> = { bad: 3, ok: 2, good: 1 };
+function overallRating(r: Record<string, Rating>, early: boolean): Rating {
+  if (early) return "early";
+  const xs = [r.ctr, r.cpc].filter((x): x is "good" | "ok" | "bad" => x === "good" || x === "ok" || x === "bad");
+  if (!xs.length) return null;
+  return xs.sort((a, b) => WORST[b] - WORST[a])[0];
+}
+
+/** Checks and cleans one analytics file, and adds ratings, pace and badges. */
+function enrichResults(raw: Record<string, unknown>, path: string, mtime: string | null, t = now()) {
+  const benchIn = (raw.benchmarks && typeof raw.benchmarks === "object" ? raw.benchmarks : {}) as Record<string, Record<string, unknown>>;
+  const bench = JSON.parse(JSON.stringify(DEFAULT_BENCH)) as typeof DEFAULT_BENCH;
+  for (const k of Object.keys(bench) as (keyof typeof DEFAULT_BENCH)[]) {
+    const g = rNum(benchIn[k]?.good), o = rNum(benchIn[k]?.ok);
+    if (g != null) bench[k].good = g;
+    if (o != null) bench[k].ok = o;
+  }
+  const tot = (raw.totals && typeof raw.totals === "object" ? raw.totals : {}) as Record<string, unknown>;
+  const TOTAL_KEYS = ["spend", "impressions", "reach", "link_clicks", "ctr", "cpc", "add_to_cart", "purchases", "revenue", "cost_per_purchase", "roas", "shopify_orders", "shopify_revenue"];
+  const totals = Object.fromEntries(TOTAL_KEYS.map((k) => [k, rNum(tot[k])])) as Record<string, number | null>;
+  const AD_KEYS = ["spend", "impressions", "link_clicks", "ctr", "cpc", "add_to_cart", "purchases", "revenue"];
+  const DAY_KEYS = ["spend", "impressions", "link_clicks", "add_to_cart", "purchases", "revenue"];
+  const cleanPreview = (v: unknown) => { const s = rStr(v, 300); if (!s) return null; try { return cleanPath(s).join("/"); } catch { return null; } };
+  const day = (d: unknown) => {
+    const o = (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
+    const date = rStr(o.date, 10);
+    return date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? ({ date, ...Object.fromEntries(DAY_KEYS.map((k) => [k, rNum(o[k])])) } as DayRow) : null;
+  };
+  const days = (v: unknown) => (Array.isArray(v) ? v : []).slice(0, 120).map(day).filter((d): d is DayRow => !!d).sort((a, b) => a.date.localeCompare(b.date));
+  const daily = days(raw.daily);
+  const ads = (Array.isArray(raw.ads) ? raw.ads : []).slice(0, 30).map((a, i) => {
+    const o = (a && typeof a === "object" ? a : {}) as Record<string, unknown>;
+    const nums = Object.fromEntries(AD_KEYS.map((k) => [k, rNum(o[k])])) as AdNums;
+    const early = (nums.spend ?? 0) < EARLY_SPEND || (nums.impressions ?? 0) < EARLY_IMPRESSIONS;
+    const rating = { ctr: rateMetric("ctr", nums.ctr, bench, early), cpc: rateMetric("cpc", nums.cpc, bench, early) } as Record<string, Rating>;
+    return {
+      index: i, name: rStr(o.name, 120) ?? `Ad ${i + 1}`, preview: cleanPreview(o.preview), status: rStatus(o.status),
+      ...nums, early, rating, overall: overallRating(rating, early),
+      daily: days(o.daily),
+      leading: false, underperforming: false,
+    };
+  });
+  // Badges: the best click rate leads (only when there is more than one ad to compare);
+  // "Underperforming" only once an ad has spent at least $10 and its click rate is red.
+  const withCtr = ads.filter((a) => a.ctr != null && !a.early); // an ad with almost no spend can't lead
+  if (withCtr.length > 1) withCtr.reduce((b, a) => (a.ctr! > b.ctr! ? a : b)).leading = true;
+  for (const a of ads) a.underperforming = (a.spend ?? 0) >= EARLY_SPEND && rateMetric("ctr", a.ctr, bench, false) === "bad";
+
+  const start = rDate(raw.start), end = rDate(raw.end);
+  const s = start ? Date.parse(start) : null, e = end ? Date.parse(end) : null;
+  const DAY = 86400000;
+  const totalDays = s != null && e != null && e > s ? Math.max(1, Math.ceil((e - s) / DAY)) : null;
+  const dayNum = s != null && totalDays ? Math.min(totalDays, Math.max(0, Math.floor((t - s) / DAY) + 1)) : null;
+  const daysLeft = e != null ? Math.max(0, Math.ceil((e - t) / DAY)) : null;
+  const ageDays = s != null ? (t - s) / DAY : null;
+  const earlyCampaign = (ageDays != null && ageDays < 3) || (totals.impressions ?? 0) < EARLY_IMPRESSIONS;
+  const earlyTotals = (totals.spend ?? 0) < EARLY_SPEND || (totals.impressions ?? 0) < EARLY_IMPRESSIONS;
+  const rating = {
+    ctr: rateMetric("ctr", totals.ctr, bench, earlyTotals), cpc: rateMetric("cpc", totals.cpc, bench, earlyTotals),
+    cost_per_purchase: rateMetric("cost_per_purchase", totals.cost_per_purchase, bench, earlyTotals), roas: rateMetric("roas", totals.roas, bench, earlyTotals),
+  } as Record<string, Rating>;
+  const budget = rNum(raw.budget);
+  // Pace: where spend would be today if the budget were spent evenly from start to end.
+  let pace: { expected: number; fraction: number; state: "on" | "ahead" | "behind" } | null = null;
+  if (budget && s != null && e != null && e > s && t > s && totals.spend != null) {
+    const fraction = Math.min(1, Math.max(0, (t - s) / (e - s)));
+    const expected = budget * fraction;
+    const off = expected > 0 ? (totals.spend - expected) / expected : 0;
+    pace = { expected, fraction, state: Math.abs(off) <= 0.15 ? "on" : off > 0 ? "ahead" : "behind" };
+  }
+  const file = path.split("/").pop() || path;
+  return {
+    path, file, mtime,
+    campaign: rStr(raw.campaign, 160) ?? file.replace(ANALYTICS_FILE, ""),
+    status: rStatus(raw.status), start, end, budget, currency: (rStr(raw.currency, 3) ?? "USD").toUpperCase(),
+    updated: rDate(raw.updated), summary: rStr(raw.summary, 1200), recommendation: rStr(raw.recommendation, 400),
+    benchmarks: bench, totals, daily, ads,
+    rating, overall: overallRating(rating, earlyTotals), earlyTotals, earlyCampaign,
+    totalDays, dayNum, daysLeft, pace,
+  };
+}
+type Results = ReturnType<typeof enrichResults>;
+
+/** Every analytics file for one client. Genvyd's first visit makes the Results folder if it is missing. */
+async function loadResults(env: Env, user: User, c: Client): Promise<{ campaigns: Results[]; problems: { file: string; error: string }[] }> {
+  let entries: NasEntry[];
+  try {
+    entries = await listNas(env, c.folder, [RESULTS_DIR]);
+  } catch (err) {
+    if (err instanceof HttpError && err.status === 404) {
+      if (user.admin) { try { await makeNasFolder(env, user, [RESULTS_DIR]); } catch { /* shown as empty */ } }
+      return { campaigns: [], problems: [] };
+    }
+    throw err;
+  }
+  const files = entries.filter((e) => e.type === "file" && ANALYTICS_FILE.test(e.name)).slice(0, 24);
+  const problems: { file: string; error: string }[] = [];
+  const campaigns = (await Promise.all(files.map(async (f) => {
+    try {
+      const res = await fetch(originUrl(env, c.folder, [RESULTS_DIR, f.name]), { headers: originHeaders(env) });
+      if (!res.ok) throw new Error(`The Synology answered ${res.status}.`);
+      const text = await res.text();
+      if (text.length > 2_000_000) throw new Error("File is too big (2 MB max).");
+      const raw = JSON.parse(text);
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Not a JSON object.");
+      return enrichResults(raw, `${RESULTS_DIR}/${f.name}`, f.mtime ?? null);
+    } catch (err) {
+      problems.push({ file: f.name, error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  }))).filter((x): x is Results => !!x);
+  const rank: Record<string, number> = { Active: 0, Scheduled: 1, Paused: 2, Ended: 3 };
+  campaigns.sort((a, b) => (rank[a.status ?? "Active"] ?? 0) - (rank[b.status ?? "Active"] ?? 0) || String(b.start ?? "").localeCompare(String(a.start ?? "")));
+  return { campaigns, problems: user.admin ? problems : [] };
+}
+
+/** "Oct 28, 2026, 9:00 AM MST" in the given time zone (the viewer's), falling back to Phoenix. */
+function zonedTime(iso: string | null, tz: string | null) {
+  if (!iso) return "unknown";
+  const d = new Date(iso);
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: tz || "America/Phoenix", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(d);
+  } catch { return phxTime(d.getTime()); }
+}
+
+/** The one-page color report the client can download. Light version of the page's colors. */
+function resultsReportPdf(r: Results, c: Client, tz: string | null) {
+  const pdf = new PdfCanvas();
+  const C = {
+    ink: hex("#111827"), muted: hex("#6B7280"), line: hex("#E5E7EB"), soft: hex("#F3F4F6"), accent: hex("#FF2A2A"), pink: hex("#F8016F"), blue: hex("#2563EB"),
+    good: hex("#16A34A"), ok: hex("#F59E0B"), bad: hex("#DC2626"), early: hex("#9CA3AF"),
+    // Darker versions for text on white, so numbers meet WCAG AA contrast.
+    goodT: hex("#15803D"), okT: hex("#B45309"), badT: hex("#B91C1C"), earlyT: hex("#6B7280"),
+  };
+  const ID = ["#F8016F", "#2563EB", "#0D9488", "#7C3AED", "#EA580C", "#CA8A04"].map(hex);
+  const fill = (rt: Rating) => (rt === "good" ? C.good : rt === "ok" ? C.ok : rt === "bad" ? C.bad : rt === "early" ? C.early : C.line);
+  const ink = (rt: Rating) => (rt === "good" ? C.goodT : rt === "ok" ? C.okT : rt === "bad" ? C.badT : rt === "early" ? C.earlyT : C.ink);
+  const LABEL: Record<string, string> = { good: "Doing well", ok: "Okay", bad: "Needs work", early: "Too early to tell" };
+  const cur = r.currency;
+  const money = (v: number | null, dec = 2) => (v == null ? "n/a" : new Intl.NumberFormat("en-US", { style: "currency", currency: cur, minimumFractionDigits: dec, maximumFractionDigits: dec }).format(v));
+  const n = (v: number | null) => (v == null ? "n/a" : new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(v));
+  const pct = (v: number | null) => (v == null ? "n/a" : `${v.toFixed(2)}%`);
+  const x = (v: number | null) => (v == null ? "n/a" : `${v.toFixed(2)}x`);
+  const day = (iso: string | null) => (iso ? new Intl.DateTimeFormat("en-US", { timeZone: tz || "America/Phoenix", month: "short", day: "numeric", year: "numeric" }).format(new Date(iso)) : "?");
+  const M = 36, W = 540;
+  let y = M;
+
+  // Header
+  pdf.text(M, y + 9, `CAMPAIGN RESULTS  ·  ${c.name.toUpperCase()}`, 8, C.muted);
+  pdf.text(M + W, y + 9, "Genvyd", 11, C.accent, { bold: true, align: "right" });
+  y += 30;
+  pdf.text(M, y, pdf.fit(r.campaign, 20, W, true), 20, C.ink, { bold: true });
+  y += 18;
+  const stCol = r.status === "Active" ? C.good : r.status === "Scheduled" ? C.blue : r.status === "Paused" ? C.ok : C.early;
+  const stInk = r.status === "Active" ? C.goodT : r.status === "Scheduled" ? C.blue : r.status === "Paused" ? C.okT : C.earlyT;
+  const stText = (r.status ?? "Unknown").toUpperCase();
+  const stW = pdf.width(stText, 7.5, true) + 14;
+  pdf.round(M, y - 9, stW, 13, 6.5, tint(stCol, 0.15));
+  pdf.text(M + 7, y, stText, 7.5, stInk, { bold: true });
+  const dates = `${day(r.start)} to ${day(r.end)}${r.dayNum && r.totalDays ? `  ·  Day ${r.dayNum} of ${r.totalDays}` : ""}  ·  Last updated ${zonedTime(r.updated ?? r.mtime, tz)}`;
+  pdf.text(M + stW + 8, y, pdf.fit(dates, 8.5, W - stW - 8), 8.5, C.muted);
+  y += 20;
+
+  // Budget bar with pace marker
+  const spend = r.totals.spend;
+  pdf.text(M, y, r.budget != null ? `${money(spend, 0)} of ${money(r.budget, 0)} spent` : `${money(spend, 0)} spent`, 11, C.ink, { bold: true });
+  if (r.pace) {
+    const lab = r.pace.state === "on" ? "On pace" : r.pace.state === "ahead" ? "Spending faster than planned" : "Spending slower than planned";
+    pdf.text(M + W, y, lab, 8.5, r.pace.state === "on" ? C.goodT : C.okT, { bold: true, align: "right" });
+  }
+  y += 7;
+  pdf.round(M, y, W, 9, 4.5, C.soft);
+  if (r.budget && spend != null) pdf.round(M, y, Math.max(9, Math.min(1, spend / r.budget) * W), 9, 4.5, C.accent);
+  if (r.pace) { const px = M + r.pace.fraction * W; pdf.line(px, y - 3, px, y + 12, C.ink, 1.2); }
+  y += 22;
+
+  // Note from Genvyd
+  const noteText = [r.summary, r.recommendation ? `Next step: ${r.recommendation}` : null].filter(Boolean).join("\n");
+  if (noteText) {
+    const lines = Math.min(6, Math.ceil(pdf.width(noteText, 9.5) / (W - 24)) + (r.recommendation ? 1 : 0));
+    const h = 22 + lines * 12.5;
+    pdf.round(M, y, W, h, 8, tint(C.pink, 0.08), tint(C.pink, 0.35));
+    pdf.text(M + 12, y + 14, "A NOTE FROM GENVYD", 7, C.pink, { bold: true });
+    let yy = y + 16;
+    if (r.summary) yy = pdf.para(M + 12, yy, r.summary, 9.5, C.ink, W - 24, { maxLines: 4, lead: 12.5 });
+    if (r.recommendation) pdf.para(M + 12, yy, `Next step: ${r.recommendation}`, 9.5, C.ink, W - 24, { bold: true, maxLines: 2, lead: 12.5 });
+    y += h + 12;
+  }
+
+  // KPI tiles, 4 x 2
+  const T = r.totals;
+  const tiles: [string, string, Rating, string?][] = [
+    ["People reached", n(T.reach), null],
+    ["Link clicks", n(T.link_clicks), null],
+    ["Click rate", pct(T.ctr), r.rating.ctr],
+    ["Cost per click", money(T.cpc), r.rating.cpc],
+    ["Added to cart", n(T.add_to_cart), null],
+    ["Sales", n(T.purchases), null],
+    ["Revenue", money(T.revenue, 0), null, T.roas != null ? `Return ${x(T.roas)}` : undefined],
+    ["Cost per sale", money(T.cost_per_purchase), r.rating.cost_per_purchase],
+  ];
+  const tw = (W - 3 * 8) / 4, th = 58;
+  tiles.forEach(([label, val, rt, extra], i) => {
+    const tx = M + (i % 4) * (tw + 8), ty = y + Math.floor(i / 4) * (th + 8);
+    pdf.round(tx, ty, tw, th, 6, [1, 1, 1], C.line);
+    pdf.rect(tx + 4, ty, tw - 8, 3, rt ? fill(rt) : hex("#D1D5DB"));
+    pdf.text(tx + 9, ty + 16, label, 8, C.muted);
+    pdf.text(tx + 9, ty + 36, pdf.fit(val, 17, tw - 16, true), 17, rt ? ink(rt) : C.ink, { bold: true });
+    if (rt) pdf.text(tx + 9, ty + 50, LABEL[rt], 7.5, ink(rt), { bold: true });
+    else if (extra) pdf.text(tx + 9, ty + 50, extra, 7.5, ink(r.rating.roas), { bold: true });
+  });
+  y += th * 2 + 8 + 10;
+  // Legend
+  let lx = M;
+  pdf.text(lx, y, "How to read this:", 7.5, C.muted, { bold: true });
+  lx += pdf.width("How to read this:", 7.5, true) + 8;
+  for (const k of ["good", "ok", "bad", "early"] as const) {
+    pdf.circle(lx + 3, y - 2.5, 3, fill(k));
+    pdf.text(lx + 9, y, LABEL[k], 7.5, C.muted);
+    lx += pdf.width(LABEL[k], 7.5) + 22;
+  }
+  if (r.earlyCampaign) pdf.text(M + W, y, "Early days: Meta is still learning, numbers will move a lot.", 7.5, C.blue, { align: "right" });
+  y += 14;
+
+  // Daily chart (left) and where the money went (right)
+  const chW = 300, chH = 120, rx = M + chW + 20, rw = W - chW - 20;
+  pdf.text(M, y + 9, "Day by day", 10, C.ink, { bold: true });
+  pdf.text(M + chW, y + 9, "bars = spend, line = link clicks", 7, C.muted, { align: "right" });
+  const cy = y + 18;
+  pdf.rect(M, cy, chW, chH, [1, 1, 1], C.line, 0.5);
+  const d = r.daily;
+  if (d.length) {
+    const maxS = Math.max(1, ...d.map((p) => p.spend ?? 0)), maxC = Math.max(1, ...d.map((p) => p.link_clicks ?? 0));
+    const step = chW / d.length, bw = Math.max(2, step * 0.6);
+    const pts: [number, number][] = [];
+    d.forEach((p, i) => {
+      const bx = M + i * step + (step - bw) / 2;
+      const bh = ((p.spend ?? 0) / maxS) * (chH - 22);
+      pdf.rect(bx, cy + chH - 14 - bh, bw, bh, hex("#D1D5DB"));
+      if (p.link_clicks != null) pts.push([M + i * step + step / 2, cy + chH - 14 - (p.link_clicks / maxC) * (chH - 22)]);
+      if (d.length <= 10 || i % Math.ceil(d.length / 8) === 0) pdf.text(M + i * step + step / 2, cy + chH - 4, p.date.slice(5).replace("-", "/"), 6, C.muted, { align: "center" });
+    });
+    pdf.polyline(pts, C.accent, 1.8);
+    for (const [px, py] of pts) pdf.circle(px, py, 1.8, C.accent);
+  } else pdf.text(M + chW / 2, cy + chH / 2, "No daily numbers yet", 8, C.muted, { align: "center" });
+
+  pdf.text(rx, y + 9, "Where the money went", 10, C.ink, { bold: true });
+  const spends = r.ads.filter((a) => (a.spend ?? 0) > 0);
+  const totalS = spends.reduce((s0, a) => s0 + (a.spend ?? 0), 0);
+  let by = y + 22;
+  for (const a of spends.slice(0, 6)) {
+    const share = totalS ? (a.spend ?? 0) / totalS : 0;
+    pdf.text(rx, by + 6, pdf.fit(a.name, 7.5, rw * 0.55), 7.5, C.ink);
+    pdf.text(rx + rw, by + 6, `${money(a.spend, 0)}  ${Math.round(share * 100)}%`, 7.5, C.muted, { align: "right" });
+    pdf.round(rx, by + 9, rw, 6, 3, C.soft);
+    pdf.round(rx, by + 9, Math.max(6, share * rw), 6, 3, ID[a.index % ID.length]);
+    by += 20;
+  }
+  if (!spends.length) pdf.text(rx, by + 6, "No spend by ad yet", 8, C.muted);
+  y = cy + chH + 18;
+
+  // Ad leaderboard (sorted by click rate)
+  pdf.text(M, y, "Ads, best click rate first", 10, C.ink, { bold: true });
+  y += 8;
+  const cols: [string, number, "left" | "right"][] = [["Ad", 150, "left"], ["Status", 50, "left"], ["Spend", 55, "right"], ["Clicks", 45, "right"], ["Click rate", 62, "right"], ["Per click", 58, "right"], ["To cart", 50, "right"], ["Sales", 70, "right"]];
+  let cx = M;
+  pdf.rect(M, y, W, 15, C.soft);
+  for (const [h0, w0, al] of cols) { pdf.text(al === "right" ? cx + w0 - 5 : cx + 5, y + 10.5, h0, 7.5, C.muted, { bold: true, align: al }); cx += w0; }
+  y += 15;
+  const footY = 792 - M - 30;
+  const sorted = [...r.ads].sort((a, b) => (b.ctr ?? -1) - (a.ctr ?? -1));
+  const fit = Math.max(1, Math.floor((footY - y - 4) / 17));
+  for (const a of sorted.slice(0, fit)) {
+    cx = M;
+    pdf.rect(M, y + 2, 3, 13, ID[a.index % ID.length]);
+    const badge = a.leading ? "  (Leading)" : a.underperforming ? "  (Underperforming)" : "";
+    const cells: [string, Rating | undefined][] = [
+      [pdf.fit(a.name, 8, 136 - pdf.width(badge, 8, true), true) + badge, undefined], [a.status ?? "", undefined], [money(a.spend, 0), undefined], [n(a.link_clicks), undefined],
+      [pct(a.ctr), a.rating.ctr], [money(a.cpc), a.rating.cpc], [n(a.add_to_cart), undefined], [n(a.purchases), undefined],
+    ];
+    cells.forEach(([v, rt], i) => {
+      const [, w0, al] = cols[i];
+      if (rt) pdf.rect(cx + 2, y + 2, w0 - 4, 13, tint(fill(rt), 0.14));
+      pdf.text(al === "right" ? cx + w0 - 5 : cx + 7, y + 11.5, v, 8, rt ? ink(rt) : i === 0 && a.leading ? C.goodT : i === 0 && a.underperforming ? C.badT : C.ink, { bold: !!rt || i === 0, align: al });
+      cx += w0;
+    });
+    pdf.line(M, y + 17, M + W, y + 17, C.line, 0.5);
+    y += 17;
+  }
+  if (sorted.length > fit) pdf.text(M, y + 10, `${sorted.length - fit} more ad${sorted.length - fit === 1 ? "" : "s"} in the portal.`, 7.5, C.muted);
+
+  // Footnote
+  const sales = T.shopify_orders != null && T.purchases != null
+    ? `Sales counted by Meta: ${n(T.purchases)} (${money(T.revenue, 0)}). Shopify orders: ${n(T.shopify_orders)} (${money(T.shopify_revenue, 0)}). `
+    : T.shopify_orders != null ? `Shopify orders: ${n(T.shopify_orders)} (${money(T.shopify_revenue, 0)}). ` : "";
+  pdf.para(M, footY + 2, `${sales}Meta and Shopify can count sales differently; Shopify orders are the actual sales.`, 7.5, C.muted, W, { maxLines: 2, lead: 10 });
+  pdf.text(M, 792 - M + 4, `Made by Genvyd for ${c.name}. clients.genvyd.com`, 7, C.muted);
+  return pdf.toBytes();
 }
 
 export default {
