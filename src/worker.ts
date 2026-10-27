@@ -3067,7 +3067,7 @@ async function loadResults(env: Env, user: User, c: Client): Promise<{ campaigns
     entries = await listNas(env, c.folder, [RESULTS_DIR]);
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) {
-      if (user.admin) { try { await makeNasFolder(env, user, [RESULTS_DIR]); } catch { /* shown as empty */ } }
+      if (user.admin) { try { await makeNasFolder(env, user, [c.folder, RESULTS_DIR]); } catch { /* shown as empty */ } }
       return { campaigns: [], problems: [] };
     }
     throw err;
