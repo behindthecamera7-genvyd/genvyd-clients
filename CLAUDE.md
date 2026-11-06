@@ -184,6 +184,14 @@ where an old path lives now, and `viewItem()` redirects old links through it. Th
 stay keyed by path (decided with Anthony): an id cannot survive a Finder rename anyway, so
 renames should go through the portal.
 
+## Video comments and timecodes
+
+On a video's ad page the comment box has "Add the video time (0:07) to my comment", **off by default**
+(most notes are about the whole ad). Ticking it pauses the video and the label reads "Attached to 0:07
+in the video"; posting sends `timecode` (seconds) only when ticked, and the box resets to off after each
+post. A collapsed "How to point to a moment in the video" (`.tc-help`) explains it in three steps. Posted
+comments show the time as a chip that jumps the video there; the dashboard, digest and Claude feed show it.
+
 ## Comment replies
 
 `comments.parent_id` (migration 0011). Admin "↩ Reply" on a comment (ad page and dashboard)

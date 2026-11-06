@@ -3031,16 +3031,32 @@
           : h("p", { class: "muted", style: "margin:0" }, "No comments yet."),
       );
 
-      const box = h("textarea", { placeholder: video ? "What should change? Pause the video where you mean and your note pins to that moment." : "Leave a note for the studio…", maxlength: "4000" });
+      const box = h("textarea", { placeholder: video ? "What should change? Write your note here." : "Leave a note for the studio…", maxlength: "4000" });
+      // Video comments: the time is OFF by default (most notes are about the whole ad). Ticking the
+      // box pauses the video and attaches the exact moment on screen, shown in the label.
       let pin = null;
       let pinLabel = null;
+      let pinHelp = null;
       if (video) {
-        pin = h("input", { type: "checkbox", checked: true });
-        pinLabel = h("span", {}, `Pin to ${fmtTime(video.currentTime)}`);
-        const update = () => (pinLabel.textContent = `Pin to ${fmtTime(video.currentTime)}`);
+        pin = h("input", { type: "checkbox" });
+        pinLabel = h("span", {});
+        const update = () => {
+          pinLabel.textContent = pin.checked
+            ? `Attached to ${fmtTime(video.currentTime)} in the video`
+            : `Add the video time (${fmtTime(video.currentTime)}) to my comment`;
+        };
+        update();
         video.ontimeupdate = update;
         video.onseeked = update;
-        box.addEventListener("focus", () => video.pause());
+        video.onpause = update;
+        pin.onchange = () => { if (pin.checked) video.pause(); update(); };
+        pinHelp = h("details", { class: "tc-help" },
+          h("summary", {}, "How to point to a moment in the video"),
+          h("ol", {},
+            h("li", {}, "Play the video and pause it at the moment you mean (or drag the slider there)."),
+            h("li", {}, "Tick \u201cAdd the video time\u201d. The video stays paused and the box shows the exact time."),
+            h("li", {}, "Write your note and post it. Your comment shows that time, and tapping it jumps the video there.")),
+          h("p", { class: "muted" }, "Leave the box unticked for notes about the whole ad."));
       }
       const send = h("button", { class: "btn primary", onclick: postComment }, "Post comment");
       box.addEventListener("keydown", (e) => {
@@ -3079,8 +3095,9 @@
         h("div", { class: "mono muted" }, `COMMENTS (${d.comments.length})`, also.length ? ` · ON THE ${thisSize} SIZE` : ""),
         list,
         h("div", { class: "composer" },
+          pinHelp,
           box,
-          h("div", { class: "composer-row" }, pin ? h("label", { class: "check" }, pin, pinLabel) : h("span"), send),
+          h("div", { class: "composer-row" }, pin ? h("label", { class: "check tc-check" }, pin, pinLabel) : h("span"), send),
         ),
       );
       list.scrollTop = list.scrollHeight;

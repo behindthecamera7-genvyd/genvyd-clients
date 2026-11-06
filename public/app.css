@@ -896,3 +896,11 @@ img.car-mini { width: 100%; height: 100%; object-fit: cover; display: block; opa
   .res-admin-row { grid-template-columns: auto minmax(0, 1fr) auto; }
   .res-admin-row > :nth-child(n+4) { grid-column: 2 / -1; }
 }
+
+/* Video comments: optional timecode, with a short how-to. */
+.tc-help { margin: 0 0 10px; font-size: 14px; color: var(--ash); }
+.tc-help summary { cursor: pointer; color: var(--bone); font-weight: 600; }
+.tc-help ol { margin: 8px 0 6px; padding-left: 20px; line-height: 1.5; }
+.tc-help p { margin: 0; font-size: 13px; }
+.tc-check { align-items: flex-start; gap: 8px; min-height: 44px; line-height: 1.35; }
+.tc-check input { width: 20px; height: 20px; flex: 0 0 20px; accent-color: var(--accent); }
