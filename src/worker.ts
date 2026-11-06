@@ -2638,6 +2638,9 @@ function adKeyOf(name: string, inFinal: boolean) {
     .replace(/(?:^|[\s_\-.(\[])\d{1,2}\s*[x×:]\s*\d{1,2}(?=$|[\s_\-.)\]])/gi, " ")
     .replace(/(?:^|[\s_\-.(\[])(?:v|ver|version|rev)\s*\.?\s*\d{1,3}(?=$|[\s_\-.)\]])/gi, " ")
     .replace(/\s*\(\d{1,2}\)\s*$/, "")
+    // Captions on / off versions are the same ad (same as capOf() in app.js).
+    .replace(/(?:^|[\s_\-.(\[])(?:(?:no|without|w\/o)[\s_\-]*(?:captions?|subtitles?|subs)|uncaptioned|(?:captions?|subtitles?)[\s_\-]*off)(?=$|[\s_\-.)\]])/gi, " ")
+    .replace(/(?:^|[\s_\-.(\[])(?:captions?|captioned|subtitles?|subtitled)(?:[\s_\-]*on)?(?=$|[\s_\-.)\]])/gi, " ")
     .replace(/\b(feed|stories|story|reels?|post|square|vertical|portrait|landscape|horizontal)\b/gi, " ")
     .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }

@@ -356,10 +356,11 @@
           h("div", { class: "chg-body" },
             h("div", { class: "mono muted chg-meta" }, `${ad.clientName} · ${ad.folder || "Projects"} · ${who(ad.statusBy || "")} asked ${fmtDate(c.statusAt)}`),
             h("h3", { class: "chg-name" }, h("a", { href }, ad._title || ad.name)),
-            ad._sizes || ad._verCount || ad._carousel
+            ad._sizes || ad._verCount || ad._carousel || ad._captions
               ? h("div", { class: "tile-sizes" },
                   ad._carousel ? h("span", { class: "size-chip car-chip" }, `Carousel · ${ad._carousel.length} cards`) : null,
                   (ad._sizes || []).map((v) => h("span", { class: "size-chip" }, v.label)),
+                  ad._captions ? h("span", { class: "size-chip" }, "Captions on / off") : null,
                   ad._verCount ? h("span", { class: "size-chip ver-chip" }, `v${ad._verLatest}`) : null)
               : null,
             c.roots.length ? commentList(c.roots) : h("div", { class: "chg-none" }, "No comment left. Reply to ask what she'd like changed."),
@@ -1442,6 +1443,19 @@
   const DUP_RE = /\s*\((\d{1,2})\)\s*$/;
   const PLACEMENT_RE = /\b(feed|stories|story|reels?|post|square|vertical|portrait|landscape|horizontal)\b/gi;
   const SIZE_ORDER = ["9:16", "4:5", "1:1", "16:9"];
+  // Captions on / off versions of the same ad: "... captions.mp4" and "... no captions.mp4"
+  // (also "captioned", "subtitles", "without captions", "uncaptioned", "captions off").
+  // "Off" is checked first, since "no captions" also contains "captions".
+  const CAP_OFF_RE = /(?:^|[\s_\-.(\[])(?:(?:no|without|w\/o)[\s_\-]*(?:captions?|subtitles?|subs)|uncaptioned|(?:captions?|subtitles?)[\s_\-]*off)(?=$|[\s_\-.)\]])/i;
+  const CAP_ON_RE = /(?:^|[\s_\-.(\[])(?:captions?|captioned|subtitles?|subtitled)(?:[\s_\-]*on)?(?=$|[\s_\-.)\]])/i;
+  function capOf(rest) {
+    const off = rest.match(CAP_OFF_RE);
+    if (off) return { cap: "off", lit: off[0].replace(/^[\s_\-.(\[]+/, ""), rest: rest.replace(off[0], " ") };
+    const on = rest.match(CAP_ON_RE);
+    if (on) return { cap: "on", lit: on[0].replace(/^[\s_\-.(\[]+/, ""), rest: rest.replace(on[0], " ") };
+    return { cap: null, lit: null, rest };
+  }
+  const CAP_LABEL = { on: "Captions on", off: "Captions off" };
   const kindOf = (it) => (it.kind === "video" ? "video" : it.kind === "image" ? "image" : "other");
   const stemOf = (name) => { const d = name.lastIndexOf("."); return d > 0 ? name.slice(0, d) : name; };
   const extOf = (name) => { const d = name.lastIndexOf("."); return d > 0 ? name.slice(d) : ""; };
@@ -1462,12 +1476,14 @@
     const v = rest.match(VER_RE);
     if (v) { ver = Number(v[1]) || 1; rest = rest.replace(v[0], " "); }
     else { const d = rest.match(DUP_RE); if (d) { ver = Number(d[1]) || 1; rest = rest.replace(DUP_RE, ""); } }
+    const c = capOf(rest);
+    rest = c.rest;
     const base = norm(rest) || norm(stemOf(name)) || name.toLowerCase();
-    return { size, ver, base };
+    return { size, ver, cap: c.cap, base };
   }
   function adInfo(it) {
-    const { size, ver, base } = adName(it.name);
-    return { size, ver, key: [it.clientSlug || "", parentOf(it.path), kindOf(it), base].join("|") };
+    const { size, ver, cap, base } = adName(it.name);
+    return { size, ver, cap, key: [it.clientSlug || "", parentOf(it.path), kindOf(it), base].join("|") };
   }
   // Ad copy belongs to every size and version of an ad, and to copy files named after it
   // ("Cap ad.copy.txt" goes with "Cap ad 9x16.mp4" and "Cap ad 4x5 v2.mp4").
@@ -1485,7 +1501,7 @@
   const sizeRank = (label) => { if (!label) return 98; const i = SIZE_ORDER.indexOf(label); return i < 0 ? 99 : i; };
   const bySize = (a, b) => sizeRank(a.size) - sizeRank(b.size) || String(a.size).localeCompare(String(b.size));
   // Two files claiming the same size and version (say Hero.mp4 and Hero.mov) are left apart.
-  const clashes = (entries) => new Set(entries.map((e) => `${e.ver}|${e.size}`)).size !== entries.length;
+  const clashes = (entries) => new Set(entries.map((e) => `${e.ver}|${e.size}|${e.cap}`)).size !== entries.length;
 
   // Returns the list with sizes and versions folded together. A folded entry is the newest
   // version's first size, with `_sizes` [{ label, path, item }] when it comes in several
@@ -1503,9 +1519,19 @@
     for (const g of order) {
       if (g.length === 1 || clashes(g)) { g.forEach((e) => out.push(e.it)); continue; }
       const latestVer = Math.max(...g.map((e) => e.ver));
-      const cur = g.filter((e) => e.ver === latestVer).sort(bySize);
+      const curAll = g.filter((e) => e.ver === latestVer).sort(bySize);
+      // Captions on and off: the tile shows "Captions on" (when there is one); both count as the ad.
+      const caps = [...new Set(curAll.map((e) => e.cap).filter(Boolean))];
+      const mainCap = caps.length > 1 ? (caps.includes("on") ? "on" : caps[0]) : null;
+      const cur = mainCap ? curAll.filter((e) => e.cap === mainCap) : curAll;
+      const captions = caps.length > 1
+        ? ["on", "off"].filter((k) => caps.includes(k)).map((k) => {
+            const e = curAll.find((x) => x.cap === k && x.size === cur[0].size) || curAll.find((x) => x.cap === k);
+            return { label: CAP_LABEL[k], cap: k, path: e.it.path, item: e.it };
+          })
+        : null;
       const verCount = new Set(g.map((e) => e.ver)).size;
-      const all = cur.map((e) => e.it);
+      const all = [...cur, ...curAll.filter((e) => !cur.includes(e))].map((e) => e.it);
       const statuses = new Set(all.map((x) => x.status));
       const latest = all.map((x) => (x.mtime ? Date.parse(x.mtime) : 0)).reduce((a, b) => Math.max(a, b), 0);
       out.push({
@@ -1513,6 +1539,9 @@
         _sizes: cur.length > 1 ? cur.map((e) => ({ label: e.size || "Original", path: e.it.path, item: e.it })) : null,
         _verCount: verCount > 1 ? verCount : 0,
         _verLatest: latestVer,
+        _captions: captions,
+        // Approve, Favorite, campaigns and Trash cover every size and both caption versions.
+        ...(captions ? { _approvePaths: curAll.map((e) => e.it.path) } : {}),
         _paths: g.map((e) => e.it.path),
         status: statuses.size === 1 ? all[0].status : statuses.has("changes") ? "changes" : "pending",
         likes: Math.max(...all.map((x) => x.likes || 0)),
@@ -1579,17 +1608,29 @@
   // Sizes (same version) and versions (same size) of one file, from its folder listing.
   function adFamily(items, path) {
     const me = items.find((i) => i.path === path);
-    if (!me) return { sizes: [], versions: [], ver: 1, latestVer: 1 };
+    const none = { sizes: [], versions: [], captions: [], current: [path], ver: 1, latestVer: 1 };
+    if (!me) return none;
     const mine = adInfo(me);
     const g = items.map((i) => ({ it: i, ...adInfo(i) })).filter((e) => e.key === mine.key);
-    if (clashes(g)) return { sizes: [], versions: [], ver: 1, latestVer: 1 };
-    const sizes = g.filter((e) => e.ver === mine.ver).sort(bySize).map((e) => ({ label: e.size || "Original", path: e.it.path }));
+    if (clashes(g)) return none;
+    const sizes = g.filter((e) => e.ver === mine.ver && e.cap === mine.cap).sort(bySize).map((e) => ({ label: e.size || "Original", path: e.it.path }));
     const vers = [...new Set(g.map((e) => e.ver))].sort((a, b) => a - b);
     const versions = vers.map((n) => {
-      const same = g.find((e) => e.ver === n && e.size === mine.size) || g.filter((e) => e.ver === n).sort(bySize)[0];
+      const same = g.find((e) => e.ver === n && e.size === mine.size && e.cap === mine.cap) || g.find((e) => e.ver === n && e.cap === mine.cap)
+        || g.filter((e) => e.ver === n).sort(bySize)[0];
       return { n, path: same.it.path };
     });
-    return { sizes, versions, ver: mine.ver, latestVer: vers[vers.length - 1] };
+    // Captions on / off of this version, same size when there is one.
+    const capsHere = [...new Set(g.filter((e) => e.ver === mine.ver).map((e) => e.cap).filter(Boolean))];
+    const captions = capsHere.length > 1
+      ? ["on", "off"].filter((k) => capsHere.includes(k)).map((k) => {
+          const e = g.find((x) => x.ver === mine.ver && x.cap === k && x.size === mine.size) || g.find((x) => x.ver === mine.ver && x.cap === k);
+          return { label: CAP_LABEL[k], cap: k, path: e.it.path };
+        })
+      : [];
+    // Every file of this version (all sizes, both caption versions): what Approve and Favorite cover.
+    const current = g.filter((e) => e.ver === mine.ver).map((e) => e.it.path);
+    return { sizes, versions, captions, current, ver: mine.ver, latestVer: vers[vers.length - 1] };
   }
 
   const PREFS_KEY = "gv-browse";
@@ -2034,10 +2075,11 @@
       thumb,
       h("div", { class: "meta-wrap" }, more, h("a", { class: "tile-meta", href },
         h("div", { class: "tile-name", title: it.name }, it._title || it.name),
-        it._sizes || it._verCount || it._carousel
+        it._sizes || it._verCount || it._carousel || it._captions
           ? h("div", { class: "tile-sizes" },
               it._carousel ? h("span", { class: "size-chip car-chip", title: "One ad with several cards people swipe through" }, `Carousel · ${it._carousel.length} cards`) : null,
               (it._sizes || []).map((v) => h("span", { class: "size-chip" }, v.label)),
+              it._captions ? h("span", { class: "size-chip cap-chip", title: "Comes with and without captions. Switch on the ad page." }, "Captions on / off") : null,
               it._verCount ? h("span", { class: "size-chip ver-chip", title: `${it._verCount} versions, showing the newest` }, `v${it._verLatest} · ${it._verCount} versions`) : null)
           : null,
         showFolder && it.folder ? h("div", { class: "mono muted tile-folder" }, it.folder) : null,
@@ -2266,14 +2308,16 @@
     const v = rest.match(VER_RE);
     if (v) { ver = Number(v[1]) || 1; verLit = v[0].replace(/^[\s_\-.(\[]+/, ""); rest = rest.replace(v[0], " "); }
     else { const d = rest.match(DUP_RE); if (d) { ver = Number(d[1]) || 1; verLit = d[0].trim(); rest = rest.replace(DUP_RE, ""); } }
+    const c = capOf(rest);
+    rest = c.rest;
     const placements = rest.match(PLACEMENT_RE) || [];
     const base = rest.replace(PLACEMENT_RE, " ").replace(/\s{2,}/g, " ").replace(/^[\s_\-.]+|[\s_\-.]+$/g, "").trim();
-    return { base, size, sizeLit, ver, verLit, placements, ext: extOf(name) };
+    return { base, size, sizeLit, ver, verLit, placements, cap: c.cap, capLit: c.lit, ext: extOf(name) };
   }
   // The same file renamed to a new ad name, keeping its size, placement words and version.
   const stackName = (name, newBase) => {
     const p = nameParts(name);
-    return [newBase.trim(), p.sizeLit, ...p.placements, p.ver > 1 ? `v${p.ver}` : null].filter(Boolean).join(" ") + p.ext;
+    return [newBase.trim(), p.sizeLit, ...p.placements, p.capLit, p.ver > 1 ? `v${p.ver}` : null].filter(Boolean).join(" ") + p.ext;
   };
   // Thumbnails that belong to a video: "<video name> thumbnail ...". Returns [{ item, rest }].
   function thumbsOf(items, video) {
@@ -2312,7 +2356,7 @@
     for (const g of groups.values()) {
       if (!g.some((i) => renamed.has(i._was || i.path)) || g.length < 2) continue;
       const seen = new Map();
-      for (const i of g) { const a = adInfo(i); const k = `${a.ver}|${a.size}`; if (seen.has(k)) warn.push(`"${seen.get(k)}" and "${i.name}" would both be the same size and version, so neither will stack.`); else seen.set(k, i.name); }
+      for (const i of g) { const a = adInfo(i); const k = `${a.ver}|${a.size}|${a.cap}`; if (seen.has(k)) warn.push(`"${seen.get(k)}" and "${i.name}" would both be the same size and version, so neither will stack.`); else seen.set(k, i.name); }
     }
     return [...new Set(warn)];
   }
@@ -2462,7 +2506,7 @@
     const also = (it._approvePaths || (it._sizes || []).map((v) => v.path)).filter((p) => p !== it.path);
     const sizesNote = it._carousel
       ? h("div", { class: "menu-note mono muted" }, `Covers all ${it._carousel.length} cards`)
-      : also.length ? h("div", { class: "menu-note mono muted" }, `Covers all ${also.length + 1} sizes`) : null;
+      : it._captions ? h("div", { class: "menu-note mono muted" }, "Covers captions on and off") : also.length ? h("div", { class: "menu-note mono muted" }, `Covers all ${also.length + 1} sizes`) : null;
     const campList = h("div", { class: "menu-camps" }, h("div", { class: "muted menu-loading" }, "Loading campaigns…"));
     let detail = { status: it.status, liked: !!it.liked, likes: it.likes };
 
@@ -2670,7 +2714,7 @@
     const sizes = fam.sizes.length > 1 ? fam.sizes : [];
     // In a carousel, Approve, Favorite and campaign picks cover every card (all their sizes).
     const carAd = groupAds(items).find((a) => a._carousel && (a._paths || []).includes(path));
-    const also = (carAd ? carAd._approvePaths : sizes.map((v) => v.path)).filter((p) => p !== path);
+    const also = (carAd ? carAd._approvePaths : fam.captions.length ? fam.current : sizes.map((v) => v.path)).filter((p) => p !== path);
     const thisSize = (sizes.find((v) => v.path === path) || {}).label;
     const src = mediaUrl(slug, path);
 
@@ -2715,6 +2759,15 @@
     const sizeSeg = sizes.length > 1
       ? h("div", { class: "seg size-seg", title: "Sizes of this ad" },
           sizes.map((v) => h("button", {
+            class: "seg-btn" + (v.path === path ? " active" : ""),
+            "aria-pressed": v.path === path ? "true" : "false",
+            onclick: () => { if (v.path !== path) location.replace(`#/c/${enc(slug)}/i/${enc(v.path)}`); },
+          }, v.label)))
+      : null;
+    // Captions on / off: the same ad with and without captions burned in.
+    const capSeg = fam.captions.length > 1
+      ? h("div", { class: "seg cap-seg", title: "This ad comes with and without captions" },
+          fam.captions.map((v) => h("button", {
             class: "seg-btn" + (v.path === path ? " active" : ""),
             "aria-pressed": v.path === path ? "true" : "false",
             onclick: () => { if (v.path !== path) location.replace(`#/c/${enc(slug)}/i/${enc(v.path)}`); },
@@ -2803,6 +2856,7 @@
       ),
       h("div", { class: "actions" },
         sizeSeg,
+        capSeg,
         it.size ? h("span", { class: "mono muted", style: "align-self:center" }, fmtSize(it.size)) : null,
         newVerBtn,
         h("button", { class: "btn small", type: "button", onclick: () => saveFile(src, it.name) }, "↓ Save"),
@@ -2975,7 +3029,9 @@
       const sizesNote = carAd
         ? h("div", { class: "status-note muted" }, `Approve, Favorite and campaign picks cover all ${carAd._carousel.length} cards of this carousel. Comments stay on the card you are looking at.`)
         : also.length
-        ? h("div", { class: "status-note muted" }, `Approve, Favorite and campaign picks cover all ${sizes.length} sizes.`)
+        ? h("div", { class: "status-note muted" }, fam.captions.length
+            ? `Approve, Favorite and campaign picks cover both caption versions${sizes.length === 2 ? " in both sizes" : sizes.length > 2 ? ` in all ${sizes.length} sizes` : ""}. Comments stay on the version you are looking at.`
+            : `Approve, Favorite and campaign picks cover all ${sizes.length} sizes.`)
         : null;
 
       // Comments as threads: each comment, then Genvyd's replies under it.

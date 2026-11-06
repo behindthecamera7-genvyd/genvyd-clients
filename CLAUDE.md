@@ -141,6 +141,15 @@ start fresh). Files that clash (same size and version) are left apart. Approve, 
 campaign picks send `also` (the other sizes) so the server applies them to every size,
 logging activity once. Comments and tags stay per file. Previous/Next skip sibling sizes.
 
+Captions on / off: a file name with "captions", "captioned", "subtitles" (on) or "no captions",
+"without captions", "uncaptioned", "captions off" (off) is the same ad (`capOf()`, `CAP_OFF_RE` checked
+before `CAP_ON_RE`; never "cap", which is a hat). `adName()`/`adInfo()` return `cap`, `clashes()` counts it,
+`groupAds()` shows "Captions on" on the tile with a "Captions on / off" chip, `_captions` and
+`_approvePaths` (both versions, all sizes), and the ad page has a "Captions on | Captions off" switch
+(`fam.captions` from `adFamily()`, which keeps the size; the size switcher keeps the caption choice).
+Approve, Favorite, campaigns and Trash cover both; comments stay per file. Rename keeps the caption words
+(`nameParts().capLit`); the server's `adKeyOf()` ignores them so one copy file covers both.
+
 ## Carousels
 
 One ad made of several cards: files in the same folder named "<Ad name> card 1", "card 2"...
