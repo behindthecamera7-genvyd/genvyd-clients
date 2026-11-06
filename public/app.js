@@ -1456,6 +1456,9 @@
     return { cap: null, lit: null, rest };
   }
   const CAP_LABEL = { on: "Captions on", off: "Captions off" };
+  // Tile title for a captions on / off pair: the name without the caption words and extension,
+  // so ads that differ only at the end of a long name ("Hook A", "Hook B") are easy to tell apart.
+  const capTitle = (name) => capOf(stemOf(name)).rest.replace(/\s{2,}/g, " ").replace(/[\s_\-.]+$/, "").trim() || name;
   const kindOf = (it) => (it.kind === "video" ? "video" : it.kind === "image" ? "image" : "other");
   const stemOf = (name) => { const d = name.lastIndexOf("."); return d > 0 ? name.slice(0, d) : name; };
   const extOf = (name) => { const d = name.lastIndexOf("."); return d > 0 ? name.slice(d) : ""; };
@@ -2074,7 +2077,7 @@
     return h("div", { class: "card tile" + (it.status === "rejected" ? " is-no" : "") + (it._carousel ? " is-carousel" : "") },
       thumb,
       h("div", { class: "meta-wrap" }, more, h("a", { class: "tile-meta", href },
-        h("div", { class: "tile-name", title: it.name }, it._title || it.name),
+        h("div", { class: "tile-name", title: it.name }, it._title || (it._captions ? capTitle(it.name) : it.name)),
         it._sizes || it._verCount || it._carousel || it._captions
           ? h("div", { class: "tile-sizes" },
               it._carousel ? h("span", { class: "size-chip car-chip", title: "One ad with several cards people swipe through" }, `Carousel · ${it._carousel.length} cards`) : null,

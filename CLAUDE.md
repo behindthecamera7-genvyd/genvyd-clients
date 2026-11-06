@@ -148,7 +148,8 @@ before `CAP_ON_RE`; never "cap", which is a hat). `adName()`/`adInfo()` return `
 `_approvePaths` (both versions, all sizes), and the ad page has a "Captions on | Captions off" switch
 (`fam.captions` from `adFamily()`, which keeps the size; the size switcher keeps the caption choice).
 Approve, Favorite, campaigns and Trash cover both; comments stay per file. Rename keeps the caption words
-(`nameParts().capLit`); the server's `adKeyOf()` ignores them so one copy file covers both.
+(`nameParts().capLit`); the server's `adKeyOf()` ignores them so one copy file covers both. Tile names wrap to two
+lines (`.tile-name` line clamp), and a captions pair's tile shows `capTitle()` (no caption words, no extension).
 
 ## Carousels
 

@@ -126,7 +126,10 @@ label.check input { width: auto; }
 .thumb .play:hover span { background: var(--accent); border-color: var(--accent); transform: scale(1.06); }
 .thumb .ftype { position: absolute; inset: 0; display: grid; place-items: center; font: 500 13px var(--mono); color: var(--smoke); text-transform: uppercase; }
 .tile-meta { padding: 14px 16px 16px; }
-.tile-name { color: var(--bone); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-name { color: var(--bone); font-weight: 500; overflow: hidden; text-overflow: ellipsis;
+  /* Two lines, so long names that differ at the end ("... Hook A", "... Hook B") can be told apart. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; overflow-wrap: anywhere; }
+.upload-row .tile-name { display: block; white-space: nowrap; }
 .tile-stats { display: flex; gap: 14px; margin-top: 6px; }
 
 /* ---- viewer ----------------------------------------------------------- */
