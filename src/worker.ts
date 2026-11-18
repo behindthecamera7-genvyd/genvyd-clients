@@ -337,7 +337,7 @@ const BACKUP_TABLES = [
   "clients", "members", "item_status", "likes", "comments", "activity",
   "campaigns", "campaign_items", "item_tags", "notify_state", "files", "views", "hidden",
   "copy_items", "copy_campaigns", "copy_imports", "file_ids", "file_renames",
-  "campaign_summaries", "campaign_events", "results_views",
+  "campaign_summaries", "campaign_events", "results_views", "invoices", "portal_settings",
 ];
 // Approval records are append only (the database refuses to change or delete them), so a restore
 // only adds back records that are missing and never replaces the ones there.
@@ -456,7 +456,7 @@ async function buildFeed(env: Env) {
   const admins = (env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   const isAdmin = (e: string) => admins.includes(e.toLowerCase());
   const weekAgo = now() - 7 * 86400 * 1000;
-  const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR, sumR, evR, rvR] = await env.DB.batch([
+  const [clientsR, statusR, commentsR, campsR, hiddenR, actR, copyR, copyCampR, sumR, evR, rvR, invR] = await env.DB.batch([
     env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name"),
     env.DB.prepare("SELECT client_slug, path, status, updated_by, updated_at FROM item_status WHERE status IN ('approved','changes','rejected') ORDER BY updated_at DESC"),
     env.DB.prepare("SELECT id, parent_id, client_slug, path, email, body, timecode, resolved, created_at FROM comments ORDER BY created_at"),
@@ -468,7 +468,10 @@ async function buildFeed(env: Env) {
     env.DB.prepare("SELECT client_slug, path, last_sig, gone FROM campaign_summaries ORDER BY first_seen"),
     env.DB.prepare("SELECT id, client_slug, summary_path, campaign, kind, email, typed_name, comment, at, at_utc, at_phoenix, ip, summary_sha256, sig, detail FROM campaign_events ORDER BY id"),
     env.DB.prepare("SELECT client_slug, path, email, first_viewed, last_viewed, views FROM results_views ORDER BY last_viewed DESC"),
+    env.DB.prepare("SELECT * FROM invoices"),
   ]);
+  const invRows = invR.results as InvoiceRow[];
+  const pay = await loadPaySettings(env);
   const rviews = rvR.results as { client_slug: string; path: string; email: string; first_viewed: number; last_viewed: number; views: number }[];
   const sums = sumR.results as { client_slug: string; path: string; last_sig: string | null; gone: number }[];
   const evs = evR.results as CampaignEvent[];
@@ -560,7 +563,12 @@ async function buildFeed(env: Env) {
       viewed: rviews.filter((v) => v.client_slug === c.slug && v.path === p).map((v) => ({ by: v.email, last_viewed: azTime(v.last_viewed), first_viewed: azTime(v.first_viewed), times: v.views })),
       comments: commentsOn(p),
     }));
-    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, campaign_approvals: campaignApprovals, campaign_results: results, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
+    // Invoices the portal has seen in this client's Invoices folder (open first, then paid in the last 90 days).
+    const invoices = sortInvoices(invRows.filter((r) => r.client_slug === c.slug).map((r) => invoiceView(r, { name: r.path.split("/").pop() || r.path }, r.path, pay)))
+      .filter((i) => i.status === "open" || (i.status === "paid" && i.paidOn && dayDiff(phxDay(), i.paidOn) <= 90))
+      .map((i) => ({ number: i.number, file: i.file, amount: money(i.amount), due: i.due, state: i.state, days_left: i.daysLeft, paid_on: i.paidOn, paid_by: i.paidMethod,
+        viewed: i.viewed ? `${i.viewed.by}, first ${azTime(i.viewed.at)}` : null, has_pay_link: !!i.payLink, mac_path: `${MAC_SHARE}/${c.folder}/${i.path}` }));
+    (out.clients as unknown[]).push({ name: c.name, slug: c.slug, folder: c.folder, campaign_approvals: campaignApprovals, campaign_results: results, invoices, changes_requested: changes, said_no: saidNo, open_comments: openElsewhere, approved, campaigns, hidden: hid, ad_copy: copy, recent_activity: recent });
 
     const cm = (list: ReturnType<typeof commentsOn>) =>
       list.map((m) => m.reply_to
@@ -580,6 +588,13 @@ async function buildFeed(env: Env) {
       `\n- **${x.campaign}**\n  - File: \`${x.mac_path}\`\n  - Portal: ${x.link}` +
       (x.viewed.length ? x.viewed.map((v) => `\n  - Results viewed by ${v.by}, last ${v.last_viewed} (${v.times} time${v.times === 1 ? "" : "s"})`).join("") : "\n  - Results not viewed by the client yet") +
       (x.comments.length ? "\n  - Comments:\n" + cm(x.comments) : "")).join("\n") + "\n" : "\nNo results viewed or commented on yet.\n";
+    const invState: Record<string, string> = { overdue: "OVERDUE", due_soon: "Due soon", due: "Due", paid: "Paid", void: "Void" };
+    md += `\n### Invoices (${invoices.length})\n`;
+    md += invoices.length ? invoices.map((x) =>
+      `\n- **${x.number ? `Invoice ${x.number}` : x.file}**: ${x.amount}, ${invState[x.state]}` +
+      (x.state === "paid" ? ` on ${x.paid_on}${x.paid_by ? ` by ${x.paid_by}` : ""}` : x.due ? `, due ${x.due}${x.days_left != null && x.days_left < 0 ? ` (${-x.days_left} days late)` : ""}` : ", no due date") +
+      `\n  - File: \`${x.mac_path}\`` +
+      (x.state !== "paid" ? (x.viewed ? `\n  - Opened by ${x.viewed}` : "\n  - Not opened by the client yet") : "")).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Changes requested (${changes.length})\n`;
     md += changes.length ? changes.map((f) => `\n- ${file(f)}\n  - Requested by ${f.requested_by}, ${f.at}${f.comments.length ? "\n  - Comments:\n" + cm(f.comments) : "\n  - No comment left. Ask what to change."}`).join("\n") + "\n" : "\nNone.\n";
     md += `\n### Said no, do not use (${saidNo.length})\n`;
@@ -629,7 +644,7 @@ async function buildFeed(env: Env) {
 /** Writes the feed if anything changed since the last one (or always, when forced). */
 async function writeFeed(env: Env, force = false) {
   const sig = await env.DB.prepare(
-    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) || '-' || (SELECT IFNULL(MAX(updated_at),0) || COUNT(*) FROM copy_items) || '-' || (SELECT COUNT(*) FROM copy_campaigns) || '-' || (SELECT IFNULL(MAX(id),0) FROM campaign_events) || '-' || (SELECT COUNT(*) || IFNULL(SUM(gone),0) || IFNULL(MAX(last_sig),'') FROM campaign_summaries) || '-' || (SELECT IFNULL(SUM(views),0) FROM results_views) AS s",
+    "SELECT (SELECT IFNULL(MAX(id),0) FROM activity) || '-' || (SELECT COUNT(*) FROM comments) || '-' || (SELECT IFNULL(SUM(resolved),0) FROM comments) || '-' || (SELECT COUNT(*) FROM hidden) || '-' || (SELECT COUNT(*) FROM campaign_items) || '-' || (SELECT IFNULL(MAX(updated_at),0) || COUNT(*) FROM copy_items) || '-' || (SELECT COUNT(*) FROM copy_campaigns) || '-' || (SELECT IFNULL(MAX(id),0) FROM campaign_events) || '-' || (SELECT COUNT(*) || IFNULL(SUM(gone),0) || IFNULL(MAX(last_sig),'') FROM campaign_summaries) || '-' || (SELECT IFNULL(SUM(views),0) FROM results_views) || '-' || (SELECT COUNT(*) || IFNULL(MAX(updated_at),0) || IFNULL(MAX(last_viewed),0) FROM invoices) AS s",
   ).first<{ s: string }>();
   const last = await env.DB.prepare("SELECT value FROM notify_state WHERE key = 'feed_sig'").first<{ value: string }>();
   if (!force && last && sig && last.value === sig.s) return { written: false };
@@ -876,12 +891,14 @@ async function markViewed(env: Env, slug: string, email: string, paths: string[]
 
 async function listDir(env: Env, user: User, c: Client, dir: string) {
   const segs = cleanPath(dir, true);
+  // Invoices are shown on the Invoices tab only, never as project files (no NEW badges or alerts).
+  if (segs[0] === INVOICES_DIR) throw new HttpError(404, "Invoices are on the Invoices tab.");
   const entries = await listNas(env, c.folder, segs);
   const prefix = segs.length ? segs.join("/") + "/" : "";
 
   const folders = entries
     // The Results folder holds Claude's analytics files: shown on the Results tab, not as a project.
-    .filter((e) => e.type === "directory" && !(segs.length === 0 && e.name === RESULTS_DIR))
+    .filter((e) => e.type === "directory" && !(segs.length === 0 && (e.name === RESULTS_DIR || e.name === INVOICES_DIR)))
     .map((e) => ({ name: e.name, path: prefix + e.name, mtime: e.mtime ?? null }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1369,6 +1386,12 @@ async function route(req: Request, env: Env): Promise<Response> {
       }
     }
     throw new HttpError(405, "Method not allowed.");
+  }
+
+  // ---- Invoices ----------------------------------------------------------------
+  {
+    const r = await invoiceRoutes(env, user, req, url, path, method);
+    if (r) return r;
   }
 
   // ---- Results (campaign analytics) ------------------------------------------
@@ -2286,6 +2309,7 @@ function itemLink(env: Env, slug: string, path: string) {
   const base = (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
   if (path.startsWith("copy:")) return `${base}/#/c/${encodeURIComponent(slug)}/copy`;
   if (ANALYTICS_FILE.test(path)) return `${base}/#/c/${encodeURIComponent(slug)}/results/${encodeURIComponent(path.split("/").pop() || path)}`;
+  if (path.startsWith(INVOICES_DIR + "/")) return `${base}/#/c/${encodeURIComponent(slug)}/invoices`;
   if (SUMMARY_FILE.test(path)) {
     const dir = path.split("/").slice(0, -1).join("/");
     return `${base}/#/c/${encodeURIComponent(slug)}${dir ? "/f/" + encodeURIComponent(dir) : ""}`;
@@ -2458,6 +2482,7 @@ async function scanClients(env: Env) {
           else if (e.type === "file" && SUMMARY_FILE.test(e.name)) summaries.push([...segs, e.name].join("/"));
           else if (e.type === "file" && ANALYTICS_FILE.test(e.name)) continue; // Results files are not "new work"
           else if (e.type === "file") found.push([...segs, e.name].join("/"));
+          else if (segs.length === 0 && e.name === INVOICES_DIR) continue; // invoices are not "new work"
           else if (segs.length < 3) next.push([...segs, e.name]);
         }
       }
@@ -3278,6 +3303,219 @@ function resultsReportPdf(r: Results, c: Client, tz: string | null) {
   pdf.para(M, footY + 2, `${sales}Meta and Shopify can count sales differently; Shopify orders are the actual sales.`, 7.5, C.muted, W, { maxLines: 2, lead: 10 });
   pdf.text(M, 792 - M + 4, `Made by Genvyd for ${c.name}. clients.genvyd.com`, 7, C.muted);
   return pdf.toBytes();
+}
+
+// ---------------------------------------------------------------------------
+// Invoices. Genvyd saves each invoice as a PDF in "<client folder>/Invoices/", ideally named with
+// its number, amount and due date ("INV-1001 Website build $1,250 due 2026-12-01.pdf"). The portal
+// reads the folder, fills in what the name leaves out from the `invoices` table (typed in on the
+// Invoices tab), and adds paid / void and the card payment link. Brief: synology/INVOICE_FILES.md.
+// ---------------------------------------------------------------------------
+
+const INVOICES_DIR = "Invoices";
+const INVOICE_FILE = /\.pdf$/i;
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const PAY_METHODS = ["check", "card", "bank transfer", "cash", "other"];
+
+type InvoiceRow = {
+  client_slug: string; path: string; number: string | null; amount_cents: number | null; issued: string | null;
+  due: string | null; description: string | null; pay_link: string | null; status: "open" | "paid" | "void";
+  paid_on: string | null; paid_method: string | null; paid_note: string | null; first_seen: number | null;
+  first_viewed: number | null; first_viewed_by: string | null; last_viewed: number | null; updated_by: string | null; updated_at: number | null;
+};
+
+/** What a file name says: "INV-1001 Website build $1,250.00 due 2026-12-01.pdf". Any part may be missing. */
+function parseInvoiceName(name: string) {
+  let rest = name.replace(INVOICE_FILE, "");
+  const take = (re: RegExp) => { const m = rest.match(re); if (m) rest = rest.replace(m[0], " "); return m; };
+  const due = take(/\bdue[\s_:-]*(\d{4}-\d{2}-\d{2})\b/i)?.[1] ?? null;
+  const issued = take(/\b(?:issued|dated?)[\s_:-]*(\d{4}-\d{2}-\d{2})\b/i)?.[1] ?? null;
+  const amt = take(/\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?/);
+  const amount = amt ? Number(amt[1].replace(/,/g, "")) * 100 + Number((amt[2] ?? "0").padEnd(2, "0")) : null;
+  const num = take(/\b(?:inv(?:oice)?)[\s#._-]*(?:no\.?|number)?[\s#._-]*([A-Za-z0-9][A-Za-z0-9-]{0,24})/i);
+  const number = num ? num[1] : null;
+  const description = rest.replace(/[_]+/g, " ").replace(/\s*[-·|,]\s*(?=[-·|,]|$)/g, " ").replace(/^[\s\-·|,]+|[\s\-·|,]+$/g, "").replace(/\s{2,}/g, " ").trim() || null;
+  return { number, amount, due, issued, description };
+}
+
+/** Today in Phoenix as YYYY-MM-DD (Arizona has no daylight saving: always UTC-7). */
+const phxDay = (t = now()) => new Date(t - 7 * 3600 * 1000).toISOString().slice(0, 10);
+const dayDiff = (a: string, b: string) => Math.round((Date.parse(a + "T00:00:00Z") - Date.parse(b + "T00:00:00Z")) / 86400000);
+
+type PaySettings = { payableTo: string; address: string; note: string; cardFee: boolean; feePct: number; feeFixedCents: number; feeCapPct: number };
+const PAY_DEFAULTS: PaySettings = { payableTo: "", address: "", note: "", cardFee: true, feePct: 2.9, feeFixedCents: 30, feeCapPct: 3 };
+
+async function loadPaySettings(env: Env): Promise<PaySettings> {
+  const r = await env.DB.prepare("SELECT value FROM portal_settings WHERE key = 'pay'").first<{ value: string }>();
+  try { return { ...PAY_DEFAULTS, ...(r ? JSON.parse(r.value) : {}) }; } catch { return { ...PAY_DEFAULTS }; }
+}
+
+/**
+ * The card service fee: enough that, after Stripe takes its percentage and fixed fee from the
+ * whole card payment, Genvyd still receives the invoice amount. Never more than feeCapPct of the
+ * invoice (card network rules cap surcharges at 3%, and they may not be more than the real cost).
+ */
+function cardFeeCents(amount: number, s: PaySettings) {
+  if (!s.cardFee || !(amount > 0)) return 0;
+  const gross = Math.ceil((amount + s.feeFixedCents) / (1 - s.feePct / 100));
+  return Math.max(0, Math.min(gross - amount, Math.floor((amount * s.feeCapPct) / 100)));
+}
+
+function invoiceView(row: InvoiceRow | undefined, file: { name: string; size?: number; mtime?: string } | null, path: string, pay: PaySettings, today = phxDay()) {
+  const name = path.split("/").pop() || path;
+  const p = parseInvoiceName(name);
+  const amount = row?.amount_cents ?? p.amount;
+  const due = row?.due ?? p.due;
+  const issued = row?.issued ?? p.issued ?? (file?.mtime ? phxDay(Date.parse(file.mtime)) : null);
+  const status = row?.status ?? "open";
+  const daysLeft = due ? dayDiff(due, today) : null;
+  const state = status === "paid" ? "paid" : status === "void" ? "void"
+    : daysLeft == null ? "due" : daysLeft < 0 ? "overdue" : daysLeft <= 7 ? "due_soon" : "due";
+  const fee = amount != null && status === "open" ? cardFeeCents(amount, pay) : 0;
+  return {
+    file: name, path, size: file?.size ?? null, onFile: !!file,
+    number: row?.number ?? p.number, amount, due, issued, description: row?.description ?? p.description,
+    payLink: row?.pay_link ?? null, status, state, daysLeft,
+    paidOn: row?.paid_on ?? null, paidMethod: row?.paid_method ?? null, paidNote: row?.paid_note ?? null,
+    cardFee: fee, cardTotal: amount != null ? amount + fee : null,
+    firstSeen: row?.first_seen ?? null, viewed: row?.first_viewed ? { by: row.first_viewed_by, at: row.first_viewed, last: row.last_viewed } : null,
+    missing: [amount == null ? "amount" : "", due ? "" : "due date", (row?.number ?? p.number) ? "" : "invoice number"].filter(Boolean),
+  };
+}
+type Invoice = ReturnType<typeof invoiceView>;
+const INVOICE_RANK: Record<string, number> = { overdue: 0, due_soon: 1, due: 2, paid: 3, void: 4 };
+function sortInvoices(list: Invoice[]) {
+  return list.sort((a, b) => INVOICE_RANK[a.state] - INVOICE_RANK[b.state]
+    || (a.status === "open" ? String(a.due ?? "9999").localeCompare(String(b.due ?? "9999")) : String(b.paidOn ?? b.issued ?? "").localeCompare(String(a.paidOn ?? a.issued ?? ""))));
+}
+
+/** Every invoice for one client. Genvyd's first visit makes the Invoices folder if it is missing. */
+async function loadInvoices(env: Env, user: User, c: Client, pay?: PaySettings) {
+  pay = pay ?? await loadPaySettings(env);
+  let entries: NasEntry[] = [];
+  try {
+    entries = await listNas(env, c.folder, [INVOICES_DIR]);
+  } catch (err) {
+    if (!(err instanceof HttpError && err.status === 404)) throw err;
+    if (user.admin) { try { await makeNasFolder(env, user, [c.folder, INVOICES_DIR]); } catch { /* shown as empty */ } }
+  }
+  const files = entries.filter((e) => e.type === "file" && INVOICE_FILE.test(e.name)).slice(0, 200);
+  const rows = (await env.DB.prepare("SELECT * FROM invoices WHERE client_slug = ?").bind(c.slug).all<InvoiceRow>()).results;
+  const byPath = new Map(rows.map((r) => [r.path, r]));
+  const fresh = files.filter((f) => !byPath.has(`${INVOICES_DIR}/${f.name}`));
+  if (fresh.length) {
+    const t = now();
+    await env.DB.batch(fresh.map((f) => env.DB.prepare("INSERT OR IGNORE INTO invoices (client_slug, path, first_seen) VALUES (?, ?, ?)").bind(c.slug, `${INVOICES_DIR}/${f.name}`, t)));
+    for (const f of fresh) byPath.set(`${INVOICES_DIR}/${f.name}`, { status: "open", first_seen: t } as InvoiceRow);
+  }
+  const today = phxDay();
+  const invoices = sortInvoices(files.map((f) => invoiceView(byPath.get(`${INVOICES_DIR}/${f.name}`), f, `${INVOICES_DIR}/${f.name}`, pay!, today)));
+  const open = invoices.filter((i) => i.status === "open");
+  return {
+    invoices,
+    totals: {
+      outstanding: open.reduce((n, i) => n + (i.amount ?? 0), 0),
+      overdue: open.filter((i) => i.state === "overdue").reduce((n, i) => n + (i.amount ?? 0), 0),
+      open: open.length,
+    },
+    pay: { payableTo: pay.payableTo, address: pay.address, note: pay.note, cardFee: pay.cardFee, feePct: pay.feePct, feeFixedCents: pay.feeFixedCents, feeCapPct: pay.feeCapPct },
+    contact: clientReplyTo(env) ?? null,
+    macFolder: user.admin ? `${MAC_SHARE}/${c.folder}/${INVOICES_DIR}` : undefined,
+  };
+}
+
+const money = (cents: number | null) => cents == null ? "amount not set" : "$" + (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function invoiceFileName(v: unknown) {
+  const f = String(v ?? "");
+  if (!INVOICE_FILE.test(f) || f.includes("/") || f.includes("\\") || /^[.@#]/.test(f) || f.length > 240) throw new HttpError(400, "Which invoice?");
+  return f;
+}
+
+async function invoiceRoutes(env: Env, user: User, req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+  if (path === "/api/admin/invoice-settings") {
+    if (!user.admin) throw new HttpError(403, "Admins only.");
+    if (method === "GET") return json(await loadPaySettings(env));
+    if (method === "POST") {
+      const b = await readBody(req);
+      const num = (v: unknown, lo: number, hi: number, d: number) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+      const s: PaySettings = {
+        payableTo: String(b.payableTo ?? "").trim().slice(0, 120),
+        address: String(b.address ?? "").trim().slice(0, 400),
+        note: String(b.note ?? "").trim().slice(0, 400),
+        cardFee: b.cardFee !== false,
+        feePct: num(b.feePct, 0, 10, PAY_DEFAULTS.feePct),
+        feeFixedCents: Math.round(num(b.feeFixedCents, 0, 500, PAY_DEFAULTS.feeFixedCents)),
+        feeCapPct: num(b.feeCapPct, 0, 10, PAY_DEFAULTS.feeCapPct),
+      };
+      await env.DB.prepare("INSERT INTO portal_settings (key, value, updated_by, updated_at) VALUES ('pay', ?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at")
+        .bind(JSON.stringify(s), user.email, now()).run();
+      return json(s);
+    }
+    throw new HttpError(405, "Method not allowed.");
+  }
+  if (path === "/api/admin/invoices" && method === "GET") {
+    if (!user.admin) throw new HttpError(403, "Admins only.");
+    const all = (await env.DB.prepare("SELECT slug, name, folder FROM clients ORDER BY name").all<Client>()).results;
+    const pay = await loadPaySettings(env);
+    const out: (Invoice & { client: { slug: string; name: string } })[] = [];
+    for (const c of all.slice(0, 20)) {
+      try { for (const i of (await loadInvoices(env, user, c, pay)).invoices) out.push({ ...i, client: { slug: c.slug, name: c.name } }); }
+      catch { /* that client's folder is unreachable right now */ }
+    }
+    sortInvoices(out);
+    const open = out.filter((i) => i.status === "open");
+    return json({
+      invoices: out,
+      totals: { outstanding: open.reduce((n, i) => n + (i.amount ?? 0), 0), overdue: open.filter((i) => i.state === "overdue").reduce((n, i) => n + (i.amount ?? 0), 0), open: open.length },
+      settingsMissing: !pay.payableTo || !pay.address,
+    });
+  }
+  const m = path.match(/^\/api\/c\/([^/]+)\/invoices(?:\/(view|edit|status))?$/);
+  if (!m) return null;
+  const c = await requireClient(env, user, decodeURIComponent(m[1]));
+  const sub = m[2];
+  if (!sub && method === "GET") return json(await loadInvoices(env, user, c));
+  if (method !== "POST") throw new HttpError(405, "Method not allowed.");
+  const b = await readBody(req);
+  const file = invoiceFileName(b.file);
+  const p = `${INVOICES_DIR}/${file}`;
+  const t = now();
+  // Every write first makes sure the row exists (the file may not have been listed yet).
+  const ensure = env.DB.prepare("INSERT OR IGNORE INTO invoices (client_slug, path, first_seen) VALUES (?, ?, ?)").bind(c.slug, p, t);
+  if (sub === "view") {
+    if (!user.admin) {
+      await env.DB.batch([ensure, env.DB.prepare(
+        "UPDATE invoices SET first_viewed = COALESCE(first_viewed, ?), first_viewed_by = COALESCE(first_viewed_by, ?), last_viewed = ? WHERE client_slug = ? AND path = ?",
+      ).bind(t, user.email, t, c.slug, p)]);
+    }
+    return json({ ok: true });
+  }
+  if (!user.admin) throw new HttpError(403, "Only Genvyd can change invoices.");
+  if (sub === "edit") {
+    const day = (v: unknown, label: string) => { const s = String(v ?? "").trim(); if (!s) return null; if (!DAY_RE.test(s) || isNaN(Date.parse(s))) throw new HttpError(400, `${label} should look like 2026-12-01.`); return s; };
+    const txt = (v: unknown, n: number) => String(v ?? "").trim().slice(0, n) || null;
+    let amount: number | null = null;
+    const a = String(b.amount ?? "").replace(/[$,\s]/g, "");
+    if (a) { if (!/^\d+(\.\d{1,2})?$/.test(a)) throw new HttpError(400, "Amount should be a number like 1250 or 1250.00."); amount = Math.round(Number(a) * 100); }
+    const link = txt(b.payLink, 500);
+    if (link) { let u: URL; try { u = new URL(link); } catch { throw new HttpError(400, "That payment link is not a web address."); } if (u.protocol !== "https:") throw new HttpError(400, "The payment link must start with https://"); }
+    await env.DB.batch([ensure, env.DB.prepare(
+      "UPDATE invoices SET number = ?, amount_cents = ?, issued = ?, due = ?, description = ?, pay_link = ?, updated_by = ?, updated_at = ? WHERE client_slug = ? AND path = ?",
+    ).bind(txt(b.number, 40), amount, day(b.issued, "Issued date"), day(b.due, "Due date"), txt(b.description, 200), link, user.email, t, c.slug, p)]);
+    return json({ ok: true });
+  }
+  if (sub === "status") {
+    const st = String(b.status ?? "");
+    if (!["open", "paid", "void"].includes(st)) throw new HttpError(400, "Pick paid, unpaid or void.");
+    const paidOn = st === "paid" ? (DAY_RE.test(String(b.paidOn ?? "")) ? String(b.paidOn) : phxDay()) : null;
+    const meth = st === "paid" ? (PAY_METHODS.includes(String(b.method ?? "")) ? String(b.method) : "other") : null;
+    await env.DB.batch([ensure, env.DB.prepare(
+      "UPDATE invoices SET status = ?, paid_on = ?, paid_method = ?, paid_note = ?, updated_by = ?, updated_at = ? WHERE client_slug = ? AND path = ?",
+    ).bind(st, paidOn, meth, st === "open" ? null : String(b.note ?? "").trim().slice(0, 300) || null, user.email, t, c.slug, p)]);
+    return json({ ok: true });
+  }
+  throw new HttpError(405, "Method not allowed.");
 }
 
 export default {

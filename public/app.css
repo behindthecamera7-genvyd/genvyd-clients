@@ -451,7 +451,7 @@ label.check input { width: auto; }
 .cc-chip.warn { color: var(--warn); border-color: rgba(255, 176, 32, 0.5); }
 .cc-chip.ok { color: var(--ok); border-color: rgba(61, 220, 132, 0.45); }
 .cc-links { display: flex; flex-wrap: wrap; border-top: 1px solid var(--line); }
-.cc-links a { flex: 1; text-align: center; padding: 11px 6px; font-size: 13px; color: var(--smoke); }
+.cc-links a { flex: 1 1 auto; text-align: center; padding: 11px 6px; font-size: 13px; white-space: nowrap; color: var(--smoke); }
 .cc-links a + a { border-left: 1px solid var(--line); }
 .cc-links a:hover { color: var(--bone); background: var(--surface-2); }
 .topnav a { white-space: nowrap; }
@@ -907,3 +907,65 @@ img.car-mini { width: 100%; height: 100%; object-fit: cover; display: block; opa
 .tc-help p { margin: 0; font-size: 13px; }
 .tc-check { align-items: flex-start; gap: 8px; min-height: 44px; line-height: 1.35; }
 .tc-check input { width: 20px; height: 20px; flex: 0 0 20px; accent-color: var(--accent); }
+
+/* ---- Invoices ---- */
+.inv-list { display: grid; gap: 16px; }
+.inv-card { padding: 20px 22px; }
+.inv-card-overdue { border: 2px solid var(--accent); }
+.inv-card-paid, .inv-card-void { opacity: 0.8; }
+.inv-top { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; }
+.inv-name { min-width: 0; }
+.inv-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.inv-title-row h3 { margin: 0; font: 700 20px var(--display); overflow-wrap: anywhere; }
+.inv-when { font-size: 12px; margin-top: 6px; }
+.inv-amount { font: 700 28px/1.1 var(--display); color: var(--bone); white-space: nowrap; }
+.inv-amount.struck { text-decoration: line-through; color: var(--smoke); }
+.inv-pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font: 600 12px var(--mono); letter-spacing: 0.03em; border: 1px solid var(--line); white-space: nowrap; }
+.inv-due { color: var(--bone); }
+.inv-due_soon { color: var(--warn); border-color: rgba(255, 176, 32, 0.6); }
+.inv-overdue { background: var(--accent); border-color: var(--accent); color: #fff; }
+.inv-paid { color: var(--ok); border-color: rgba(61, 220, 132, 0.5); }
+.inv-void { color: var(--smoke); }
+.inv-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.inv-admin-note { font-size: 12px; margin-top: 10px; }
+.inv-warn { color: var(--warn); }
+.inv-ways { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 18px; }
+.inv-way { background: var(--surface-2); border: 1px solid var(--line); border-radius: 18px; padding: 16px 18px; }
+.inv-way p { margin: 10px 0 0; font-size: 14px; }
+.inv-way-missing { border: 1px dashed rgba(255, 176, 32, 0.6); color: var(--ash); font-size: 14px; }
+.inv-way-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; font-size: 16px; }
+.inv-tag { font: 600 12px var(--mono); padding: 3px 9px; border-radius: 999px; }
+.inv-tag.ok { color: var(--ok); background: rgba(61, 220, 132, 0.12); }
+.inv-tag.warn { color: var(--warn); background: rgba(255, 176, 32, 0.12); }
+.inv-addr { font-size: 15px; color: var(--bone); }
+.inv-addr .mono { font-size: 11px; margin-bottom: 2px; }
+.inv-pay { width: 100%; justify-content: center; margin-top: 12px; }
+.inv-ask { margin: 16px 0 0; }
+.inv-form { margin-top: 16px; padding: 16px; border-radius: 16px; background: var(--surface-2); display: grid; gap: 12px; }
+.inv-form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.inv-field { display: grid; gap: 4px; }
+.inv-field .mono { font-size: 11px; }
+.inv-field input, .inv-field select, .inv-field textarea { width: 100%; box-sizing: border-box; background: var(--void, #000); color: var(--bone); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font: 15px var(--sans); }
+.inv-check { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.inv-form-btns { display: flex; gap: 8px; }
+.inv-err { color: var(--accent); margin: 0; }
+.inv-settings { padding: 14px 18px; margin-bottom: 16px; }
+.inv-settings summary { cursor: pointer; }
+.inv-howto { padding: 14px 18px; margin-bottom: 16px; font-size: 14px; overflow-wrap: anywhere; }
+.inv-howto code { font-size: 12px; }
+.inv-allpaid { padding: 18px 20px; margin-bottom: 16px; }
+.inv-stats { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.sum-banner.bad { background: rgba(255, 42, 42, 0.12); border: 2px solid var(--accent); }
+.sum-banner.bad .sum-banner-badge { background: var(--accent); color: #fff; }
+.sum-banner.bad .sum-banner-go { color: var(--accent); }
+.inv-banner + .inv-banner { margin-top: 8px; }
+.inv-admin-row { grid-template-columns: 96px minmax(0, 1.4fr) auto minmax(0, 1fr) auto; }
+.inv-admin-row .inv-pill { justify-self: start; }
+.inv-admin-row.dim { opacity: 0.6; }
+@media (max-width: 640px) {
+  .inv-top { flex-direction: column; gap: 8px; }
+  .inv-ways { grid-template-columns: minmax(0, 1fr); }
+  .inv-btns .btn { flex: 1 1 auto; }
+  .inv-admin-row { grid-template-columns: 84px minmax(0, 1fr) auto; }
+  .inv-admin-row > :nth-child(n+4) { grid-column: 2 / -1; }
+}

@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only), 0014 campaign_summaries.covered, 0015 results_views. All keep existing data.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only), 0014 campaign_summaries.covered, 0015 results_views, 0016 invoices + portal_settings. All keep existing data.
 
 ## Roles
 
@@ -348,6 +348,26 @@ dashboard `resultsAdminList()` sortable by spend or end date. Identity colors pe
 the light ones with darker text shades for AA contrast. Comments and links on an analytics path open the
 results page (`viewItem()` redirect, `itemLink()`); the feed lists them under "Campaign results" with
 "Results viewed" lines.
+
+## Invoices
+
+Brief: `synology/INVOICE_FILES.md`. PDFs in `<client folder>/Invoices/` (admin's first visit MKCOLs it).
+The folder is hidden from the root listing, `listDir()` refuses it (404, so its files are never registered
+as new work) and `scanClients()` skips it. `parseInvoiceName()` reads number, `$amount`, `due YYYY-MM-DD`
+and `issued YYYY-MM-DD` from the file name; the `invoices` table (migration 0016, keyed client_slug + path)
+holds overrides typed in with Edit details, `pay_link`, status open / paid / void, paid_on / paid_method /
+paid_note, and first_viewed (clients only, on View or Download). `invoiceView()` merges them and works out
+`state` (overdue / due_soon within 7 days / due / paid / void, by Phoenix date) and the card fee
+(`cardFeeCents()`: gross-up for Stripe's percent + fixed fee so Genvyd nets the invoice amount, capped
+at `feeCapPct`, default 3%). Studio-wide `portal_settings` key `pay`: payableTo, address, note, cardFee,
+feePct, feeFixedCents, feeCapPct (admin "Payment details" box on any Invoices tab).
+Routes: `GET /api/c/:slug/invoices`, `POST /invoices/view` {file}, admin `POST /invoices/edit`
+{file, number, amount, issued, due, description, payLink (https)}, `POST /invoices/status`
+{file, status, paidOn, method, note}, `GET|POST /api/admin/invoice-settings`, `GET /api/admin/invoices`.
+UI: Invoices tab (`viewInvoices()`, `invoiceCard()`, `payOptions()`: check first with "No fee", card
+with the fee shown before the button), client home banners (`invoicesHome()`, red when overdue),
+dashboard list (`invoicesAdminList()`, overdue first, unpaid total). Feed: "Invoices" section per client.
+Renaming a PDF in Finder detaches its D1 row (paid status follows the file name).
 
 ## Claude feed
 

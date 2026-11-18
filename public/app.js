@@ -134,6 +134,7 @@
       tab("campaigns", "Campaigns", `#/c/${enc(slug)}/campaigns`),
       tab("copy", "Ad review", `#/c/${enc(slug)}/copy`),
       tab("results", "Results", `#/c/${enc(slug)}/results`),
+      tab("invoices", "Invoices", `#/c/${enc(slug)}/invoices`),
     );
   }
   // On a phone the tabs scroll sideways: keep the current one in view.
@@ -449,7 +450,8 @@
           h("a", { href: `#/c/${enc(c.slug)}` }, "Projects"),
           h("a", { href: `#/c/${enc(c.slug)}/campaigns` }, "Campaigns"),
           h("a", { href: `#/c/${enc(c.slug)}/copy` }, "Ad review"),
-          h("a", { href: `#/c/${enc(c.slug)}/favorites` }, "Favorites")),
+          h("a", { href: `#/c/${enc(c.slug)}/favorites` }, "Favorites"),
+          h("a", { href: `#/c/${enc(c.slug)}/invoices` }, "Invoices")),
       );
     });
 
@@ -459,6 +461,7 @@
       changesCount ? h("p", { class: "muted", style: "margin:-6px 0 14px" }, "What each client asked for, newest first. Upload the fix as a new version and it moves to Sent back.") : null,
       changesBox,
       resultsAdminList(),
+      invoicesAdminList(),
       h("div", { class: "dash-h mono muted", style: "font-size:12px;margin:32px 0 12px" }, "YOUR CLIENTS"),
       h("div", { class: "grid client-grid" }, clientCards.length ? clientCards : h("div", { class: "card empty muted" }, "No clients yet. Add one on the Admin page.")),
       h("div", { class: "stats", style: "margin-top:28px" },
@@ -581,6 +584,7 @@
         h("div", { class: "actions" }, newFolderBtn, uploadBtn),
       ),
       uploadPanel,
+      dir ? null : invoicesHome(slug),
       dir ? null : campaignBanner(slug),
       dir ? null : resultsHome(slug),
       // Campaign summaries in this folder are pinned above everything else.
@@ -951,6 +955,207 @@
             : h("span", {}, "Your campaign ", h("strong", {}, s.campaign), s.status === "changed" ? " changed after you approved it and needs your approval again" : " needs your approval")),
           h("span", { class: "sum-banner-go" }, "Review →"));
       }));
+    }).catch(() => box.remove());
+    return box;
+  }
+
+  // ---- Invoices -------------------------------------------------------------------------
+  // PDFs in the client's "Invoices" folder on the Synology. The server reads the number, amount
+  // and due date from each file name (or what Genvyd typed in) and adds paid / void and the card
+  // payment link. Clients see how to pay: check (no fee) or card (service fee shown up front).
+  const invMoney = (c) => (c == null ? "Amount not set" : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const invDay = (d) => (d ? new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "");
+  const invTitle = (i) => (i.number ? `Invoice ${i.number}` : i.file.replace(/\.pdf$/i, ""));
+  const invPhx = () => new Date(Date.now() - 7 * 3600 * 1000).toISOString().slice(0, 10);
+  function invWhen(i) {
+    if (i.state === "paid") return `Paid ${invDay(i.paidOn)}${i.paidMethod ? ` by ${i.paidMethod}` : ""}`;
+    if (i.state === "void") return "Cancelled, nothing to pay";
+    if (!i.due) return "No due date";
+    if (i.daysLeft < 0) return `Was due ${invDay(i.due)} · ${-i.daysLeft} day${i.daysLeft === -1 ? "" : "s"} late`;
+    if (i.daysLeft === 0) return "Due today";
+    if (i.daysLeft === 1) return "Due tomorrow";
+    return `Due ${invDay(i.due)} · in ${i.daysLeft} days`;
+  }
+  function invPill(i) {
+    const label = { overdue: "Overdue", due_soon: "Due soon", due: "Due", paid: "Paid", void: "Void" }[i.state];
+    return h("span", { class: "inv-pill inv-" + i.state }, label);
+  }
+  const invSeen = (slug, i) => { if (!state.me.admin) api("POST", `/api/c/${enc(slug)}/invoices/view`, { file: i.file }).catch(() => {}); };
+
+  // How to pay: check first (no fee), card second with the fee shown before they click.
+  function payOptions(slug, i, d) {
+    const p = d.pay;
+    const admin = state.me.admin;
+    const ref = i.number ? `invoice ${i.number}` : `"${i.file.replace(/\.pdf$/i, "")}"`;
+    const check = p.payableTo && p.address
+      ? h("div", { class: "inv-way" },
+          h("div", { class: "inv-way-head" }, h("strong", {}, "Pay by check"), h("span", { class: "inv-tag ok" }, "No fee")),
+          h("div", { class: "inv-addr" },
+            h("div", { class: "mono muted" }, "MAKE IT OUT TO"), h("div", {}, p.payableTo),
+            h("div", { class: "mono muted", style: "margin-top:10px" }, "MAIL IT TO"), h("div", { style: "white-space:pre-line" }, p.address)),
+          h("p", { class: "muted" }, `Please write ${ref} on the memo line.`, p.note ? " " + p.note : ""))
+      : admin ? h("div", { class: "inv-way inv-way-missing" }, h("strong", {}, "Check details are not set."), " Clients can't see how to mail a check until you add who to make it out to and the mailing address in Payment details below.") : null;
+    const card = i.payLink
+      ? h("div", { class: "inv-way" },
+          h("div", { class: "inv-way-head" }, h("strong", {}, "Pay by card"), i.cardFee ? h("span", { class: "inv-tag warn" }, `+ ${invMoney(i.cardFee)} card fee`) : h("span", { class: "inv-tag ok" }, "No fee")),
+          i.cardFee ? h("p", { class: "muted" }, `Card payments include a service fee of ${invMoney(i.cardFee)} to cover the card processor's charge. Paying by check avoids it.`) : null,
+          h("a", { class: "btn primary inv-pay", href: i.payLink, target: "_blank", rel: "noopener", onclick: () => invSeen(slug, i) }, `Pay ${invMoney(i.cardTotal)} by card`),
+          h("p", { class: "mono muted", style: "font-size:11px;margin:8px 0 0" }, "Opens a secure Stripe checkout page."))
+      : admin ? h("div", { class: "inv-way inv-way-missing" }, h("strong", {}, "No card payment link."), ` To offer card payment, make a Stripe payment link for ${invMoney(i.cardTotal)}${i.cardFee ? ` (the invoice plus the ${invMoney(i.cardFee)} fee)` : ""} and paste it in Edit details.`) : null;
+    if (!check && !card) return h("p", { class: "muted inv-ask" }, "Questions about paying? Email ", d.contact ? h("a", { href: `mailto:${d.contact}?subject=${enc(invTitle(i))}` }, d.contact) : "Genvyd", ".");
+    return h("div", { class: "inv-ways" }, check, card);
+  }
+
+  function invoiceCard(slug, i, d, reload) {
+    const admin = state.me.admin;
+    const tools = h("div", { class: "inv-tools" });
+    const form = (fields, saveLabel, onSave) => {
+      const err = h("p", { class: "inv-err", hidden: true });
+      const f = h("form", { class: "inv-form", onsubmit: async (e) => {
+        e.preventDefault();
+        const btn = f.querySelector("button[type=submit]"); btn.disabled = true; err.hidden = true;
+        try { await onSave(Object.fromEntries(new FormData(f))); reload(); }
+        catch (x) { err.textContent = x.message; err.hidden = false; btn.disabled = false; }
+      } }, fields, err,
+        h("div", { class: "inv-form-btns" }, h("button", { class: "btn small primary", type: "submit" }, saveLabel), h("button", { class: "btn small", type: "button", onclick: () => fill(tools) }, "Cancel")));
+      fill(tools, f);
+      f.querySelector("input,select")?.focus();
+    };
+    const field = (label, name, value, attrs = {}) => h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, label), h("input", { name, value: value ?? "", ...attrs }));
+    const post = (sub, body) => api("POST", `/api/c/${enc(slug)}/invoices/${sub}`, { file: i.file, ...body });
+    const edit = () => form([
+      h("p", { class: "muted", style: "margin:0 0 10px" }, "Fill in anything the file name leaves out. Leave a box empty to use what the file name says."),
+      h("div", { class: "inv-form-grid" },
+        field("INVOICE NUMBER", "number", i.number), field("AMOUNT ($)", "amount", i.amount != null ? (i.amount / 100).toFixed(2) : "", { inputmode: "decimal", placeholder: "1250.00" }),
+        field("ISSUED", "issued", i.issued, { type: "date" }), field("DUE", "due", i.due, { type: "date" })),
+      field("WHAT IT IS FOR", "description", i.description, { placeholder: "Website build, October ads..." }),
+      field(`CARD PAYMENT LINK (Stripe, for ${invMoney(i.cardTotal)})`, "payLink", i.payLink, { type: "url", placeholder: "https://buy.stripe.com/..." }),
+    ], "Save", (v) => post("edit", v));
+    const markPaid = () => form([
+      h("div", { class: "inv-form-grid" },
+        h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "PAID BY"),
+          h("select", { name: "method" }, ["check", "card", "bank transfer", "cash", "other"].map((m) => h("option", { value: m }, m[0].toUpperCase() + m.slice(1))))),
+        field("PAID ON", "paidOn", invPhx(), { type: "date" })),
+      field("NOTE (OPTIONAL, ONLY YOU SEE IT)", "note", "", { placeholder: "Check #1042" }),
+    ], "Mark paid", (v) => post("status", { status: "paid", paidOn: v.paidOn, method: v.method, note: v.note }));
+    const setStatus = async (status) => { try { await post("status", { status }); reload(); } catch (x) { toast(x.message); } };
+
+    return h("div", { class: "card inv-card inv-card-" + i.state },
+      h("div", { class: "inv-top" },
+        h("div", { class: "inv-name" },
+          h("div", { class: "inv-title-row" }, h("h3", {}, invTitle(i)), invPill(i)),
+          i.description ? h("div", { class: "muted" }, i.description) : null,
+          h("div", { class: "mono muted inv-when" }, invWhen(i), i.issued ? ` · Issued ${invDay(i.issued)}` : "")),
+        h("div", { class: "inv-amount" + (i.status === "void" ? " struck" : "") }, invMoney(i.amount))),
+      h("div", { class: "inv-btns" },
+        h("a", { class: "btn small", href: mediaUrl(slug, i.path), target: "_blank", rel: "noopener", onclick: () => invSeen(slug, i) }, "View invoice"),
+        h("button", { class: "btn small", type: "button", onclick: () => { invSeen(slug, i); saveFile(mediaUrl(slug, i.path), i.file); } }, "↓ Download"),
+        admin ? [
+          h("button", { class: "btn small", type: "button", onclick: edit }, "Edit details"),
+          i.status === "open" ? h("button", { class: "btn small on-ok", type: "button", onclick: markPaid }, "✓ Mark paid") : h("button", { class: "btn small", type: "button", onclick: () => setStatus("open") }, i.status === "paid" ? "Mark unpaid" : "Restore"),
+          i.status === "open" ? h("button", { class: "btn small", type: "button", onclick: () => confirm(`Void ${invTitle(i)}? The client will see it as cancelled.`) && setStatus("void") }, "Void") : null,
+        ] : null),
+      admin ? h("div", { class: "mono muted inv-admin-note" },
+        i.missing.length ? h("span", { class: "inv-warn" }, `Missing ${i.missing.join(", ")}. Add it in Edit details or the file name. `) : null,
+        i.status !== "void" ? (i.viewed ? `Opened by ${i.viewed.by}, ${fmtDate(i.viewed.at)}` : "Not opened by the client yet") : null,
+        i.paidNote ? ` · Note: ${i.paidNote}` : null) : null,
+      tools,
+      i.status === "open" ? payOptions(slug, i, d) : null);
+  }
+
+  // Admin: who clients make checks out to, the mailing address, and the card fee. Shared by every client.
+  function paySettingsBox(reload) {
+    const box = h("details", { class: "card inv-settings" }, h("summary", {}, h("strong", {}, "Payment details"), h("span", { class: "muted" }, " · shown to every client (only you can change them)")));
+    api("GET", "/api/admin/invoice-settings").then((s) => {
+      if (!s.payableTo || !s.address) box.open = true;
+      const err = h("p", { class: "inv-err", hidden: true });
+      const f = h("form", { class: "inv-form", onsubmit: async (e) => {
+        e.preventDefault(); err.hidden = true;
+        const v = Object.fromEntries(new FormData(f));
+        try {
+          await api("POST", "/api/admin/invoice-settings", { payableTo: v.payableTo, address: v.address, note: v.note, cardFee: !!v.cardFee, feePct: v.feePct, feeFixedCents: Math.round(Number(v.feeFixed) * 100), feeCapPct: v.feeCapPct });
+          toast("Payment details saved"); reload();
+        } catch (x) { err.textContent = x.message; err.hidden = false; }
+      } },
+        h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "MAKE CHECKS OUT TO"), h("input", { name: "payableTo", value: s.payableTo, placeholder: "Genvyd LLC" })),
+        h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "MAILING ADDRESS"), h("textarea", { name: "address", rows: 3, placeholder: "Street\nCity, State ZIP" }, s.address)),
+        h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "EXTRA NOTE FOR CHECKS (OPTIONAL)"), h("input", { name: "note", value: s.note, placeholder: "Checks usually take 3 to 5 days to arrive." })),
+        h("label", { class: "inv-check" }, h("input", { type: "checkbox", name: "cardFee", checked: s.cardFee }), " Add a card service fee to card payments"),
+        h("div", { class: "inv-form-grid" },
+          h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "STRIPE %"), h("input", { name: "feePct", value: s.feePct, inputmode: "decimal" })),
+          h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "STRIPE FIXED ($)"), h("input", { name: "feeFixed", value: (s.feeFixedCents / 100).toFixed(2), inputmode: "decimal" })),
+          h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "FEE NEVER MORE THAN (%)"), h("input", { name: "feeCapPct", value: s.feeCapPct, inputmode: "decimal" }))),
+        h("p", { class: "muted", style: "font-size:13px" }, "The fee is what Stripe keeps on the card payment, so you receive the full invoice amount, and never more than the cap (card network rules allow at most 3%). Card fees cannot be added to debit card payments, and some states limit or ban them. Check with Stripe before turning this on."),
+        err, h("button", { class: "btn small primary", type: "submit" }, "Save payment details"));
+      box.append(f);
+    }).catch(() => box.remove());
+    return box;
+  }
+
+  async function viewInvoices(slug) {
+    show(h("p", { class: "muted" }, "Loading invoices…"));
+    let d, client;
+    try { [d, client] = await Promise.all([api("GET", `/api/c/${enc(slug)}/invoices`), clientInfo(slug)]); }
+    catch (err) { show(errorCard(err)); return; }
+    const admin = state.me.admin;
+    const reload = () => { const y = window.scrollY; viewInvoices(slug).then(() => window.scrollTo(0, y)); };
+    const open = d.invoices.filter((i) => i.status === "open");
+    const done = d.invoices.filter((i) => i.status !== "open");
+    show(
+      crumbs(client, "", "Invoices"),
+      clientTabs(slug, "invoices"),
+      h("div", { class: "page-head" }, h("h1", {}, "Invoices")),
+      open.length ? h("div", { class: "stats inv-stats" },
+        h("div", { class: "card stat" + (d.totals.overdue ? " warn" : "") }, h("div", { class: "stat-n" }, invMoney(d.totals.outstanding)), h("div", { class: "mono muted" }, `TO PAY · ${open.length} INVOICE${open.length === 1 ? "" : "S"}`)),
+        d.totals.overdue ? h("div", { class: "card stat hot" }, h("div", { class: "stat-n" }, invMoney(d.totals.overdue)), h("div", { class: "mono muted" }, "OVERDUE")) : null) : null,
+      admin ? h("div", { class: "card inv-howto" },
+        h("strong", {}, "Add an invoice: "), "save the PDF in ", h("code", {}, d.macFolder), ". Name it with the number, amount and due date, like ",
+        h("code", {}, "INV-1001 Website build $1,250 due 2026-12-01.pdf"), ", or fill those in with Edit details after.") : null,
+      admin ? paySettingsBox(reload) : null,
+      !d.invoices.length ? h("div", { class: "card empty muted" }, admin ? "No invoices for this client yet." : "No invoices yet.") : null,
+      open.length ? h("div", { class: "inv-list" }, open.map((i) => invoiceCard(slug, i, d, reload))) : null,
+      !open.length && d.invoices.length ? h("div", { class: "card inv-allpaid" }, h("strong", {}, "You're all paid up."), h("span", { class: "muted" }, " Thank you.")) : null,
+      done.length ? [h("div", { class: "section-label mono muted", style: "margin-top:28px" }, `PAID AND CLOSED · ${done.length}`), h("div", { class: "inv-list" }, done.map((i) => invoiceCard(slug, i, d, reload)))] : null,
+      d.contact ? h("p", { class: "muted", style: "margin-top:24px" }, "Questions about an invoice? Email ", h("a", { href: `mailto:${d.contact}` }, d.contact), ".") : null);
+  }
+
+  // Client home: a banner per unpaid invoice (overdue in red), linking to the Invoices tab.
+  function invoicesHome(slug) {
+    const box = h("div", { class: "sum-banners" });
+    api("GET", `/api/c/${enc(slug)}/invoices`).then((d) => {
+      const open = d.invoices.filter((i) => i.status === "open");
+      if (!open.length) { box.remove(); return; }
+      fill(box, open.map((i) => h("a", { class: "sum-banner inv-banner" + (i.state === "overdue" ? " bad" : " warn"), href: `#/c/${enc(slug)}/invoices` },
+        h("span", { class: "sum-banner-badge" }, i.state === "overdue" ? "INVOICE OVERDUE" : "INVOICE"),
+        h("span", {}, h("strong", {}, `${invTitle(i)} · ${invMoney(i.amount)}`), ` · ${invWhen(i)}`),
+        h("span", { class: "sum-banner-go" }, state.me.admin ? "Open →" : "View and pay →"))));
+    }).catch(() => box.remove());
+    return box;
+  }
+
+  // Studio dashboard: every unpaid invoice across clients, overdue first, with the totals.
+  function invoicesAdminList() {
+    const box = h("div", { class: "res-admin" });
+    api("GET", "/api/admin/invoices").then((d) => {
+      const open = d.invoices.filter((i) => i.status === "open");
+      const paid = d.invoices.filter((i) => i.status === "paid").slice(0, 5);
+      if (!d.invoices.length) { box.remove(); return; }
+      fill(box,
+        h("div", { class: "res-section-head", style: "margin-top:32px" },
+          h("div", { class: "dash-h mono muted", style: "font-size:12px" }, "INVOICES"),
+          h("div", { class: "mono muted", style: "font-size:12px" }, `${invMoney(d.totals.outstanding)} unpaid`, d.totals.overdue ? h("span", { class: "inv-warn" }, ` · ${invMoney(d.totals.overdue)} overdue`) : null)),
+        d.settingsMissing ? h("div", { class: "card sum-note warn" }, "Clients can't see where to mail checks yet. Add your payment details on any client's Invoices tab.") : null,
+        h("div", { class: "card res-admin-list" },
+          (open.length ? open : [null]).map((i) => i ? h("a", { class: "res-admin-row inv-admin-row", href: `#/c/${enc(i.client.slug)}/invoices` },
+            invPill(i),
+            h("div", { class: "res-admin-name" }, h("strong", {}, invTitle(i)), h("div", { class: "mono muted" }, i.client.name)),
+            h("strong", {}, invMoney(i.amount)),
+            h("span", { class: "mono muted" }, invWhen(i)),
+            h("span", { class: "mono muted" }, i.viewed ? "Opened" : "Not opened yet"))
+            : h("div", { class: "res-admin-row muted" }, "Everything is paid.")),
+          paid.map((i) => h("a", { class: "res-admin-row inv-admin-row dim", href: `#/c/${enc(i.client.slug)}/invoices` },
+            invPill(i), h("div", { class: "res-admin-name" }, h("strong", {}, invTitle(i)), h("div", { class: "mono muted" }, i.client.name)),
+            h("strong", {}, invMoney(i.amount)), h("span", { class: "mono muted" }, invWhen(i)), h("span")))));
     }).catch(() => box.remove());
     return box;
   }
@@ -4190,6 +4395,7 @@
         if (parts[2] === "copy") return viewCopy(slug);
         if (parts[2] === "results" && parts[3]) return viewResultsDetail(slug, decodeURIComponent(parts.slice(3).join("/")));
         if (parts[2] === "results") return viewResults(slug);
+        if (parts[2] === "invoices") return viewInvoices(slug);
         if (parts[2] === "campaigns") return viewCampaigns(slug);
         if (parts[2] === "campaign" && /^\d+$/.test(parts[3] || "")) return viewCampaign(slug, parts[3]);
         if (parts[2] === "f" && parts[3]) return viewFolder(slug, decodeURIComponent(parts.slice(3).join("/")));
