@@ -78,8 +78,8 @@
   }
   const parentOf = (p) => p.split("/").slice(0, -1).join("/");
   // Comments and activity can point at an ad file or at a line of ad copy ("copy:12").
-  const itemHref = (slug, p) => (String(p).startsWith("copy:") ? `#/c/${enc(slug)}/copy` : `#/c/${enc(slug)}/i/${enc(p)}`);
-  const itemLabel = (p, detail) => (String(p).startsWith("copy:") ? `ad copy${detail ? ` "${String(detail).slice(0, 60)}"` : ""}` : baseName(p));
+  const itemHref = (slug, p) => (String(p).startsWith("copy:") ? `#/c/${enc(slug)}/copy` : String(p).startsWith("Invoices/") ? `#/c/${enc(slug)}/invoices` : `#/c/${enc(slug)}/i/${enc(p)}`);
+  const itemLabel = (p, detail) => (String(p).startsWith("Invoices/") ? (detail || baseName(p)) : String(p).startsWith("copy:") ? `ad copy${detail ? ` "${String(detail).slice(0, 60)}"` : ""}` : baseName(p));
   const baseName = (p) => p.split("/").pop();
 
   // Comment text with web links made clickable. A link to an ad in this portal shows the ad's
@@ -416,7 +416,7 @@
     }
     renderApproved(null);
 
-    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted", campaign_approved: "approved and signed the campaign", campaign_changes: "asked for changes to the campaign" };
+    const KIND = { comment: "commented on", like: "favorited", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted", campaign_approved: "approved and signed the campaign", campaign_changes: "asked for changes to the campaign", invoice_paid: "paid", invoice_failed: "had a bank payment fail on" };
     const feed = fromClients.slice(0, 15).map((a) =>
       h("div", { class: "feed-item" + (a.created_at > lastSeen ? " fresh" : "") },
         h("div", { class: "mono muted" }, `${a.client_name || a.client_slug} · ${fmtDate(a.created_at)}${a.created_at > lastSeen ? " · NEW" : ""}`),
@@ -970,6 +970,7 @@
   function invWhen(i) {
     if (i.state === "paid") return `Paid ${invDay(i.paidOn)}${i.paidMethod ? ` by ${i.paidMethod}` : ""}`;
     if (i.state === "void") return "Cancelled, nothing to pay";
+    if (i.state === "processing") return "Bank payment on its way";
     if (!i.due) return "No due date";
     if (i.daysLeft < 0) return `Was due ${invDay(i.due)} · ${-i.daysLeft} day${i.daysLeft === -1 ? "" : "s"} late`;
     if (i.daysLeft === 0) return "Due today";
@@ -977,7 +978,7 @@
     return `Due ${invDay(i.due)} · in ${i.daysLeft} days`;
   }
   function invPill(i) {
-    const label = { overdue: "Overdue", due_soon: "Due soon", due: "Due", paid: "Paid", void: "Void" }[i.state];
+    const label = { overdue: "Overdue", due_soon: "Due soon", due: "Due", processing: "Payment on its way", paid: "Paid", void: "Void" }[i.state];
     return h("span", { class: "inv-pill inv-" + i.state }, label);
   }
   const invSeen = (slug, i) => { if (!state.me.admin) api("POST", `/api/c/${enc(slug)}/invoices/view`, { file: i.file }).catch(() => {}); };
@@ -995,15 +996,37 @@
             h("div", { class: "mono muted", style: "margin-top:10px" }, "MAIL IT TO"), h("div", { style: "white-space:pre-line" }, p.address)),
           h("p", { class: "muted" }, `Please write ${ref} on the memo line.`, p.note ? " " + p.note : ""))
       : admin ? h("div", { class: "inv-way inv-way-missing" }, h("strong", {}, "Check details are not set."), " Clients can't see how to mail a check until you add who to make it out to and the mailing address in Payment details below.") : null;
-    const card = i.payLink
+    const st = d.stripe || {};
+    const go = (how) => async (e) => {
+      const btn = e.currentTarget, was = btn.textContent;
+      btn.disabled = true; btn.textContent = "Opening secure checkout…";
+      try { invSeen(slug, i); const r = await api("POST", `/api/c/${enc(slug)}/invoices/checkout`, { file: i.file, how }); location.href = r.url; }
+      catch (x) { toast(x.message); btn.disabled = false; btn.textContent = was; }
+    };
+    const cardBtn = st.card
+      ? h("button", { class: "btn primary inv-pay", type: "button", onclick: go("card") }, `Pay ${invMoney(i.cardTotal)} by card`)
+      : i.payLink ? h("a", { class: "btn primary inv-pay", href: i.payLink, target: "_blank", rel: "noopener", onclick: () => invSeen(slug, i) }, `Pay ${invMoney(i.cardTotal)} by card`) : null;
+    const card = cardBtn
       ? h("div", { class: "inv-way" },
           h("div", { class: "inv-way-head" }, h("strong", {}, "Pay by card"), i.cardFee ? h("span", { class: "inv-tag warn" }, `+ ${invMoney(i.cardFee)} card fee`) : h("span", { class: "inv-tag ok" }, "No fee")),
-          i.cardFee ? h("p", { class: "muted" }, `Card payments include a service fee of ${invMoney(i.cardFee)} to cover the card processor's charge. Paying by check avoids it.`) : null,
-          h("a", { class: "btn primary inv-pay", href: i.payLink, target: "_blank", rel: "noopener", onclick: () => invSeen(slug, i) }, `Pay ${invMoney(i.cardTotal)} by card`),
+          i.cardFee ? h("p", { class: "muted" }, `Card payments include a service fee of ${invMoney(i.cardFee)} to cover the card processor's charge. Paying by check${st.bank ? " or bank transfer" : ""} avoids it.`) : null,
+          cardBtn,
           h("p", { class: "mono muted", style: "font-size:11px;margin:8px 0 0" }, "Opens a secure Stripe checkout page."))
-      : admin ? h("div", { class: "inv-way inv-way-missing" }, h("strong", {}, "No card payment link."), ` To offer card payment, make a Stripe payment link for ${invMoney(i.cardTotal)}${i.cardFee ? ` (the invoice plus the ${invMoney(i.cardFee)} fee)` : ""} and paste it in Edit details.`) : null;
-    if (!check && !card) return h("p", { class: "muted inv-ask" }, "Questions about paying? Email ", d.contact ? h("a", { href: `mailto:${d.contact}?subject=${enc(invTitle(i))}` }, d.contact) : "Genvyd", ".");
-    return h("div", { class: "inv-ways" }, check, card);
+      : admin ? h("div", { class: "inv-way inv-way-missing" }, h("strong", {}, "Card payment is off."), " Connect Stripe in Payment details above and clients can pay by card right here.") : null;
+    const bank = st.bank && i.amount != null
+      ? h("div", { class: "inv-way" },
+          h("div", { class: "inv-way-head" }, h("strong", {}, "Pay from your bank account"), h("span", { class: "inv-tag ok" }, "No fee")),
+          h("p", { class: "muted" }, "A secure transfer from a US bank account through Stripe. It takes about 4 business days to clear."),
+          h("button", { class: "btn inv-pay", type: "button", onclick: go("bank") }, `Pay ${invMoney(i.amount)} from my bank`))
+      : null;
+    if (i.state === "processing") {
+      return h("div", { class: "inv-ways" }, h("div", { class: "inv-way" },
+        h("div", { class: "inv-way-head" }, h("strong", {}, "Your bank payment is on its way"), h("span", { class: "inv-tag ok" }, "Nothing to do")),
+        h("p", { class: "muted" }, "Bank transfers take about 4 business days to clear. This invoice will show as paid when it does.")));
+    }
+    const failed = i.stripe === "failed" ? h("div", { class: "card sum-note warn", style: "margin:16px 0 0" }, "The last bank payment for this invoice did not go through. Please try again or pay another way.") : null;
+    if (!check && !card && !bank) return h("p", { class: "muted inv-ask" }, "Questions about paying? Email ", d.contact ? h("a", { href: `mailto:${d.contact}?subject=${enc(invTitle(i))}` }, d.contact) : "Genvyd", ".");
+    return [failed, h("div", { class: "inv-ways" }, check, card, bank)];
   }
 
   function invoiceCard(slug, i, d, reload) {
@@ -1029,7 +1052,7 @@
         field("INVOICE NUMBER", "number", i.number), field("AMOUNT ($)", "amount", i.amount != null ? (i.amount / 100).toFixed(2) : "", { inputmode: "decimal", placeholder: "1250.00" }),
         field("ISSUED", "issued", i.issued, { type: "date" }), field("DUE", "due", i.due, { type: "date" })),
       field("WHAT IT IS FOR", "description", i.description, { placeholder: "Website build, October ads..." }),
-      field(`CARD PAYMENT LINK (Stripe, for ${invMoney(i.cardTotal)})`, "payLink", i.payLink, { type: "url", placeholder: "https://buy.stripe.com/..." }),
+      d.stripe && d.stripe.card ? null : field(`CARD PAYMENT LINK (Stripe, for ${invMoney(i.cardTotal)})`, "payLink", i.payLink, { type: "url", placeholder: "https://buy.stripe.com/..." }),
     ], "Save", (v) => post("edit", v));
     const markPaid = () => form([
       h("div", { class: "inv-form-grid" },
@@ -1066,14 +1089,29 @@
   // Admin: who clients make checks out to, the mailing address, and the card fee. Shared by every client.
   function paySettingsBox(reload) {
     const box = h("details", { class: "card inv-settings" }, h("summary", {}, h("strong", {}, "Payment details"), h("span", { class: "muted" }, " · shown to every client (only you can change them)")));
-    api("GET", "/api/admin/invoice-settings").then((s) => {
-      if (!s.payableTo || !s.address) box.open = true;
+    Promise.all([api("GET", "/api/admin/invoice-settings"), api("GET", "/api/admin/stripe")]).then(([s, st]) => {
+      if (!s.payableTo || !s.address || !st.connected) box.open = true;
+      const connect = async (e) => {
+        e.currentTarget.disabled = true;
+        try { const r = await api("POST", "/api/admin/stripe/connect"); toast(`Stripe connected (${r.mode === "live" ? "live" : "test mode"})`); reload(); }
+        catch (x) { toast(x.message); e.currentTarget.disabled = false; }
+      };
+      const mode = st.mode === "live" ? "live" : "test mode (sandbox, no real money)";
+      box.append(h("div", { class: "inv-stripe" + (st.connected ? " ok" : "") },
+        h("div", { class: "mono muted" }, "STRIPE"),
+        st.connected ? h("div", {}, h("strong", {}, `✓ Connected, ${mode}.`), " Clients pay by card", st.bank ? " or bank transfer" : "", " right on the invoice, and it marks itself paid. Nothing to do in Stripe per invoice. ",
+            h("button", { class: "btn small", type: "button", onclick: connect }, "Reconnect"),
+            h("p", { class: "muted", style: "margin:8px 0 0" }, st.lastEvent ? `Last message from Stripe: ${fmtDate(st.lastEvent.at)}.` : "No message from Stripe yet. After the first payment, this shows when Stripe last reported in. If a payment goes through but the invoice stays unpaid, the Access bypass for /api/stripe/webhook is missing."))
+          : st.keySet ? h("div", {}, h("strong", {}, `Your Stripe key is in (${mode}).`), " One more step: ",
+            h("button", { class: "btn small primary", type: "button", onclick: connect }, "Connect Stripe"),
+            st.hookMode && st.hookMode !== st.mode ? h("p", { class: "muted", style: "margin:8px 0 0" }, "The key changed between test and live, so connect again.") : null)
+          : h("div", {}, h("strong", {}, "Not connected yet."), " In Cloudflare, open Workers & Pages, genvyd-clients, Settings, Variables and Secrets, and add a Secret named ", h("code", {}, "STRIPE_SECRET_KEY"), " with your Stripe key. Then come back here and press Connect Stripe.")));
       const err = h("p", { class: "inv-err", hidden: true });
       const f = h("form", { class: "inv-form", onsubmit: async (e) => {
         e.preventDefault(); err.hidden = true;
         const v = Object.fromEntries(new FormData(f));
         try {
-          await api("POST", "/api/admin/invoice-settings", { payableTo: v.payableTo, address: v.address, note: v.note, cardFee: !!v.cardFee, feePct: v.feePct, feeFixedCents: Math.round(Number(v.feeFixed) * 100), feeCapPct: v.feeCapPct });
+          await api("POST", "/api/admin/invoice-settings", { payableTo: v.payableTo, address: v.address, note: v.note, cardFee: !!v.cardFee, bankPay: !!v.bankPay, feePct: v.feePct, feeFixedCents: Math.round(Number(v.feeFixed) * 100), feeCapPct: v.feeCapPct });
           toast("Payment details saved"); reload();
         } catch (x) { err.textContent = x.message; err.hidden = false; }
       } },
@@ -1081,6 +1119,7 @@
         h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "MAILING ADDRESS"), h("textarea", { name: "address", rows: 3, placeholder: "Street\nCity, State ZIP" }, s.address)),
         h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "EXTRA NOTE FOR CHECKS (OPTIONAL)"), h("input", { name: "note", value: s.note, placeholder: "Checks usually take 3 to 5 days to arrive." })),
         h("label", { class: "inv-check" }, h("input", { type: "checkbox", name: "cardFee", checked: s.cardFee }), " Add a card service fee to card payments"),
+        h("label", { class: "inv-check" }, h("input", { type: "checkbox", name: "bankPay", checked: s.bankPay }), " Also offer bank transfer through Stripe (no fee to the client; Stripe charges you 0.8%, at most $5)"),
         h("div", { class: "inv-form-grid" },
           h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "STRIPE %"), h("input", { name: "feePct", value: s.feePct, inputmode: "decimal" })),
           h("label", { class: "inv-field" }, h("span", { class: "mono muted" }, "STRIPE FIXED ($)"), h("input", { name: "feeFixed", value: (s.feeFixedCents / 100).toFixed(2), inputmode: "decimal" })),
@@ -1101,7 +1140,12 @@
     const reload = () => { const y = window.scrollY; viewInvoices(slug).then(() => window.scrollTo(0, y)); };
     const open = d.invoices.filter((i) => i.status === "open");
     const done = d.invoices.filter((i) => i.status !== "open");
+    // Back from Stripe checkout: say thanks, then tidy the address.
+    const paidHow = new URLSearchParams(location.search).get("paid");
+    if (paidHow) history.replaceState(null, "", location.pathname + location.hash);
     show(
+      paidHow ? h("div", { class: "sum-banner ok inv-thanks" }, h("span", { class: "sum-banner-badge" }, "✓ THANK YOU"),
+        h("span", {}, paidHow === "bank" ? "Your bank payment has started. It takes about 4 business days to clear, and the invoice will show as paid then." : "Your payment went through. Stripe emails you a receipt, and the invoice shows as paid in a moment.")) : null,
       crumbs(client, "", "Invoices"),
       clientTabs(slug, "invoices"),
       h("div", { class: "page-head" }, h("h1", {}, "Invoices")),
@@ -1123,7 +1167,7 @@
   function invoicesHome(slug) {
     const box = h("div", { class: "sum-banners" });
     api("GET", `/api/c/${enc(slug)}/invoices`).then((d) => {
-      const open = d.invoices.filter((i) => i.status === "open");
+      const open = d.invoices.filter((i) => i.status === "open" && i.state !== "processing");
       if (!open.length) { box.remove(); return; }
       fill(box, open.map((i) => h("a", { class: "sum-banner inv-banner" + (i.state === "overdue" ? " bad" : " warn"), href: `#/c/${enc(slug)}/invoices` },
         h("span", { class: "sum-banner-badge" }, i.state === "overdue" ? "INVOICE OVERDUE" : "INVOICE"),
@@ -4271,7 +4315,7 @@
     }
     loadFeed();
 
-    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted", campaign_approved: "approved and signed the campaign", campaign_changes: "asked for changes to the campaign" };
+    const KIND = { comment: "commented on", like: "liked", approved: "approved", changes: "requested changes on", rejected: "said no to", pending: "reset the status of", campaign_add: "added to a campaign:", campaign_remove: "took out of a campaign:", renamed: "renamed a file to", hidden: "moved to trash:", unhidden: "took out of the trash:", deleted: "deleted", campaign_approved: "approved and signed the campaign", campaign_changes: "asked for changes to the campaign", invoice_paid: "paid", invoice_failed: "had a bank payment fail on" };
     const feed = data.activity.length
       ? data.activity.map((a) =>
           h("div", { class: "feed-item" },

@@ -13,7 +13,7 @@ Client review portal for Genvyd. Separate from the marketing site (`genvyd-websi
   token, so only the Worker can read it. The Worker proxies media with Range support.
 - `public/`: plain HTML, CSS, JS. No build step. Hash routing.
 - `migrations/`: D1 schema. `npm run deploy` applies migrations then deploys.
-  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only), 0014 campaign_summaries.covered, 0015 results_views, 0016 invoices + portal_settings. All keep existing data.
+  0002 campaigns, 0003 item_tags, 0004 notify_state, 0005 files/views/email_alerts, 0006 members.welcomed_at, 0007 hidden, 0008 copy_items/copy_campaigns, 0009 rebuilds item_status to allow the 'rejected' (No) status, 0010 copy_items.ad_path/source + copy_imports, 0011 file_ids/file_renames + comments.parent_id, 0012 copy_items.card, 0013 campaign_summaries + campaign_events (append only), 0014 campaign_summaries.covered, 0015 results_views, 0016 invoices + portal_settings, 0017 invoices.stripe_* + stripe_state. All keep existing data.
 
 ## Roles
 
@@ -368,6 +368,23 @@ UI: Invoices tab (`viewInvoices()`, `invoiceCard()`, `payOptions()`: check first
 with the fee shown before the button), client home banners (`invoicesHome()`, red when overdue),
 dashboard list (`invoicesAdminList()`, overdue first, unpaid total). Feed: "Invoices" section per client.
 Renaming a PDF in Finder detaches its D1 row (paid status follows the file name).
+
+Stripe (migration 0017): with the `STRIPE_SECRET_KEY` Cloudflare secret set (restricted key: Checkout
+Sessions write, Webhook Endpoints write), admin presses **Connect Stripe** in Payment details once:
+`connectStripe()` makes the webhook endpoint `<PORTAL_URL>/api/stripe/webhook` through the API and keeps
+its signing secret in `stripe_state` (key `hook`; deliberately not in `BACKUP_TABLES`, so backups never
+carry it and a restore never wipes it). Switching the key between test and live needs Connect again
+(`stripeStatus()` compares modes). Clients' "Pay by card" / "Pay from my bank" post
+`/api/c/:slug/invoices/checkout` {file, how}; `invoiceCheckout()` expires any open earlier session,
+makes a Checkout Session (invoice line plus a separate "Card service fee" line for cards,
+`us_bank_account` for bank, metadata client_slug + path) and the page goes to its url; success_url
+`/?paid=card|bank#/c/:slug/invoices` shows a thank-you banner. `/api/stripe/webhook` is handled before
+`authenticate()` and needs a Cloudflare Access **Bypass** application for that path; `verifyStripe()`
+checks the HMAC signature (5 minute window). completed + paid, or async_payment_succeeded, marks the
+invoice paid once (`invoice_paid` activity, in the digest); completed + unpaid (bank) sets
+`stripe_status` 'processing' (state "Payment on its way", no home banner); async_payment_failed sets
+'failed' (`invoice_failed` in the digest). Bank transfer is offered only when `pay.bankPay` is on.
+`STRIPE_API_BASE` points at a mock Stripe for local tests and is ignored when TEAM_DOMAIN is set.
 
 ## Claude feed
 

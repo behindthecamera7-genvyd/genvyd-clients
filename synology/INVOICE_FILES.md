@@ -32,18 +32,27 @@ name. No em-dashes.
 
 ## Getting paid
 
-Each unpaid invoice shows two ways to pay:
+Each unpaid invoice shows the ways to pay:
 
 1. **Pay by check (no fee)**: who to make it out to and the mailing address, from **Payment details**
    on any Invoices tab (shared by every client).
-2. **Pay by card**: only when the invoice has a payment link. Make a Stripe Payment Link for the
-   **card total** shown in Edit details (the invoice plus the card service fee) and paste it there.
-   The fee is worked out so that, after Stripe's 2.9% + 30¢, Genvyd receives the invoice amount,
+2. **Pay by card**: the client presses the button and the portal opens a Stripe checkout for that
+   invoice with the card service fee as its own line. When Stripe confirms the payment the invoice
+   marks itself paid and Anthony gets it in the email digest. Nothing to do in Stripe per invoice.
+   The fee is worked out so that, after Stripe's 2.9% + 30 cents, Genvyd receives the invoice amount,
    and it is never more than 3% of the invoice. It can be switched off in Payment details.
+3. **Pay from your bank account (no fee)**: optional, switched on in Payment details. Stripe charges
+   Genvyd 0.8% (at most $5). It takes about 4 business days to clear; the invoice shows "Payment on
+   its way" until it does.
 
-When the money arrives, press **Mark paid** (check, card, bank transfer, cash or other, plus the
-date and an optional note only Anthony sees). **Void** cancels an invoice; the client sees it as
-cancelled. Both can be undone.
+Setting up Stripe once: add the `STRIPE_SECRET_KEY` secret in Cloudflare (Workers & Pages,
+genvyd-clients, Settings, Variables and Secrets), add a Cloudflare Access Bypass for
+`clients.genvyd.com/api/stripe/webhook`, then press **Connect Stripe** in Payment details.
+Without Stripe connected, a payment link pasted in Edit details still works as before.
+
+Checks and anything paid outside Stripe: press **Mark paid** (check, card, bank transfer, cash or
+other, plus the date and an optional note only Anthony sees). **Void** cancels an invoice; the
+client sees it as cancelled. Both can be undone.
 
 ## Renaming
 

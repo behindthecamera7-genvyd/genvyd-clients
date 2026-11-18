@@ -25,6 +25,10 @@ export interface Env {
   CLIENT_REPLY_TO?: string;
   NOTIFY_FROM?: string;
   PORTAL_URL?: string;
+  /** Stripe secret or restricted key (Cloudflare secret). Turns on Pay by card / bank on invoices. */
+  STRIPE_SECRET_KEY?: string;
+  /** Local testing only: a mock Stripe API. Ignored whenever TEAM_DOMAIN is set. */
+  STRIPE_API_BASE?: string;
   RESEND_API_KEY?: string;
   /** Sender for "new work" emails to clients. Must be on a domain verified in Resend. Empty = off. */
   CLIENT_NOTIFY_FROM?: string;
@@ -1124,6 +1128,9 @@ async function route(req: Request, env: Env): Promise<Response> {
   const isMedia = path.startsWith("/media/");
 
   if (!isApi && !isMedia) return env.ASSETS.fetch(req);
+
+  // Stripe calls this one path without a Cloudflare Access login; its signature is checked instead.
+  if (path === "/api/stripe/webhook" && req.method === "POST") return stripeWebhook(req, env);
 
   const email = await authenticate(req, env);
   const user: User = { email, admin: isAdmin(env, email) };
@@ -2301,7 +2308,7 @@ async function sendWelcome(env: Env, slug: string, email: string): Promise<{ sen
 // ---------------------------------------------------------------------------
 
 type ActivityRow = { id: number; client_slug: string; path: string; email: string; kind: string; detail: string | null; created_at: number };
-const DIGEST_KINDS = ["campaign_approved", "campaign_changes", "approved", "changes", "rejected", "comment", "campaign_add", "like", "hidden"];
+const DIGEST_KINDS = ["invoice_paid", "invoice_failed", "campaign_approved", "campaign_changes", "approved", "changes", "rejected", "comment", "campaign_add", "like", "hidden"];
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
@@ -2357,6 +2364,8 @@ async function sendEmail(env: Env, subject: string, html: string, text: string, 
 function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) {
   const count = (k: string) => rows.filter((r) => r.kind === k).length;
   const bits = [
+    count("invoice_paid") && `${count("invoice_paid")} invoice${count("invoice_paid") === 1 ? "" : "s"} paid`,
+    count("invoice_failed") && `${count("invoice_failed")} bank payment${count("invoice_failed") === 1 ? "" : "s"} failed`,
     count("campaign_approved") && `${count("campaign_approved")} campaign${count("campaign_approved") === 1 ? "" : "s"} approved`,
     count("campaign_changes") && `${count("campaign_changes")} campaign change request${count("campaign_changes") === 1 ? "" : "s"}`,
     count("approved") && `${count("approved")} approved`,
@@ -2371,6 +2380,8 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
   const subject = `${clientList.join(", ")}: ${bits.join(", ")}`;
 
   const LABEL: Record<string, string> = {
+    invoice_paid: "Invoices paid",
+    invoice_failed: "Bank payment failed (follow up)",
     campaign_approved: "Campaign approved and signed (ready to launch)",
     campaign_changes: "Campaign summary: changes requested",
     changes: "Changes requested",
@@ -2381,7 +2392,7 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
     like: "Favorited",
     hidden: "Moved to trash (they don't want these)",
   };
-  const order = ["campaign_approved", "campaign_changes", "changes", "rejected", "comment", "approved", "campaign_add", "like", "hidden"];
+  const order = ["invoice_paid", "invoice_failed", "campaign_approved", "campaign_changes", "changes", "rejected", "comment", "approved", "campaign_add", "like", "hidden"];
   let html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:620px">`;
   let text = "";
   for (const slug of [...new Set(rows.map((r) => r.client_slug))]) {
@@ -2391,12 +2402,12 @@ function buildDigest(env: Env, rows: ActivityRow[], names: Map<string, string>) 
     for (const kind of order) {
       const list = rows.filter((r) => r.client_slug === slug && r.kind === kind);
       if (!list.length) continue;
-      html += `<p style="margin:14px 0 6px;font-weight:bold;color:${kind === "changes" || kind === "campaign_changes" ? "#b26a00" : kind === "rejected" ? "#c4161c" : kind === "approved" || kind === "campaign_approved" ? "#127a3f" : "#111"}">${LABEL[kind]}</p><ul style="margin:0;padding-left:18px">`;
+      html += `<p style="margin:14px 0 6px;font-weight:bold;color:${kind === "changes" || kind === "campaign_changes" ? "#b26a00" : kind === "rejected" || kind === "invoice_failed" ? "#c4161c" : kind === "approved" || kind === "campaign_approved" || kind === "invoice_paid" ? "#127a3f" : "#111"}">${LABEL[kind]}</p><ul style="margin:0;padding-left:18px">`;
       text += `  ${LABEL[kind]}:\n`;
       for (const r of list) {
         const file = r.path.startsWith("copy:") ? (kind === "comment" ? "Ad copy" : `Ad copy "${r.detail ?? ""}"`) : r.path.split("/").pop() || r.path;
         const link = itemLink(env, slug, r.path);
-        const extra = (kind === "comment" || kind === "campaign_changes" || kind === "campaign_approved") && r.detail ? `: "${r.detail}"` : kind === "campaign_add" && r.detail && !r.path.startsWith("copy:") ? ` (${r.detail})` : "";
+        const extra = (kind === "comment" || kind === "campaign_changes" || kind === "campaign_approved" || kind === "invoice_paid" || kind === "invoice_failed") && r.detail ? `: "${r.detail}"` : kind === "campaign_add" && r.detail && !r.path.startsWith("copy:") ? ` (${r.detail})` : "";
         html += `<li style="margin:4px 0"><a href="${esc(link)}" style="color:#d4141a">${esc(file)}</a> <span style="color:#555">by ${esc(r.email)}${esc(extra)}</span></li>`;
         text += `   - ${file} by ${r.email}${extra}\n     ${link}\n`;
       }
@@ -3322,6 +3333,7 @@ type InvoiceRow = {
   due: string | null; description: string | null; pay_link: string | null; status: "open" | "paid" | "void";
   paid_on: string | null; paid_method: string | null; paid_note: string | null; first_seen: number | null;
   first_viewed: number | null; first_viewed_by: string | null; last_viewed: number | null; updated_by: string | null; updated_at: number | null;
+  stripe_session?: string | null; stripe_status?: string | null; stripe_payment?: string | null;
 };
 
 /** What a file name says: "INV-1001 Website build $1,250.00 due 2026-12-01.pdf". Any part may be missing. */
@@ -3342,8 +3354,8 @@ function parseInvoiceName(name: string) {
 const phxDay = (t = now()) => new Date(t - 7 * 3600 * 1000).toISOString().slice(0, 10);
 const dayDiff = (a: string, b: string) => Math.round((Date.parse(a + "T00:00:00Z") - Date.parse(b + "T00:00:00Z")) / 86400000);
 
-type PaySettings = { payableTo: string; address: string; note: string; cardFee: boolean; feePct: number; feeFixedCents: number; feeCapPct: number };
-const PAY_DEFAULTS: PaySettings = { payableTo: "", address: "", note: "", cardFee: true, feePct: 2.9, feeFixedCents: 30, feeCapPct: 3 };
+type PaySettings = { payableTo: string; address: string; note: string; cardFee: boolean; feePct: number; feeFixedCents: number; feeCapPct: number; bankPay: boolean };
+const PAY_DEFAULTS: PaySettings = { payableTo: "", address: "", note: "", cardFee: true, feePct: 2.9, feeFixedCents: 30, feeCapPct: 3, bankPay: false };
 
 async function loadPaySettings(env: Env): Promise<PaySettings> {
   const r = await env.DB.prepare("SELECT value FROM portal_settings WHERE key = 'pay'").first<{ value: string }>();
@@ -3369,13 +3381,14 @@ function invoiceView(row: InvoiceRow | undefined, file: { name: string; size?: n
   const issued = row?.issued ?? p.issued ?? (file?.mtime ? phxDay(Date.parse(file.mtime)) : null);
   const status = row?.status ?? "open";
   const daysLeft = due ? dayDiff(due, today) : null;
-  const state = status === "paid" ? "paid" : status === "void" ? "void"
+  const stripe = row?.stripe_status ?? null;
+  const state = status === "paid" ? "paid" : status === "void" ? "void" : stripe === "processing" ? "processing"
     : daysLeft == null ? "due" : daysLeft < 0 ? "overdue" : daysLeft <= 7 ? "due_soon" : "due";
   const fee = amount != null && status === "open" ? cardFeeCents(amount, pay) : 0;
   return {
     file: name, path, size: file?.size ?? null, onFile: !!file,
     number: row?.number ?? p.number, amount, due, issued, description: row?.description ?? p.description,
-    payLink: row?.pay_link ?? null, status, state, daysLeft,
+    payLink: row?.pay_link ?? null, status, state, daysLeft, stripe,
     paidOn: row?.paid_on ?? null, paidMethod: row?.paid_method ?? null, paidNote: row?.paid_note ?? null,
     cardFee: fee, cardTotal: amount != null ? amount + fee : null,
     firstSeen: row?.first_seen ?? null, viewed: row?.first_viewed ? { by: row.first_viewed_by, at: row.first_viewed, last: row.last_viewed } : null,
@@ -3383,7 +3396,7 @@ function invoiceView(row: InvoiceRow | undefined, file: { name: string; size?: n
   };
 }
 type Invoice = ReturnType<typeof invoiceView>;
-const INVOICE_RANK: Record<string, number> = { overdue: 0, due_soon: 1, due: 2, paid: 3, void: 4 };
+const INVOICE_RANK: Record<string, number> = { overdue: 0, due_soon: 1, due: 2, processing: 2.5, paid: 3, void: 4 };
 function sortInvoices(list: Invoice[]) {
   return list.sort((a, b) => INVOICE_RANK[a.state] - INVOICE_RANK[b.state]
     || (a.status === "open" ? String(a.due ?? "9999").localeCompare(String(b.due ?? "9999")) : String(b.paidOn ?? b.issued ?? "").localeCompare(String(a.paidOn ?? a.issued ?? ""))));
@@ -3419,6 +3432,7 @@ async function loadInvoices(env: Env, user: User, c: Client, pay?: PaySettings) 
       open: open.length,
     },
     pay: { payableTo: pay.payableTo, address: pay.address, note: pay.note, cardFee: pay.cardFee, feePct: pay.feePct, feeFixedCents: pay.feeFixedCents, feeCapPct: pay.feeCapPct },
+    stripe: await stripeStatus(env, pay),
     contact: clientReplyTo(env) ?? null,
     macFolder: user.admin ? `${MAC_SHARE}/${c.folder}/${INVOICES_DIR}` : undefined,
   };
@@ -3447,12 +3461,24 @@ async function invoiceRoutes(env: Env, user: User, req: Request, url: URL, path:
         feePct: num(b.feePct, 0, 10, PAY_DEFAULTS.feePct),
         feeFixedCents: Math.round(num(b.feeFixedCents, 0, 500, PAY_DEFAULTS.feeFixedCents)),
         feeCapPct: num(b.feeCapPct, 0, 10, PAY_DEFAULTS.feeCapPct),
+        bankPay: b.bankPay === true,
       };
       await env.DB.prepare("INSERT INTO portal_settings (key, value, updated_by, updated_at) VALUES ('pay', ?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at")
         .bind(JSON.stringify(s), user.email, now()).run();
       return json(s);
     }
     throw new HttpError(405, "Method not allowed.");
+  }
+  if (path === "/api/admin/stripe" && method === "GET") {
+    if (!user.admin) throw new HttpError(403, "Admins only.");
+    const st = await stripeStatus(env, await loadPaySettings(env));
+    const hook = await stripeHook(env);
+    const last = await env.DB.prepare("SELECT value, updated_at FROM stripe_state WHERE key = 'last_event'").first<{ value: string; updated_at: number }>();
+    return json({ ...st, hookUrl: hook?.url ?? null, hookAt: hook?.at ?? null, lastEvent: last ? { type: last.value, at: last.updated_at } : null });
+  }
+  if (path === "/api/admin/stripe/connect" && method === "POST") {
+    if (!user.admin) throw new HttpError(403, "Admins only.");
+    return json(await connectStripe(env));
   }
   if (path === "/api/admin/invoices" && method === "GET") {
     if (!user.admin) throw new HttpError(403, "Admins only.");
@@ -3471,7 +3497,7 @@ async function invoiceRoutes(env: Env, user: User, req: Request, url: URL, path:
       settingsMissing: !pay.payableTo || !pay.address,
     });
   }
-  const m = path.match(/^\/api\/c\/([^/]+)\/invoices(?:\/(view|edit|status))?$/);
+  const m = path.match(/^\/api\/c\/([^/]+)\/invoices(?:\/(view|edit|status|checkout))?$/);
   if (!m) return null;
   const c = await requireClient(env, user, decodeURIComponent(m[1]));
   const sub = m[2];
@@ -3483,6 +3509,7 @@ async function invoiceRoutes(env: Env, user: User, req: Request, url: URL, path:
   const t = now();
   // Every write first makes sure the row exists (the file may not have been listed yet).
   const ensure = env.DB.prepare("INSERT OR IGNORE INTO invoices (client_slug, path, first_seen) VALUES (?, ?, ?)").bind(c.slug, p, t);
+  if (sub === "checkout") return json(await invoiceCheckout(env, user, c, file, b.how === "bank" ? "bank" : "card"));
   if (sub === "view") {
     if (!user.admin) {
       await env.DB.batch([ensure, env.DB.prepare(
@@ -3511,11 +3538,167 @@ async function invoiceRoutes(env: Env, user: User, req: Request, url: URL, path:
     const paidOn = st === "paid" ? (DAY_RE.test(String(b.paidOn ?? "")) ? String(b.paidOn) : phxDay()) : null;
     const meth = st === "paid" ? (PAY_METHODS.includes(String(b.method ?? "")) ? String(b.method) : "other") : null;
     await env.DB.batch([ensure, env.DB.prepare(
-      "UPDATE invoices SET status = ?, paid_on = ?, paid_method = ?, paid_note = ?, updated_by = ?, updated_at = ? WHERE client_slug = ? AND path = ?",
-    ).bind(st, paidOn, meth, st === "open" ? null : String(b.note ?? "").trim().slice(0, 300) || null, user.email, t, c.slug, p)]);
+      "UPDATE invoices SET status = ?, paid_on = ?, paid_method = ?, paid_note = ?, stripe_status = CASE WHEN ? = 'open' THEN NULL ELSE stripe_status END, updated_by = ?, updated_at = ? WHERE client_slug = ? AND path = ?",
+    ).bind(st, paidOn, meth, st === "open" ? null : String(b.note ?? "").trim().slice(0, 300) || null, st, user.email, t, c.slug, p)]);
     return json({ ok: true });
   }
   throw new HttpError(405, "Method not allowed.");
+}
+
+// ---------------------------------------------------------------------------
+// Stripe. With the STRIPE_SECRET_KEY secret set and "Connect Stripe" pressed once (which makes the
+// webhook endpoint and keeps its signing secret in `stripe_state`), a client's "Pay by card" or
+// "Pay from your bank account" creates a Stripe Checkout for that invoice on the spot (the card fee
+// as its own line), and Stripe's webhook marks the invoice paid. Nothing to do in Stripe per invoice.
+// ---------------------------------------------------------------------------
+
+const STRIPE_EVENTS = ["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed", "checkout.session.expired"];
+const stripeMode = (key: string) => (/_live_/.test(key) ? "live" : "test");
+const portalBase = (env: Env) => (env.PORTAL_URL || "https://clients.genvyd.com").replace(/\/+$/, "");
+
+/** Form-encodes nested params the way Stripe expects: a[b][0][c]=x. */
+function stripeForm(obj: Record<string, unknown>, prefix = "", out = new URLSearchParams()) {
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null) continue;
+    const key = prefix ? `${prefix}[${k}]` : k;
+    if (typeof v === "object") stripeForm(v as Record<string, unknown>, key, out);
+    else out.append(key, String(v));
+  }
+  return out;
+}
+
+async function stripeApi(env: Env, method: "GET" | "POST" | "DELETE", path: string, params?: Record<string, unknown>) {
+  if (!env.STRIPE_SECRET_KEY) throw new HttpError(503, "Stripe is not set up yet (the STRIPE_SECRET_KEY secret is missing).");
+  // A different API address is only allowed for local testing (no Access team domain set).
+  const base = (!env.TEAM_DOMAIN && env.STRIPE_API_BASE) ? env.STRIPE_API_BASE.replace(/\/+$/, "") : "https://api.stripe.com";
+  const res = await fetch(base + path, {
+    method,
+    headers: { authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "content-type": "application/x-www-form-urlencoded", "stripe-version": "2024-06-20" },
+    body: params && method !== "GET" ? stripeForm(params).toString() : undefined,
+  });
+  const data = await res.json().catch(() => ({})) as Record<string, any>;
+  if (!res.ok) throw new HttpError(502, `Stripe said: ${data?.error?.message || res.status}`);
+  return data;
+}
+
+type StripeHook = { id: string; secret: string; mode: string; url: string; at: number };
+async function stripeHook(env: Env): Promise<StripeHook | null> {
+  const r = await env.DB.prepare("SELECT value FROM stripe_state WHERE key = 'hook'").first<{ value: string }>();
+  try { return r ? JSON.parse(r.value) : null; } catch { return null; }
+}
+
+/** What the pages need to know: can clients pay through Stripe right now, and how. */
+async function stripeStatus(env: Env, pay: PaySettings) {
+  const key = env.STRIPE_SECRET_KEY || "";
+  const hook = key ? await stripeHook(env) : null;
+  const ready = !!key && !!hook && hook.mode === stripeMode(key);
+  return { keySet: !!key, mode: key ? stripeMode(key) : null, connected: ready, hookMode: hook?.mode ?? null, card: ready, bank: ready && pay.bankPay };
+}
+
+async function connectStripe(env: Env) {
+  const key = env.STRIPE_SECRET_KEY || "";
+  if (!key) throw new HttpError(400, "Add the STRIPE_SECRET_KEY secret in Cloudflare first.");
+  const old = await stripeHook(env);
+  if (old) { try { await stripeApi(env, "DELETE", `/v1/webhook_endpoints/${encodeURIComponent(old.id)}`); } catch { /* made with another key, or already gone */ } }
+  const url = `${portalBase(env)}/api/stripe/webhook`;
+  const ep = await stripeApi(env, "POST", "/v1/webhook_endpoints", {
+    url, enabled_events: STRIPE_EVENTS, description: "Genvyd client portal invoices (made by clients.genvyd.com)", metadata: { app: "genvyd-clients" },
+  });
+  if (!ep.secret) throw new HttpError(502, "Stripe did not return the webhook signing secret.");
+  const hook: StripeHook = { id: ep.id, secret: ep.secret, mode: stripeMode(key), url, at: now() };
+  await env.DB.prepare("INSERT INTO stripe_state (key, value, updated_at) VALUES ('hook', ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+    .bind(JSON.stringify(hook), now()).run();
+  return { ok: true, mode: hook.mode, url };
+}
+
+/** Makes a Stripe Checkout for one invoice and returns its address. */
+async function invoiceCheckout(env: Env, user: User, c: Client, file: string, how: "card" | "bank") {
+  const pay = await loadPaySettings(env);
+  const st = await stripeStatus(env, pay);
+  if (!st.connected) throw new HttpError(503, "Card payment is not switched on yet. Please pay by check, or ask Genvyd.");
+  if (how === "bank" && !st.bank) throw new HttpError(400, "Bank payment is not offered.");
+  const inv = (await loadInvoices(env, user, c, pay)).invoices.find((i) => i.file === file);
+  if (!inv) throw new HttpError(404, "That invoice is not there any more.");
+  if (inv.status !== "open") throw new HttpError(409, inv.status === "paid" ? "This invoice is already paid." : "This invoice was cancelled.");
+  if (inv.stripe === "processing") throw new HttpError(409, "A bank payment for this invoice is already on its way.");
+  if (inv.amount == null || inv.amount < 50) throw new HttpError(400, "This invoice has no amount yet. Please ask Genvyd.");
+  // Close any earlier checkout for this invoice that was never finished, so it can't be paid twice.
+  const prev = await env.DB.prepare("SELECT stripe_session FROM invoices WHERE client_slug = ? AND path = ?").bind(c.slug, inv.path).first<{ stripe_session: string | null }>();
+  if (prev?.stripe_session) {
+    try {
+      const s = await stripeApi(env, "GET", `/v1/checkout/sessions/${encodeURIComponent(prev.stripe_session)}`);
+      if (s.status === "complete") throw new HttpError(409, "This invoice was just paid. It can take a minute to show.");
+      if (s.status === "open") await stripeApi(env, "POST", `/v1/checkout/sessions/${encodeURIComponent(prev.stripe_session)}/expire`);
+    } catch (err) { if (err instanceof HttpError && err.status === 409) throw err; }
+  }
+  const title = inv.number ? `Invoice ${inv.number}` : inv.file.replace(INVOICE_FILE, "");
+  const fee = how === "card" ? inv.cardFee : 0;
+  const meta = { client_slug: c.slug, path: inv.path, app: "genvyd-clients" };
+  const back = `${portalBase(env)}/#/c/${encodeURIComponent(c.slug)}/invoices`;
+  const items: Record<string, unknown>[] = [{ quantity: 1, price_data: { currency: "usd", unit_amount: inv.amount, product_data: { name: `${title} · ${c.name}`, ...(inv.description ? { description: inv.description.slice(0, 200) } : {}) } } }];
+  if (fee > 0) items.push({ quantity: 1, price_data: { currency: "usd", unit_amount: fee, product_data: { name: "Card service fee", description: "Covers the card processor's charge. Paying by check or bank transfer has no fee." } } });
+  const s = await stripeApi(env, "POST", "/v1/checkout/sessions", {
+    mode: "payment",
+    line_items: items,
+    payment_method_types: [how === "card" ? "card" : "us_bank_account"],
+    ...(user.admin ? {} : { customer_email: user.email }),
+    client_reference_id: `${c.slug}:${inv.number ?? ""}`.slice(0, 200),
+    metadata: meta,
+    payment_intent_data: { description: `${title} · ${c.name}`, metadata: meta },
+    success_url: `${portalBase(env)}/?paid=${how}#/c/${encodeURIComponent(c.slug)}/invoices`,
+    cancel_url: back,
+  });
+  await env.DB.prepare("UPDATE invoices SET stripe_session = ? WHERE client_slug = ? AND path = ?").bind(s.id, c.slug, inv.path).run();
+  return { url: s.url as string };
+}
+
+/** Checks the Stripe-Signature header (HMAC-SHA256 of "t.body", 5 minute window). */
+async function verifyStripe(secret: string, header: string, body: string) {
+  const parts = Object.fromEntries(header.split(",").map((p) => p.split("=")).filter((x) => x.length === 2).map(([k, v]) => [k, v])) as Record<string, string>;
+  const sigs = header.split(",").filter((p) => p.startsWith("v1=")).map((p) => p.slice(3));
+  const t = Number(parts.t);
+  if (!t || !sigs.length || Math.abs(Date.now() / 1000 - t) > 300) return false;
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = [...new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(`${t}.${body}`)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return sigs.some((s) => s.length === mac.length && timingSafeEqualHex(s, mac));
+}
+function timingSafeEqualHex(a: string, b: string) { let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i); return d === 0; }
+
+/** Stripe's webhook. No Cloudflare Access login here (Access bypass on this one path): the signature is the check. */
+async function stripeWebhook(req: Request, env: Env): Promise<Response> {
+  const hook = await stripeHook(env);
+  const body = await req.text();
+  if (!hook || !(await verifyStripe(hook.secret, req.headers.get("stripe-signature") || "", body))) return json({ error: "Bad signature." }, 400);
+  const ev = JSON.parse(body) as { type: string; data: { object: Record<string, any> } };
+  await env.DB.prepare("INSERT INTO stripe_state (key, value, updated_at) VALUES ('last_event', ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+    .bind(String(ev.type || ""), now()).run();
+  const s = ev.data?.object || {};
+  const slug = String(s.metadata?.client_slug || ""), path = String(s.metadata?.path || "");
+  if (s.metadata?.app !== "genvyd-clients" || !slug || !path.startsWith(INVOICES_DIR + "/")) return json({ ok: true, ignored: true });
+  const row = await env.DB.prepare("SELECT * FROM invoices WHERE client_slug = ? AND path = ?").bind(slug, path).first<InvoiceRow>();
+  if (!row) return json({ ok: true, ignored: true });
+  const how = (s.payment_method_types || []).includes("us_bank_account") ? "bank transfer" : "card";
+  const who = String(s.customer_details?.email || s.customer_email || "stripe@portal").toLowerCase();
+  const amount = typeof s.amount_total === "number" ? s.amount_total : null;
+  const num = row.number ?? parseInvoiceName(path.split("/").pop() || path).number;
+  const title = num ? `Invoice ${num}` : (path.split("/").pop() || path).replace(INVOICE_FILE, "");
+  const t = now();
+  const paid = async () => {
+    const r = await env.DB.prepare(
+      "UPDATE invoices SET status = 'paid', paid_on = ?, paid_method = ?, paid_note = ?, stripe_status = 'paid', stripe_payment = ?, updated_by = 'stripe', updated_at = ? WHERE client_slug = ? AND path = ? AND status = 'open'",
+    ).bind(phxDay(t), how, `Paid through Stripe${amount != null ? `, ${money(amount)} total` : ""}`, String(s.payment_intent || s.id), t, slug, path).run();
+    if (r.meta.changes) await logActivity(env, slug, path, who, "invoice_paid", `${title}, ${amount != null ? money(amount) : ""} by ${how}`);
+  };
+  if (ev.type === "checkout.session.completed") {
+    if (s.payment_status === "paid") await paid();
+    else await env.DB.prepare("UPDATE invoices SET stripe_status = 'processing', stripe_payment = ? WHERE client_slug = ? AND path = ? AND status = 'open'").bind(String(s.payment_intent || s.id), slug, path).run();
+  } else if (ev.type === "checkout.session.async_payment_succeeded") {
+    await paid();
+  } else if (ev.type === "checkout.session.async_payment_failed") {
+    const r = await env.DB.prepare("UPDATE invoices SET stripe_status = 'failed' WHERE client_slug = ? AND path = ? AND status = 'open'").bind(slug, path).run();
+    if (r.meta.changes) await logActivity(env, slug, path, who, "invoice_failed", `${title}: the bank payment did not go through`);
+  }
+  return json({ ok: true });
 }
 
 export default {
